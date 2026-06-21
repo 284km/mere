@@ -6160,6 +6160,20 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 25.12: closure-call arrow_ty fallback from current_var_types
+     for polymorphic callback dispatch (word_freq). *)
+  check "§25.12: LLVM closure call recovers concrete arrow from arg's var binding"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let rec list_iter = fn xs -> fn f ->\n\
+          match xs with\n\
+          | Nil -> ()\n\
+          | Cons (h, t) -> { f h; list_iter t f } in\n\
+        let _ = list_iter (Cons (1, Cons (2, Nil))) (fn x -> print (show x)) in\n\
+        0") in
+     if String.length ll > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 25.11: LLVM prints "()" for unit main_ty to match interp. *)
   check "§25.11: LLVM emits @.fmt_unit and printf for unit main"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyUnit (typed_prog

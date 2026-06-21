@@ -2995,18 +2995,40 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | Some t -> Ast.walk t
          | None -> unsupported f.Ast.loc "closure call: missing fn type")
     in
-    (* Phase 25.10: if arrow_ty still has free tyvars, try to recover
-       concrete types from arg.ty and e.ty (the surrounding context).
-       This helps when poly fn calls leave tyvars in the head's .ty. *)
+    (* Phase 25.10/25.12: if arrow_ty still has free tyvars, try to recover
+       concrete types from arg.ty / e.ty / current_var_types. Useful when
+       a polymorphic callback (e.g., the f in `list_iter xs f`) leaves the
+       App-result tyvar unconstrained. *)
     let arrow_ty =
       if ty_is_concrete arrow_ty then arrow_ty
-      else
-        match arg.Ast.ty, e.Ast.ty with
-        | Some pt, Some rt when ty_is_concrete (Ast.walk pt) && ty_is_concrete (Ast.walk rt) ->
-          let target = Ast.TyArrow (Ast.walk pt, Ast.walk rt) in
-          (try Typer.unify Loc.dummy arrow_ty target with _ -> ());
+      else begin
+        (match arg.Ast.ty, e.Ast.ty with
+         | Some pt, Some rt when ty_is_concrete (Ast.walk pt) && ty_is_concrete (Ast.walk rt) ->
+           let target = Ast.TyArrow (Ast.walk pt, Ast.walk rt) in
+           (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
+         | _ -> ());
+        let walked = Ast.walk arrow_ty in
+        if ty_is_concrete walked then walked
+        else begin
+          (* Fall back to arg's concrete binding from current_var_types if arg
+             is a Var. This handles `list_iter t f` inside list_iter's body
+             where f is a captured var with concrete (str -> unit) type. *)
+          let arg_concrete =
+            match arg.Ast.node with
+            | Ast.Var n ->
+              (match List.assoc_opt n !current_var_types with
+               | Some t when ty_is_concrete (Ast.walk t) -> Some (Ast.walk t)
+               | _ -> None)
+            | _ -> None
+          in
+          (match arg_concrete, e.Ast.ty with
+           | Some pt, Some rt when ty_is_concrete (Ast.walk rt) ->
+             let target = Ast.TyArrow (pt, Ast.walk rt) in
+             (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
+           | _ -> ());
           Ast.walk arrow_ty
-        | _ -> arrow_ty
+        end
+      end
     in
     let cname =
       match arrow_ty with
@@ -3018,10 +3040,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> llvm_ty_of t
       | None -> "i32"
     in
+    (* Phase 25.12: derive arg_ty from arrow_ty's p (which we just fixed
+       up) instead of arg.Ast.ty directly. arg.Ast.ty might still be a
+       free TyVar even though arrow_ty's p is concrete. *)
     let arg_ty =
-      match arg.Ast.ty with
-      | Some t -> llvm_ty_of t
-      | None -> "i32"
+      match arrow_ty with
+      | Ast.TyArrow (p, _) when ty_is_concrete (Ast.walk p) -> llvm_ty_of (Ast.walk p)
+      | _ ->
+        (match arg.Ast.ty with
+         | Some t -> llvm_ty_of t
+         | None -> "i32")
     in
     let cv = emit_expr env f in
     let av = emit_expr env arg in
