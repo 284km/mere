@@ -6369,6 +6369,27 @@ let () =
      in
      if has "__lifted_go_" then "ok" else "no-lift")
     "ok";
+  (* Phase 30.2 (DEFERRED §1.10 fix, C only): top-level 非-fn let が
+     top-level fn body 内から参照されると C codegen が global として宣言。
+     LLVM / Wasm はまだ別経路で "unbound variable" を投げる. *)
+  check "§30.2: C codegen — top-level let referenced in fn body becomes global"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let total = 42;\n\
+        let check = fn (n: int) -> total + n;\n\
+        check 100") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "static int total;" && has "total = 42;" then "globalized"
+     else "not-globalized")
+    "globalized";
+
   (* Phase 30.1 (DEFERRED §1.11 fix): closure 内で captured 名を let で
      shadow する時、body 内の Var 参照は env access ではなく local を見る。
      C codegen の emit を直接検査: tuple destructure 後の recursive call が

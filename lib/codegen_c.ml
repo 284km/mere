@@ -45,6 +45,11 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 30.2 (DEFERRED §1.10 fix): top-level 非-fn let value 名を file-scope
+   C global として宣言、main 開始時に初期化。emit_expr Var "name" は通常の
+   c_safe_name に fall through し、file-scope global を参照する。 *)
+let top_globals : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 23.3: poly fns that need per-instantiation specialization.
    Key = fn name (e.g., "rev_aux"). Value = list of distinct concrete
    arrow types observed at use sites. Each entry causes resolve_fn_types
@@ -4035,6 +4040,45 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   resolve_vec_let_types main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
+  (* Phase 30.2 (DEFERRED §1.10 fix): extract top-level non-fn `let X = E`
+     bindings from the post-lift body and emit as file-scope C globals,
+     initialized at main start, so top-level fn bodies can reference them.
+     Only lets whose name appears in some skel's free_vars get globalized,
+     otherwise they stay as __let_tmp_X in main (preserving existing
+     behavior for programs that don't need globals). *)
+  let fvs_used_in_skels =
+    List.fold_left (fun acc s ->
+      let fvs = free_vars s.sbody [s.sparam] in
+      List.sort_uniq compare (fvs @ acc))
+      [] skels
+  in
+  let needs_global name = List.mem name fvs_used_in_skels in
+  let top_globals_list, body_expr =
+    let rec go e =
+      match e.Ast.node with
+      | Ast.Let (pat, value, rest) ->
+        (match pat.Ast.pnode with
+         | Ast.P_var name when needs_global name ->
+           (match value.Ast.node with
+            | Ast.Fun _ ->
+              (* Shouldn't happen after lift_fn_skels, but be defensive. *)
+              let gs, rest' = go rest in
+              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
+            | _ ->
+              let ty = match value.Ast.ty with
+                | Some t -> Ast.walk t | None -> Ast.TyInt
+              in
+              let gs, rest' = go rest in
+              (name, value, ty) :: gs, rest')
+         | _ ->
+           let gs, rest' = go rest in
+           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
+      | _ -> [], e
+    in
+    go body_expr
+  in
+  Hashtbl.reset top_globals;
+  List.iter (fun (n, _, _) -> Hashtbl.add top_globals n ()) top_globals_list;
   (* Phase 24.2: dedup skels by name keeping the LAST occurrence — this
      handles shadowing (e.g., user defines `let rec list_iter = ...` that
      shadows the prelude's `list_iter`). Without dedup, both end up in
@@ -4287,6 +4331,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     end
   in
   drain ();
+  (* Phase 30.2: emit init code for top-level globals BEFORE main_body.
+     Each `let X = E` becomes `X = <emit E>;` at main start. emit_expr is
+     called here because it may push closure adapters / register types. *)
+  let top_global_inits =
+    List.map (fun (name, value_expr, _) ->
+      let init_c = emit_expr value_expr in
+      Printf.sprintf "  %s = %s;" (c_safe_name name) init_c)
+      top_globals_list
+  in
+  let top_global_decls =
+    List.map (fun (name, _, ty) ->
+      Printf.sprintf "static %s %s;" (c_type_of ty) (c_safe_name name))
+      top_globals_list
+  in
   let main_body = emit_expr body_expr in
   (* Phase 15.5: main_body may contain anonymous `Fun` nodes that push
      additional closure adapters onto pending_closures (e.g.,
@@ -4428,9 +4486,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        emit after mono variant bodies (= list_str). *)
     @ (if !str_split_used || !str_join_used then [str_list_helpers; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
+    @ (if top_global_decls = [] then []
+       else "/* Phase 30.2: top-level non-fn let values as file-scope globals */"
+            :: top_global_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
         "  __lang_region_init(&__lang_default_region, 1 << 22);";
+        (if top_global_inits = [] then ""
+         else String.concat "\n" top_global_inits);
         main_stmt;
         (* Phase 15.8: free all OwnedVec allocations registered during run. *)
         (if Hashtbl.length owned_vec_instances > 0
