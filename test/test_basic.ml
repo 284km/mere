@@ -6223,6 +6223,36 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 27.2: Wasm main_ty で `()` を print し、auto-print のため
+     show_<main_ty> を強制登録。runtime 実行 (Node.js host harness) で
+     interp と PERFECT 一致するように。 *)
+  check "§27.2: Wasm main_ty=int auto-prints via show_int + puts"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let _ = print \"hi\" in 42") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$show_int" && has "call $show_int" then "ok" else "missing")
+    "ok";
+  check "§27.2: Wasm main_ty=unit prints \"()\""
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyUnit (typed_prog
+       "print \"hi\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "drop" && has "call $puts" then "ok" else "missing")
+    "ok";
+
   (* Phase 27.1: interp Map iter order を insertion order に固定。
      C / LLVM / Wasm の Map runtime (parallel arrays) と揃えて、全 backend
      で word_freq / mini_shell が PERFECT 一致するように。 *)

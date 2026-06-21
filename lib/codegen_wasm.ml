@@ -3875,6 +3875,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     )
   in
   collect_show_types main_expr fns;
+  (* Phase 27.2: register show_<main_ty> so the auto-print at end of main
+     has the right helper available. *)
+  add_show_type main_ty;
   (* Phase 26.3: lift inner fns to top-level. Must run BEFORE emit_fn_def.
      Phase 26.4: include multi-inst base names so inner free_var analysis
      treats them as known toplevels (not captured). Call sites get
@@ -3903,6 +3906,36 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Reset counters for the main body. *)
   reset ();
   emit_expr body_expr;
+  (* Phase 27.2: print main's result to stdout via $puts so wasm runtime
+     output matches interp's `Pipeline.process s |> print_endline`. The
+     stack-top has body's i32 result; pipe through show_<tag> if needed,
+     then puts. Unit main: drop result, call puts on "()" literal. *)
+  let main_ty_walked = Ast.walk main_ty in
+  (match main_ty_walked with
+   | Ast.TyInt ->
+     emit_instr "call $show_int";
+     emit_instr "call $puts";
+     emit_instr "i32.const 0"
+   | Ast.TyBool ->
+     emit_instr "call $show_bool";
+     emit_instr "call $puts";
+     emit_instr "i32.const 0"
+   | Ast.TyStr ->
+     (* show_str wraps in quotes; here we want raw print of the main expr,
+        but interp's Eval.to_string for V_str wraps in quotes too. *)
+     emit_instr "call $show_str";
+     emit_instr "call $puts";
+     emit_instr "i32.const 0"
+   | Ast.TyUnit ->
+     emit_instr "drop";
+     let unit_off = intern_show_str "()" in
+     emit_instr (Printf.sprintf "i32.const %d" unit_off);
+     emit_instr "call $puts";
+     emit_instr "i32.const 0"
+   | _ ->
+     (* Best-effort: drop body and return 0. *)
+     emit_instr "drop";
+     emit_instr "i32.const 0");
   let body_instrs = List.rev !instrs in
   let local_count = !local_counter in
   let local_decl =
