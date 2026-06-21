@@ -712,4 +712,251 @@ let _ = check "select-join-where"
 
 let _ = log.info "=== Phase 29.1 done ===";
 
+// === Executor (Phase 29.2) ===
+//   - Catalog: Map[str, table_meta]  (name → (id, schema))
+//   - Storage: OwnedVec[tagged_row]  (各 row に table_id を付与してフラット保持)
+//   - Executor: stmt → exec_result (state mutate)
+//
+//   N1 dogfood: storage は OwnedVec、CREATE/INSERT/SELECT を実行するたびに
+//   owned_vec_push されて伸びる。1 つの storage を全部の test で共有するので
+//   実害は「main 末まで残る」程度。複数 query 結果を OwnedVec で返すと N1
+//   signal が出る (Phase 29.3 で確認予定)。
+//
+//   N2 dogfood: catalog は scan 中に複数箇所から read される。 Mere は
+//   現状 borrow 細分化を Map 値の取得には強制していないので signal 弱め。
+
+type table_meta = TMeta of (int * col_decl list);
+
+// 行: (col_name, value) のリスト + 紐付く table_id
+type tagged_row = TRow of (int * (str * value) list);
+
+// 実行結果
+//   EAffected n  : INSERT 等で n 行影響
+//   ERows rs     : SELECT で返る行 (row = (str * value) list)
+//   EErr msg     : エラー
+type exec_result =
+  | EAffected of int
+  | ERows     of (str * value) list list
+  | EErr      of str;
+
+// === Catalog ops ===
+let new_catalog = fn () -> map_new ();
+
+let add_table_meta = fn cat -> fn (id: int) -> fn (name: str) -> fn (decls: col_decl list) ->
+  let _ = map_set cat name (TMeta (id, decls)) in
+  ();
+
+let get_meta = fn cat -> fn (name: str) ->
+  if map_has cat name then Some (map_get cat name) else None;
+
+// === Storage ops ===
+let new_storage = fn () -> owned_vec_new ();
+
+let store_row = fn storage -> fn (id: int) -> fn (row: (str * value) list) ->
+  let _ = owned_vec_push storage (TRow (id, row)) in
+  ();
+
+// scan_table: storage を i=0 から走査して table_id == id の行だけ抽出
+let rec scan_aux = fn storage -> fn (i: int) -> fn (id: int) -> fn (acc: (str * value) list list) ->
+  if i >= owned_vec_len storage then rev acc
+  else
+    match owned_vec_get storage i with
+    | TRow (rid, row) ->
+      if rid == id then scan_aux storage (i + 1) id (Cons (row, acc))
+      else scan_aux storage (i + 1) id acc;
+
+let scan_table = fn storage -> fn (id: int) -> scan_aux storage 0 id Nil;
+
+// === col_decl helpers ===
+let rec find_col_idx_aux = fn (decls: col_decl list) -> fn (name: str) -> fn (idx: int) ->
+  match decls with
+  | Nil -> -1
+  | Cons (CDecl (n, _), rest) ->
+    if n == name then idx else find_col_idx_aux rest name (idx + 1);
+
+let find_col_idx = fn (decls: col_decl list) -> fn (name: str) ->
+  find_col_idx_aux decls name 0;
+
+let rec build_row = fn (decls: col_decl list) -> fn (vals: value list) -> fn (acc: (str * value) list) ->
+  match decls with
+  | Nil -> rev acc
+  | Cons (CDecl (cname, _), rest_d) ->
+    (match vals with
+     | Nil -> rev acc  // arity mismatch、簡易処理
+     | Cons (v, rest_v) -> build_row rest_d rest_v (Cons ((cname, v), acc)));
+
+// === Row utilities ===
+let rec row_get = fn (row: (str * value) list) -> fn (col: str) ->
+  match row with
+  | Nil -> None
+  | Cons ((k, v), rest) -> if k == col then Some v else row_get rest col;
+
+// col_ref から row の値を取り出す
+let resolve_col = fn (cref: col_ref) -> fn (row: (str * value) list) ->
+  match cref with
+  | CName n         -> row_get row n
+  | CQual (_, n)    -> row_get row n;  // 単一テーブル時は qual を無視
+
+let eval_op = fn (op: oper) -> fn (a: value) -> fn (b: value) ->
+  match op with
+  | OEq -> value_eq a b
+  | OLt -> value_lt a b
+  | OGt -> value_gt a b;
+
+let eval_where_term = fn (wt: where_term) -> fn (row: (str * value) list) ->
+  match wt with
+  | WT (cref, op, v) ->
+    match resolve_col cref row with
+    | None -> false
+    | Some av -> eval_op op av v;
+
+let rec eval_where = fn (w: where_clause) -> fn (row: (str * value) list) ->
+  match w with
+  | WAll             -> true
+  | WOne wt          -> eval_where_term wt row
+  | WAnd (wt, rest)  ->
+    if eval_where_term wt row then eval_where rest row else false;
+
+let rec filter_rows = fn (rows: (str * value) list list) -> fn (w: where_clause) -> fn (acc: (str * value) list list) ->
+  match rows with
+  | Nil -> rev acc
+  | Cons (r, rest) ->
+    if eval_where w r then filter_rows rest w (Cons (r, acc))
+    else filter_rows rest w acc;
+
+let rec project_row = fn (cs: col_ref list) -> fn (row: (str * value) list) -> fn (acc: (str * value) list) ->
+  match cs with
+  | Nil -> rev acc
+  | Cons (c, rest) ->
+    let cn = match c with CName n -> n | CQual (_, n) -> n in
+    (match resolve_col c row with
+     | None    -> project_row rest row acc
+     | Some v  -> project_row rest row (Cons ((cn, v), acc)));
+
+let rec project = fn (rows: (str * value) list list) -> fn (cs: cols) -> fn (acc: (str * value) list list) ->
+  match rows with
+  | Nil -> rev acc
+  | Cons (r, rest) ->
+    let r2 =
+      match cs with
+      | CAll        -> r
+      | CList cols  -> project_row cols r Nil
+    in
+    project rest cs (Cons (r2, acc));
+
+// === Execute ===
+//   state は (catalog, storage, next_id_ref) のような形だが、Mere には ref が
+//   無いので next_id をパラメータで持ち回す。テスト用に「storage に push
+//   する時に table_id を catalog から引く」流れにする。
+
+let exec_create = fn cat -> fn (next_id: int) -> fn (name: str) -> fn (decls: col_decl list) ->
+  if map_has cat name then (next_id, EErr ("table already exists: " ++ name))
+  else
+    let _ = add_table_meta cat next_id name decls in
+    (next_id + 1, EAffected 0);
+
+let exec_insert = fn cat -> fn storage -> fn (name: str) -> fn (vals: value list) ->
+  match get_meta cat name with
+  | None -> EErr ("no such table: " ++ name)
+  | Some (TMeta (id, decls)) ->
+    let row = build_row decls vals Nil in
+    let _ = store_row storage id row in
+    EAffected 1;
+
+let exec_select_single = fn cat -> fn storage -> fn (cs: cols) -> fn (tbl: str) -> fn (w: where_clause) ->
+  match get_meta cat tbl with
+  | None -> EErr ("no such table: " ++ tbl)
+  | Some (TMeta (id, _)) ->
+    let rows = scan_table storage id in
+    let filtered = filter_rows rows w Nil in
+    let projected = project filtered cs Nil in
+    ERows projected;
+
+// 単一テーブル SELECT のみ (JOIN は Phase 29.3 で)
+let exec_stmt = fn cat -> fn storage -> fn (next_id: int) -> fn (st: stmt) ->
+  match st with
+  | SCreate (name, decls) -> exec_create cat next_id name decls
+  | SInsert (name, vals)  -> (next_id, exec_insert cat storage name vals)
+  | SSelect (cs, tbl, j, w) ->
+    match j with
+    | JNone        -> (next_id, exec_select_single cat storage cs tbl w)
+    | JOn (_, _, _) -> (next_id, EErr "JOIN not yet implemented (Phase 29.3)");
+
+// === Result show ===
+let rec show_row_aux = fn (row: (str * value) list) -> fn (acc: str) ->
+  match row with
+  | Nil -> acc
+  | Cons ((k, v), rest) ->
+    let sep = if acc == "" then "" else "," in
+    show_row_aux rest (acc ++ sep ++ k ++ "=" ++ show_value v);
+
+let show_row = fn (row: (str * value) list) -> "{" ++ show_row_aux row "" ++ "}";
+
+let rec show_rows_aux = fn (rs: (str * value) list list) -> fn (acc: str) ->
+  match rs with
+  | Nil -> acc
+  | Cons (r, rest) ->
+    let sep = if acc == "" then "" else ";" in
+    show_rows_aux rest (acc ++ sep ++ show_row r);
+
+let show_rows = fn (rs: (str * value) list list) -> show_rows_aux rs "";
+
+let show_result = fn (r: exec_result) ->
+  match r with
+  | EAffected n -> "affected:" ++ show n
+  | ERows rs    -> "rows:[" ++ show_rows rs ++ "]"
+  | EErr msg    -> "error:" ++ msg;
+
+// 単発実行 helper
+let run_stmt = fn (cat) -> fn (storage) -> fn (next_id: int) -> fn (src: str) ->
+  let st = parse_one src in
+  let (nid2, r) = exec_stmt cat storage next_id st in
+  (nid2, show_result r);
+
+// === Phase 29.2 self-tests: executor (single-table) ===
+let _ = log.info "=== executor tests ===";
+
+let cat1 = new_catalog ();
+let st1  = new_storage ();
+
+// 全テストは 1 つの let-in chain。各 step で (next_id, result_str) を更新。
+let _ =
+  let (nid_a, r_a) = run_stmt cat1 st1 1 "CREATE TABLE u (id int, name str)" in
+  let _ = check "exec-create" r_a "affected:0" in
+  let (nid_b, r_b) = run_stmt cat1 st1 nid_a "INSERT INTO u VALUES (1, 'Alice')" in
+  let _ = check "exec-insert-1" r_b "affected:1" in
+  let (nid_c, r_c) = run_stmt cat1 st1 nid_b "INSERT INTO u VALUES (2, 'Bob')" in
+  let _ = check "exec-insert-2" r_c "affected:1" in
+  let (nid_d, r_d) = run_stmt cat1 st1 nid_c "SELECT * FROM u" in
+  let _ = check "exec-select-all" r_d "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  let (nid_e, r_e) = run_stmt cat1 st1 nid_d "SELECT name FROM u" in
+  let _ = check "exec-select-project" r_e "rows:[{name='Alice'};{name='Bob'}]" in
+  let (nid_f, r_f) = run_stmt cat1 st1 nid_e "SELECT * FROM u WHERE id = 1" in
+  let _ = check "exec-select-where-eq" r_f "rows:[{id=1,name='Alice'}]" in
+  let (nid_g, r_g) = run_stmt cat1 st1 nid_f "SELECT name FROM u WHERE id < 2" in
+  let _ = check "exec-select-where-lt" r_g "rows:[{name='Alice'}]" in
+  let (nid_h, r_h) = run_stmt cat1 st1 nid_g "SELECT * FROM u WHERE name = 'Bob'" in
+  let _ = check "exec-select-where-str" r_h "rows:[{id=2,name='Bob'}]" in
+  let (nid_i, r_i) = run_stmt cat1 st1 nid_h "SELECT * FROM unknown" in
+  let _ = check "exec-select-no-table" r_i "error:no such table: unknown" in
+  let (nid_j, r_j) = run_stmt cat1 st1 nid_i "INSERT INTO ghost VALUES (1)" in
+  let _ = check "exec-insert-no-table" r_j "error:no such table: ghost" in
+  let (nid_k, r_k) = run_stmt cat1 st1 nid_j "CREATE TABLE u (a int)" in
+  let _ = check "exec-create-dup" r_k "error:table already exists: u" in
+  let (nid_l, r_l) = run_stmt cat1 st1 nid_k "CREATE TABLE o (uid int, total int)" in
+  let _ = check "exec-create-2" r_l "affected:0" in
+  let (nid_m, r_m) = run_stmt cat1 st1 nid_l "INSERT INTO o VALUES (1, 100)" in
+  let _ = check "exec-insert-mix-1" r_m "affected:1" in
+  let (nid_n, r_n) = run_stmt cat1 st1 nid_m "INSERT INTO o VALUES (2, 200)" in
+  let _ = check "exec-insert-mix-2" r_n "affected:1" in
+  let (nid_o, r_o) = run_stmt cat1 st1 nid_n "SELECT * FROM o" in
+  let _ = check "exec-select-o" r_o "rows:[{uid=1,total=100};{uid=2,total=200}]" in
+  let (nid_p, r_p) = run_stmt cat1 st1 nid_o "SELECT * FROM u" in
+  let _ = check "exec-select-u-after-mix" r_p "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  let (nid_q, r_q) = run_stmt cat1 st1 nid_p "SELECT * FROM u WHERE id > 0 AND id < 10" in
+  let _ = check "exec-select-where-and" r_q "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  ();
+
+let _ = log.info "=== Phase 29.2 done ===";
+
 0
