@@ -1,0 +1,350 @@
+// toy_sql.mere — Mere dogfood: 簡易 SQL engine (toy ORM)
+//
+// 目的: B1 paper trial (39_nll_linear_design.md) の dogfood 例題。
+//   1000+ LoC の realistic application を書いて N1 (OwnedVec 自動 Drop) /
+//   N2 (NLL borrow) / N3 (Linear types) の需要を観測する。
+//
+// スコープ:
+//   - CREATE TABLE name (col1 type, col2 type, ...)
+//   - INSERT INTO name VALUES (v1, v2, ...)
+//   - SELECT cols FROM table [WHERE col op val]
+//   - SELECT cols FROM t1 JOIN t2 ON t1.col = t2.col
+//   - 値の型: int / str のみ
+//   - 比較演算: = / < / >
+//
+// 段階:
+//   Phase 29.0 (この slice): 共通型 + Value + Token + Tokenizer + 基本 self-test
+//   Phase 29.1: SQL parser (AST 構築)
+//   Phase 29.2: Catalog + storage + executor (INSERT / SELECT)
+//   Phase 29.3: JOIN + 包括 self-tests + N1/N2/N3 dogfood 報告
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/toy_sql.mere
+
+// === Common types ===
+type 'a list = Nil | Cons of 'a * 'a list;
+type 'a option = None | Some of 'a;
+type ('a, 'b) result = Ok of 'a | Err of 'b;
+
+// === SQL value / column type ===
+type value =
+  | VInt of int
+  | VStr of str;
+
+type col_type =
+  | TyInt
+  | TyStr;
+
+// 値表示 (debug / SELECT 出力)
+let show_value = fn (v: value) ->
+  match v with
+  | VInt n -> show n
+  | VStr s -> "'" ++ s ++ "'";
+
+// 等価比較
+let value_eq = fn (a: value) -> fn (b: value) ->
+  match a with
+  | VInt x ->
+    (match b with
+     | VInt y -> x == y
+     | VStr _ -> false)
+  | VStr x ->
+    (match b with
+     | VInt _ -> false
+     | VStr y -> x == y);
+
+// 小なり比較 (int のみ、str は false; Mere の `<` が int 専用なので)
+let value_lt = fn (a: value) -> fn (b: value) ->
+  match a with
+  | VInt x ->
+    (match b with
+     | VInt y -> x < y
+     | VStr _ -> false)
+  | VStr _ -> false;
+
+let value_gt = fn (a: value) -> fn (b: value) -> value_lt b a;
+
+let show_col_type = fn (t: col_type) ->
+  match t with
+  | TyInt -> "int"
+  | TyStr -> "str";
+
+// === Token types ===
+//   TIdent   : 識別子 (table / column 名)
+//   TIntLit  : 整数リテラル
+//   TStrLit  : 文字列リテラル
+//   TKW      : 予約語 (CREATE / TABLE / INSERT / INTO / VALUES /
+//              SELECT / FROM / WHERE / JOIN / ON / AND / OR)
+//   TStar    : '*'
+//   TComma   : ','
+//   TLparen  : '('
+//   TRparen  : ')'
+//   TEq      : '='
+//   TLt      : '<'
+//   TGt      : '>'
+//   TDot     : '.'      // t.col
+//   TSemi    : ';'
+//   TEnd     : end-of-input sentinel
+type tok =
+  | TIdent  of str
+  | TIntLit of int
+  | TStrLit of str
+  | TKW     of str
+  | TStar
+  | TComma
+  | TLparen
+  | TRparen
+  | TEq
+  | TLt
+  | TGt
+  | TDot
+  | TSemi
+  | TEnd;
+
+let show_tok = fn (t: tok) ->
+  match t with
+  | TIdent  s -> "Ident(" ++ s ++ ")"
+  | TIntLit n -> "Int(" ++ show n ++ ")"
+  | TStrLit s -> "Str('" ++ s ++ "')"
+  | TKW     k -> "KW(" ++ k ++ ")"
+  | TStar     -> "Star"
+  | TComma    -> "Comma"
+  | TLparen   -> "Lparen"
+  | TRparen   -> "Rparen"
+  | TEq       -> "Eq"
+  | TLt       -> "Lt"
+  | TGt       -> "Gt"
+  | TDot      -> "Dot"
+  | TSemi     -> "Semi"
+  | TEnd      -> "End";
+
+// === Char helpers ===
+let is_alpha = fn (c: str) ->
+  (c == "a" || c == "b" || c == "c" || c == "d" || c == "e" ||
+   c == "f" || c == "g" || c == "h" || c == "i" || c == "j" ||
+   c == "k" || c == "l" || c == "m" || c == "n" || c == "o" ||
+   c == "p" || c == "q" || c == "r" || c == "s" || c == "t" ||
+   c == "u" || c == "v" || c == "w" || c == "x" || c == "y" ||
+   c == "z" ||
+   c == "A" || c == "B" || c == "C" || c == "D" || c == "E" ||
+   c == "F" || c == "G" || c == "H" || c == "I" || c == "J" ||
+   c == "K" || c == "L" || c == "M" || c == "N" || c == "O" ||
+   c == "P" || c == "Q" || c == "R" || c == "S" || c == "T" ||
+   c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" ||
+   c == "Z" || c == "_");
+
+let is_alnum = fn (c: str) -> is_alpha c || is_digit c;
+
+let is_ws = fn (c: str) -> c == " " || c == "\t" || c == "\n";
+
+// 識別子を大文字化 (予約語チェック用に簡易対応)
+//   ASCII 範囲のみ。"select" → "SELECT", "Table" → "TABLE" 等。
+let to_upper_char = fn (c: str) ->
+  if c == "a" then "A" else if c == "b" then "B" else if c == "c" then "C"
+  else if c == "d" then "D" else if c == "e" then "E" else if c == "f" then "F"
+  else if c == "g" then "G" else if c == "h" then "H" else if c == "i" then "I"
+  else if c == "j" then "J" else if c == "k" then "K" else if c == "l" then "L"
+  else if c == "m" then "M" else if c == "n" then "N" else if c == "o" then "O"
+  else if c == "p" then "P" else if c == "q" then "Q" else if c == "r" then "R"
+  else if c == "s" then "S" else if c == "t" then "T" else if c == "u" then "U"
+  else if c == "v" then "V" else if c == "w" then "W" else if c == "x" then "X"
+  else if c == "y" then "Y" else if c == "z" then "Z" else c;
+
+let rec to_upper_aux = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
+  let n = str_len s in
+  if i >= n then acc
+  else to_upper_aux s (i + 1) (acc ++ to_upper_char (char_at s i));
+
+let to_upper = fn (s: str) -> to_upper_aux s 0 "";
+
+let is_keyword = fn (s: str) ->
+  let u = to_upper s in
+  u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
+  u == "VALUES" || u == "SELECT" || u == "FROM" || u == "WHERE" ||
+  u == "JOIN"   || u == "ON"     || u == "AND"  || u == "OR"   ||
+  u == "INT"    || u == "STR";
+
+// === Tokenizer ===
+//   tokenize : str -> tok list (TEnd で終端)
+//
+//   実装は char-by-char の手書き lexer。エラーは "stop on bad char" で
+//   サイレント (本来は Result を返すべき、dogfood の主目的は SQL 動作)。
+
+// 識別子を読む (位置 i から始まる)。返り値: (ident, end_pos)
+let rec read_ident_aux = fn (src: str) -> fn (i: int) -> fn (acc: str) ->
+  let n = str_len src in
+  if i >= n then (acc, i)
+  else
+    let c = char_at src i in
+    if is_alnum c then read_ident_aux src (i + 1) (acc ++ c)
+    else (acc, i);
+
+let read_ident = fn (src: str) -> fn (i: int) -> read_ident_aux src i "";
+
+// 整数を読む
+let rec read_int_aux = fn (src: str) -> fn (i: int) -> fn (acc: int) ->
+  let n = str_len src in
+  if i >= n then (acc, i)
+  else
+    let c = char_at src i in
+    if is_digit c then
+      let d = int_of_str c in
+      read_int_aux src (i + 1) (acc * 10 + d)
+    else (acc, i);
+
+let read_int = fn (src: str) -> fn (i: int) -> read_int_aux src i 0;
+
+// 文字列リテラルを読む (開きクオートの次から)。返り値: (s, pos_after_close)
+let rec read_str_aux = fn (src: str) -> fn (i: int) -> fn (acc: str) ->
+  let n = str_len src in
+  if i >= n then (acc, i)  // 閉じクオート無し: 強制終了
+  else
+    let c = char_at src i in
+    if c == "'" then (acc, i + 1)  // 閉じ ' を消費
+    else read_str_aux src (i + 1) (acc ++ c);
+
+let read_str_lit = fn (src: str) -> fn (i: int) -> read_str_aux src i "";
+
+let rec skip_ws = fn (src: str) -> fn (i: int) ->
+  let n = str_len src in
+  if i >= n then i
+  else if is_ws (char_at src i) then skip_ws src (i + 1)
+  else i;
+
+// メイン tokenize loop
+let rec tokenize_aux = fn (src: str) -> fn (i: int) -> fn (acc: tok list) ->
+  let i = skip_ws src i in
+  let n = str_len src in
+  if i >= n then Cons (TEnd, acc)
+  else
+    let c = char_at src i in
+    if c == "*" then tokenize_aux src (i + 1) (Cons (TStar,   acc))
+    else if c == "," then tokenize_aux src (i + 1) (Cons (TComma, acc))
+    else if c == "(" then tokenize_aux src (i + 1) (Cons (TLparen, acc))
+    else if c == ")" then tokenize_aux src (i + 1) (Cons (TRparen, acc))
+    else if c == "=" then tokenize_aux src (i + 1) (Cons (TEq, acc))
+    else if c == "<" then tokenize_aux src (i + 1) (Cons (TLt, acc))
+    else if c == ">" then tokenize_aux src (i + 1) (Cons (TGt, acc))
+    else if c == "." then tokenize_aux src (i + 1) (Cons (TDot, acc))
+    else if c == ";" then tokenize_aux src (i + 1) (Cons (TSemi, acc))
+    else if c == "'" then
+      let (s, j) = read_str_lit src (i + 1) in
+      tokenize_aux src j (Cons (TStrLit s, acc))
+    else if is_digit c then
+      let (n, j) = read_int src i in
+      tokenize_aux src j (Cons (TIntLit n, acc))
+    else if is_alpha c then
+      let (id, j) = read_ident src i in
+      let t = if is_keyword id then TKW (to_upper id) else TIdent id in
+      tokenize_aux src j (Cons (t, acc))
+    else
+      // 未知の文字はスキップ (本来エラー)
+      tokenize_aux src (i + 1) acc;
+
+// list 反転 helper
+let rec rev_aux = fn (xs: 'a list) -> fn (acc: 'a list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> rev_aux t (Cons (h, acc));
+
+let rev = fn (xs: 'a list) -> rev_aux xs Nil;
+
+let tokenize = fn (src: str) -> rev (tokenize_aux src 0 Nil);
+
+// === Self-test scaffolding ===
+//   N1/N2/N3 dogfood note: mk_metrics + nested lambda の組合せで C codegen
+//   の closure capture バグを踏んだので、counting は print に絞った
+//   (DEFERRED §1.10 候補)。Logger は単段使用なので問題なし。
+let log = mk_logger "toy_sql";
+
+let check = fn (label: str) -> fn (actual: str) -> fn (expected: str) ->
+  let mark = if actual == expected then "ok " else "FAIL" in
+  print (mark ++ " | " ++ label ++ " => " ++ actual ++
+         (if actual == expected then "" else " (expected: " ++ expected ++ ")"));
+
+// tok list を表示用 string に
+let rec show_toks_aux = fn (ts: tok list) -> fn (acc: str) ->
+  match ts with
+  | Nil -> acc
+  | Cons (t, rest) ->
+    let sep = if acc == "" then "" else " " in
+    show_toks_aux rest (acc ++ sep ++ show_tok t);
+
+let show_toks = fn (ts: tok list) -> show_toks_aux ts "";
+
+// === Phase 29.0 self-tests: tokenizer ===
+
+let _ = log.info "=== tokenizer tests ===";
+
+let _ = check "empty"
+  (show_toks (tokenize ""))
+  "End";
+
+let _ = check "single-ident"
+  (show_toks (tokenize "users"))
+  "Ident(users) End";
+
+let _ = check "select-star"
+  (show_toks (tokenize "SELECT * FROM users"))
+  "KW(SELECT) Star KW(FROM) Ident(users) End";
+
+let _ = check "select-cols"
+  (show_toks (tokenize "SELECT id, name FROM users"))
+  "KW(SELECT) Ident(id) Comma Ident(name) KW(FROM) Ident(users) End";
+
+let _ = check "where-int"
+  (show_toks (tokenize "SELECT * FROM users WHERE age = 30"))
+  "KW(SELECT) Star KW(FROM) Ident(users) KW(WHERE) Ident(age) Eq Int(30) End";
+
+let _ = check "where-str"
+  (show_toks (tokenize "SELECT * FROM users WHERE name = 'Alice'"))
+  "KW(SELECT) Star KW(FROM) Ident(users) KW(WHERE) Ident(name) Eq Str('Alice') End";
+
+let _ = check "create-table"
+  (show_toks (tokenize "CREATE TABLE t (id int, name str)"))
+  "KW(CREATE) KW(TABLE) Ident(t) Lparen Ident(id) KW(INT) Comma Ident(name) KW(STR) Rparen End";
+
+let _ = check "insert"
+  (show_toks (tokenize "INSERT INTO t VALUES (1, 'a')"))
+  "KW(INSERT) KW(INTO) Ident(t) KW(VALUES) Lparen Int(1) Comma Str('a') Rparen End";
+
+let _ = check "lowercase-keywords"
+  (show_toks (tokenize "select * from users"))
+  "KW(SELECT) Star KW(FROM) Ident(users) End";
+
+let _ = check "dot-access"
+  (show_toks (tokenize "u.name"))
+  "Ident(u) Dot Ident(name) End";
+
+let _ = check "join-on"
+  (show_toks (tokenize "SELECT * FROM a JOIN b ON a.id = b.id"))
+  "KW(SELECT) Star KW(FROM) Ident(a) KW(JOIN) Ident(b) KW(ON) Ident(a) Dot Ident(id) Eq Ident(b) Dot Ident(id) End";
+
+let _ = check "lt-gt"
+  (show_toks (tokenize "WHERE x < 10 AND y > 20"))
+  "KW(WHERE) Ident(x) Lt Int(10) KW(AND) Ident(y) Gt Int(20) End";
+
+let _ = check "semi"
+  (show_toks (tokenize "SELECT 1; SELECT 2;"))
+  "KW(SELECT) Int(1) Semi KW(SELECT) Int(2) Semi End";
+
+let _ = check "whitespace"
+  (show_toks (tokenize "  SELECT\t*\n FROM\tusers  "))
+  "KW(SELECT) Star KW(FROM) Ident(users) End";
+
+let _ = check "show-value-int" (show_value (VInt 42))      "42";
+let _ = check "show-value-str" (show_value (VStr "hello")) "'hello'";
+
+let _ = check "value-eq-true"  (show (value_eq (VInt 1) (VInt 1)))  "true";
+let _ = check "value-eq-false" (show (value_eq (VInt 1) (VInt 2)))  "false";
+let _ = check "value-eq-mixed" (show (value_eq (VInt 1) (VStr "1"))) "false";
+
+let _ = check "value-lt-int"   (show (value_lt (VInt 1) (VInt 2)))  "true";
+let _ = check "value-lt-str"   (show (value_lt (VStr "a") (VStr "b"))) "false";  // str 比較は非対応
+let _ = check "value-gt"       (show (value_gt (VInt 5) (VInt 3)))  "true";
+
+let _ = log.info "=== Phase 29.0 done ===";
+
+0
