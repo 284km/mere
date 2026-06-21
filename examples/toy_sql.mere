@@ -445,14 +445,14 @@ let parse_col_decls = fn (toks: tok list) ->
   parse_col_decls_rest toks Nil;
 
 let rec parse_values_rest = fn (toks: tok list) -> fn (acc: value list) ->
-  let (v, toks2) = parse_value_tok toks in
+  let (v, toks) = parse_value_tok toks in
   let acc2 = Cons (v, acc) in
-  match toks2 with
+  match toks with
   | Cons (TComma, rest) -> parse_values_rest rest acc2
   | Cons (TRparen, rest) -> (rev acc2, rest)
   | Cons (other, _) ->
-    let _ = parse_err "expected , or ) in VALUES" other in (rev acc2, toks2)
-  | Nil -> (rev acc2, toks2);
+    let _ = parse_err "expected , or ) in VALUES" other in (rev acc2, toks)
+  | Nil -> (rev acc2, toks);
 
 let parse_value_list = fn (toks: tok list) ->
   let toks = expect_tok TLparen "(" toks in
@@ -460,11 +460,11 @@ let parse_value_list = fn (toks: tok list) ->
 
 // SELECT cols: '*' or comma-separated col_ref
 let rec parse_cols_rest = fn (toks: tok list) -> fn (acc: col_ref list) ->
-  let (c, tt) = parse_col_ref_tok toks in
+  let (c, toks) = parse_col_ref_tok toks in
   let acc2 = Cons (c, acc) in
-  match tt with
+  match toks with
   | Cons (TComma, rest) -> parse_cols_rest rest acc2
-  | _ -> (rev acc2, tt);
+  | _ -> (rev acc2, toks);
 
 let parse_cols_tok = fn (toks: tok list) ->
   match toks with

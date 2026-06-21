@@ -724,16 +724,29 @@ let rec emit_expr (e : Ast.expr) : string =
           its own initializer"). Always use a 2-step form via a fresh
           temporary so the initializer references the OUTER `tasks` and
           the new binding shadows it only after the value has been
-          computed. *)
+          computed.
+
+          Phase 30.1 (DEFERRED §1.11 fix): the let binding shadows any
+          captured-var rewrite. value_c is emitted BEFORE we mask the
+          name (so `let xs = f xs` still resolves the RHS xs to env),
+          but body_c is emitted AFTER masking so `Var "xs"` in body
+          emits the local rebinding, not `__env_self->xs`. *)
        let value_c = emit_expr value in
        let bind_ty =
          match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
        in
-       let prev = !current_var_types in
-       current_var_types := (name, bind_ty) :: prev;
+       let prev_types = !current_var_types in
+       let prev_subst = !current_env_subst in
+       current_var_types := (name, bind_ty) :: prev_types;
+       current_env_subst := List.filter (fun (n, _) -> n <> name) prev_subst;
        let body_c =
-         try let r = emit_expr body in current_var_types := prev; r
-         with ex -> current_var_types := prev; raise ex
+         try let r = emit_expr body in
+             current_var_types := prev_types;
+             current_env_subst := prev_subst; r
+         with ex ->
+           current_var_types := prev_types;
+           current_env_subst := prev_subst;
+           raise ex
        in
        Printf.sprintf
          "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
@@ -777,14 +790,28 @@ let rec emit_expr (e : Ast.expr) : string =
              "nested pattern in let-tuple not supported in C codegen subset \
               — use `match` for non-flat destructuring"))
        ) ps in
-       let prev = !current_var_types in
+       (* Phase 30.1 (DEFERRED §1.11 fix): tuple destructure も同様に
+          env_subst から shadow 名を消す。`let (v, toks) = ... toks` で
+          新 toks が closure env の古い toks を覆い隠す。 *)
+       let shadow_names =
+         List.filter_map (fun (n_opt, _, _) -> n_opt) bindings_info
+       in
+       let prev_types = !current_var_types in
+       let prev_subst = !current_env_subst in
        current_var_types :=
          List.filter_map (fun (n_opt, ty, _) ->
            match n_opt with Some n -> Some (n, ty) | None -> None)
-           bindings_info @ prev;
+           bindings_info @ prev_types;
+       current_env_subst :=
+         List.filter (fun (n, _) -> not (List.mem n shadow_names)) prev_subst;
        let body_c =
-         try let r = emit_expr body in current_var_types := prev; r
-         with ex -> current_var_types := prev; raise ex
+         try let r = emit_expr body in
+             current_var_types := prev_types;
+             current_env_subst := prev_subst; r
+         with ex ->
+           current_var_types := prev_types;
+           current_env_subst := prev_subst;
+           raise ex
        in
        let bind_stmts =
          String.concat " " (List.filter_map (fun (n_opt, _, i) ->

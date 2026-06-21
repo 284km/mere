@@ -6369,6 +6369,45 @@ let () =
      in
      if has "__lifted_go_" then "ok" else "no-lift")
     "ok";
+  (* Phase 30.1 (DEFERRED §1.11 fix): closure 内で captured 名を let で
+     shadow する時、body 内の Var 参照は env access ではなく local を見る。
+     C codegen の emit を直接検査: tuple destructure 後の recursive call が
+     `__env_self->xs` ではなく local `xs` を使うことを確認。 *)
+  check "§30.1: C codegen — P_tuple rebind shadows captured env access"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        type tok = TInt of int | TEnd;\n\
+        let parse_head = fn (xs: tok list) ->\n\
+          match xs with\n\
+          | Nil -> (0, Nil)\n\
+          | Cons (TInt n, rest) -> (n, rest)\n\
+          | Cons (TEnd, rest) -> (0, rest);\n\
+        let rec sum_aux = fn (xs: tok list) -> fn (acc: int) ->\n\
+          match xs with\n\
+          | Nil -> acc\n\
+          | _ ->\n\
+            let (h, xs) = parse_head xs in\n\
+            sum_aux xs (acc + h);\n\
+        sum_aux (Cons (TInt 1, Cons (TInt 2, Cons (TInt 3, Nil)))) 0") in
+     (* anon closure body は `__let_tup` で destructure し、recursive call は
+        local `xs` を使うはず。`sum_aux((__env_self->xs))` は古い captured xs
+        への leak で bug を示す。 *)
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     (* bug 状態: closure body 内に sum_aux((__env_self->xs)) — env からの読み *)
+     (* 修正後: sum_aux(xs) — local rebinding を使う *)
+     if has "sum_aux((__env_self->xs))" then "env-leak"
+     else if has "sum_aux(xs)" then "local-shadow"
+     else "neither")
+    "local-shadow";
+
   (* Phase 30.0 (DEFERRED §1.12 fix): builtin の hardcoded dispatch を
      user-defined fn が shadow できることを検証。is_alpha が builtin だが
      user 定義があれば builtin 呼び出しを skip して user fn にディスパッチ。 *)
