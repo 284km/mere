@@ -115,6 +115,11 @@ let fail_used = ref false
 let substring_used = ref false
 let int_of_str_used = ref false
 let str_unescape_used = ref false
+(* Phase 26.5: stdlib catch-up — str_split / str_join / str_count / file I/O. *)
+let str_split_used = ref false
+let str_join_used = ref false
+let str_count_used = ref false
+let file_io_used = ref false
 
 (* Phase 15.10/15.14: Map[R, K, V] — Wasm では値が全部 i32 なので per-V
    は不要、per-K のみ。K の型を `map_key_types` に登録、emit_program で
@@ -449,18 +454,22 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
   List.iter (fun f -> walk_expr f.body) fns
 
 let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
+  (* Phase 26.5 (port of codegen_c Phase 24.4 / codegen_llvm Phase 25.9):
+     walk through ALL top-level Let chains so a non-Fun Let
+     (e.g., \`let path = "/tmp/x"\`) doesn't break the chain and block
+     subsequent \`let rec\` from being lifted. Fun-valued P_var Lets →
+     extract as skel + drop from body. Other Lets → keep in body + walk rest. *)
   let rec go (e : Ast.expr) =
     match e.Ast.node with
-    | Ast.Let (pat, value, rest)
-      when (match pat.Ast.pnode with Ast.P_var _ -> true | _ -> false) ->
-      (match value.Ast.node with
-       | Ast.Fun (param, _, fn_body) ->
-         let name =
-           match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false in
+    | Ast.Let (pat, value, rest) ->
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var name, Ast.Fun (param, _, fn_body) ->
          let more, rest' = go rest in
          { sname = name; sparam = param; sbody = fn_body; sfun = value }
          :: more, rest'
-       | _ -> [], e)
+       | _ ->
+         let more, rest' = go rest in
+         more, { e with Ast.node = Ast.Let (pat, value, rest') })
     | Ast.Let_rec (bindings, rest) ->
       let skels =
         List.map (fun (n, v) ->
@@ -1114,6 +1123,33 @@ let rec emit_expr (e : Ast.expr) : unit =
     str_unescape_used := true;
     emit_expr arg;
     emit_instr "call $__lang_str_unescape"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_split"; _ }, s_e); _ }, delim_e) ->
+    (* Phase 26.5: str_split — returns list_str (boxed Cons cells). *)
+    str_split_used := true;
+    emit_expr s_e;
+    emit_expr delim_e;
+    emit_instr "call $__lang_str_split"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep_e); _ }, xs_e) ->
+    (* Phase 26.5: str_join — list_str を sep 区切りで連結。 *)
+    str_join_used := true;
+    emit_expr sep_e;
+    emit_expr xs_e;
+    emit_instr "call $__lang_str_join"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_count"; _ }, s_e); _ }, n_e) ->
+    str_count_used := true;
+    emit_expr s_e;
+    emit_expr n_e;
+    emit_instr "call $__lang_str_count"
+  | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
+    (* Phase 26.5: WASI-lite — read_file delegated to host import. *)
+    file_io_used := true;
+    emit_expr path_e;
+    emit_instr "call $__lang_read_file"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
+    file_io_used := true;
+    emit_expr path_e;
+    emit_expr content_e;
+    emit_instr "call $__lang_write_file"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
     (* Phase 26.2: try_or fn default — Wasm 版。setjmp/longjmp が無いので
        fail を flag-based の non-trapping mode に切り替え、try_or scope を
@@ -2492,6 +2528,255 @@ let runtime_helpers = {|
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
     (local.get $r))|}
 
+(* Phase 26.5: list_str cell builders + str_split / str_join / str_count.
+   Cells layout (Phase 26.0 boxed): {i32 tag, i32 payload_ptr}. For Cons,
+   payload_ptr points to a 2-word tuple {str_ptr, list_str_ptr}. *)
+let list_str_runtime_wasm = {|
+  (func $__lang_list_str_nil (result i32)
+    (local $p i32)
+    (local.set $p (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))
+    (i32.store offset=0 (local.get $p) (i32.const 0))
+    (local.get $p))
+  (func $__lang_list_str_cons (param $head i32) (param $tail i32) (result i32)
+    (local $p i32) (local $box i32)
+    ;; Tuple payload box: 8 bytes (str_ptr + list_str_ptr).
+    (local.set $box (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $box) (i32.const 8)))
+    (i32.store offset=0 (local.get $box) (local.get $head))
+    (i32.store offset=4 (local.get $box) (local.get $tail))
+    ;; Cons cell: 8 bytes (tag=1 + payload_ptr).
+    (local.set $p (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))
+    (i32.store offset=0 (local.get $p) (i32.const 1))
+    (i32.store offset=4 (local.get $p) (local.get $box))
+    (local.get $p))
+  ;; str_split s delim — 2-pass: count tokens, then build list back-to-front.
+  (func $__lang_str_split (param $s i32) (param $delim i32) (result i32)
+    (local $sl i32) (local $dl i32) (local $i i32) (local $cnt i32)
+    (local $starts i32) (local $lens i32) (local $tstart i32) (local $tidx i32)
+    (local $tlen i32) (local $tk i32) (local $j i32) (local $match i32)
+    (local $nil i32) (local $tail i32) (local $bi i32) (local $b_off i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $dl (call $__lang_strlen (local.get $delim)))
+    ;; Empty delim: return Cons(s, Nil) (matches interp / C / LLVM).
+    (if (i32.eqz (local.get $dl))
+      (then
+        (local.set $nil (call $__lang_list_str_nil))
+        (return (call $__lang_list_str_cons (local.get $s) (local.get $nil)))))
+    ;; Pass 1: count delim occurrences (non-overlapping).
+    (local.set $i (i32.const 0))
+    (local.set $cnt (i32.const 0))
+    (block $end_c
+      (loop $lp_c
+        (br_if $end_c
+               (i32.gt_s (i32.add (local.get $i) (local.get $dl))
+                         (local.get $sl)))
+        ;; Compare delim bytes.
+        (local.set $j (i32.const 0))
+        (local.set $match (i32.const 1))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.eq (local.get $j) (local.get $dl)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (local.get $s)
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (local.get $delim) (local.get $j))))
+              (then (local.set $match (i32.const 0)) (br $end_inner)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        (if (local.get $match)
+          (then
+            (local.set $cnt (i32.add (local.get $cnt) (i32.const 1)))
+            (local.set $i (i32.add (local.get $i) (local.get $dl))))
+          (else
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+        (br $lp_c)))
+    ;; Allocate parallel (start, len) arrays — n = cnt + 1 tokens.
+    (local.set $starts (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (global.get $__lang_bump)
+               (i32.mul (i32.add (local.get $cnt) (i32.const 1)) (i32.const 4))))
+    (local.set $lens (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (global.get $__lang_bump)
+               (i32.mul (i32.add (local.get $cnt) (i32.const 1)) (i32.const 4))))
+    ;; Pass 2: extract tokens into (start, len) arrays.
+    (local.set $i (i32.const 0))
+    (local.set $tstart (i32.const 0))
+    (local.set $tidx (i32.const 0))
+    (block $end_f
+      (loop $lp_f
+        (br_if $end_f
+               (i32.gt_s (i32.add (local.get $i) (local.get $dl))
+                         (local.get $sl)))
+        (local.set $j (i32.const 0))
+        (local.set $match (i32.const 1))
+        (block $end_inner2
+          (loop $lp_inner2
+            (br_if $end_inner2 (i32.eq (local.get $j) (local.get $dl)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (local.get $s)
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (local.get $delim) (local.get $j))))
+              (then (local.set $match (i32.const 0)) (br $end_inner2)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner2)))
+        (if (local.get $match)
+          (then
+            (i32.store
+              (i32.add (local.get $starts) (i32.mul (local.get $tidx) (i32.const 4)))
+              (local.get $tstart))
+            (i32.store
+              (i32.add (local.get $lens) (i32.mul (local.get $tidx) (i32.const 4)))
+              (i32.sub (local.get $i) (local.get $tstart)))
+            (local.set $tidx (i32.add (local.get $tidx) (i32.const 1)))
+            (local.set $tstart (i32.add (local.get $i) (local.get $dl)))
+            (local.set $i (i32.add (local.get $i) (local.get $dl))))
+          (else
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+        (br $lp_f)))
+    ;; Last token: (tstart, sl - tstart) at index $tidx.
+    (i32.store
+      (i32.add (local.get $starts) (i32.mul (local.get $tidx) (i32.const 4)))
+      (local.get $tstart))
+    (i32.store
+      (i32.add (local.get $lens) (i32.mul (local.get $tidx) (i32.const 4)))
+      (i32.sub (local.get $sl) (local.get $tstart)))
+    ;; Build Cons list back-to-front from index $cnt down to 0.
+    (local.set $nil (call $__lang_list_str_nil))
+    (local.set $tail (local.get $nil))
+    (local.set $bi (local.get $cnt))
+    (block $end_b
+      (loop $lp_b
+        (local.set $b_off (i32.mul (local.get $bi) (i32.const 4)))
+        (local.set $tstart (i32.load (i32.add (local.get $starts) (local.get $b_off))))
+        (local.set $tlen (i32.load (i32.add (local.get $lens) (local.get $b_off))))
+        (local.set $tk (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $tk) (i32.add (local.get $tlen) (i32.const 1))))
+        ;; memcpy
+        (local.set $j (i32.const 0))
+        (block $end_cp
+          (loop $lp_cp
+            (br_if $end_cp (i32.eq (local.get $j) (local.get $tlen)))
+            (i32.store8
+              (i32.add (local.get $tk) (local.get $j))
+              (i32.load8_u (i32.add (local.get $s)
+                                    (i32.add (local.get $tstart) (local.get $j)))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_cp)))
+        (i32.store8 (i32.add (local.get $tk) (local.get $tlen)) (i32.const 0))
+        (local.set $tail (call $__lang_list_str_cons (local.get $tk) (local.get $tail)))
+        (br_if $end_b (i32.eqz (local.get $bi)))
+        (local.set $bi (i32.sub (local.get $bi) (i32.const 1)))
+        (br $lp_b)))
+    (local.get $tail))
+  ;; str_join sep xs — walk list_str, concat with sep.
+  (func $__lang_str_join (param $sep i32) (param $xs i32) (result i32)
+    (local $sl i32) (local $cur i32) (local $box i32) (local $head i32)
+    (local $total i32) (local $first i32) (local $r i32) (local $pos i32)
+    (local $hl i32)
+    (local.set $sl (call $__lang_strlen (local.get $sep)))
+    ;; Pass 1: total length.
+    (local.set $cur (local.get $xs))
+    (local.set $total (i32.const 0))
+    (local.set $first (i32.const 1))
+    (block $end_len
+      (loop $lp_len
+        (br_if $end_len (i32.eqz (i32.load offset=0 (local.get $cur))))
+        (local.set $box (i32.load offset=4 (local.get $cur)))
+        (local.set $head (i32.load offset=0 (local.get $box)))
+        (if (i32.eqz (local.get $first))
+          (then (local.set $total (i32.add (local.get $total) (local.get $sl)))))
+        (local.set $total
+          (i32.add (local.get $total)
+                   (call $__lang_strlen (local.get $head))))
+        (local.set $first (i32.const 0))
+        (local.set $cur (i32.load offset=4 (local.get $box)))
+        (br $lp_len)))
+    ;; Allocate result + null terminator.
+    (local.set $r (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (local.get $r) (i32.add (local.get $total) (i32.const 1))))
+    ;; Pass 2: write.
+    (local.set $cur (local.get $xs))
+    (local.set $pos (i32.const 0))
+    (local.set $first (i32.const 1))
+    (block $end_w
+      (loop $lp_w
+        (br_if $end_w (i32.eqz (i32.load offset=0 (local.get $cur))))
+        (local.set $box (i32.load offset=4 (local.get $cur)))
+        (local.set $head (i32.load offset=0 (local.get $box)))
+        (if (i32.eqz (local.get $first))
+          (then
+            ;; memcpy sep.
+            (local.set $hl (i32.const 0))
+            (block $end_cs
+              (loop $lp_cs
+                (br_if $end_cs (i32.eq (local.get $hl) (local.get $sl)))
+                (i32.store8
+                  (i32.add (local.get $r) (i32.add (local.get $pos) (local.get $hl)))
+                  (i32.load8_u (i32.add (local.get $sep) (local.get $hl))))
+                (local.set $hl (i32.add (local.get $hl) (i32.const 1)))
+                (br $lp_cs)))
+            (local.set $pos (i32.add (local.get $pos) (local.get $sl)))))
+        ;; memcpy head.
+        (local.set $hl (call $__lang_strlen (local.get $head)))
+        (local.set $first (i32.const 0))
+        (block $end_ch
+          (local.set $first (i32.const 0))
+          (loop $lp_ch
+            (local.tee $first (i32.const 0))
+            (drop)
+            (br_if $end_ch (i32.eqz (local.get $hl)))
+            (i32.store8
+              (i32.add (local.get $r) (local.get $pos))
+              (i32.load8_u (local.get $head)))
+            (local.set $head (i32.add (local.get $head) (i32.const 1)))
+            (local.set $pos (i32.add (local.get $pos) (i32.const 1)))
+            (local.set $hl (i32.sub (local.get $hl) (i32.const 1)))
+            (br $lp_ch)))
+        (local.set $first (i32.const 0))
+        (local.set $cur (i32.load offset=4 (local.get $box)))
+        (br $lp_w)))
+    (i32.store8 (i32.add (local.get $r) (local.get $total)) (i32.const 0))
+    (local.get $r))
+  ;; str_count s n — non-overlapping count of n in s.
+  (func $__lang_str_count (param $s i32) (param $n i32) (result i32)
+    (local $sl i32) (local $nl i32) (local $i i32) (local $j i32)
+    (local $acc i32) (local $match i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $nl (call $__lang_strlen (local.get $n)))
+    (if (i32.eqz (local.get $nl)) (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (local.set $acc (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end
+               (i32.gt_s (i32.add (local.get $i) (local.get $nl))
+                         (local.get $sl)))
+        (local.set $j (i32.const 0))
+        (local.set $match (i32.const 1))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.eq (local.get $j) (local.get $nl)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (local.get $s)
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (local.get $n) (local.get $j))))
+              (then (local.set $match (i32.const 0)) (br $end_inner)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        (if (local.get $match)
+          (then
+            (local.set $acc (i32.add (local.get $acc) (i32.const 1)))
+            (local.set $i (i32.add (local.get $i) (local.get $nl))))
+          (else
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+        (br $lp)))
+    (local.get $acc))|}
+
 (* Phase 15.4: Vec[R, T] runtime — all element types share one
    implementation because every Mere value lowers to a 4-byte i32 in
    Wasm (scalars direct, structured types are memory offsets).
@@ -3415,6 +3700,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   substring_used := false;
   int_of_str_used := false;
   str_unescape_used := false;
+  str_split_used := false;
+  str_join_used := false;
+  str_count_used := false;
+  file_io_used := false;
   map_int_used := false;
   map_str_used := false;
   Hashtbl.reset map_key_types;
@@ -3737,6 +4026,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      on first call without needing per-module conditional layout. *)
   let char_table_offset = !str_offset_counter in
   let bump_init = !str_offset_counter + 512 in
+  (* Phase 26.5: list_str runtime + file I/O host imports — conditional. *)
+  let list_str_runtime_section =
+    if !str_split_used || !str_join_used || !str_count_used
+    then list_str_runtime_wasm else ""
+  in
+  let file_io_imports =
+    if !file_io_used then
+      "  (import \"env\" \"read_file\" (func $__lang_read_file (param i32) (result i32)))\n\
+      \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
+    else ""
+  in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
@@ -3819,6 +4119,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
      \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
+     %s\
      \  (memory (export \"memory\") 1)\n\
      %s\
      \  (global $__lang_bump (mut i32) (i32.const %d))\n\
@@ -3836,10 +4137,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
+    file_io_imports
     table_section bump_init char_table_offset
-    data_section runtime_helpers vec_runtime_section
+    data_section runtime_helpers
+    list_str_runtime_section
+    vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     vec_to_list_section list_len_section
     fn_section local_decl indented_body

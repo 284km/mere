@@ -6221,6 +6221,35 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 26.5: Wasm stdlib catch-up (str_split / str_join / str_count /
+     read_file / write_file) + lift_fn_skels non-Fun walk. *)
+  check "§26.5: Wasm str_split + str_join roundtrip emit"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "let xs = str_split \"a,b,c\" \",\" in str_join \"-\" xs") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_str_split" && has "$__lang_str_join" then "ok" else "missing")
+    "ok";
+  check "§26.5: Wasm read_file / write_file emits env imports"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "let _ = write_file \"/tmp/x\" \"hi\" in read_file \"/tmp/x\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_read_file" && has "$__lang_write_file" then "ok" else "missing")
+    "ok";
+
   (* Phase 26.4: Wasm multi-instantiation specialization
      (LLVM Phase 25.5 の Wasm 版). *)
   check "§26.4: Wasm multi-inst poly fn emits 2 specs (int + str)"
