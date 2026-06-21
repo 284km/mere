@@ -1619,15 +1619,20 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Cmp (op, a, b) ->
     let ra = emit_expr env a in
     let rb = emit_expr env b in
-    let r = fresh_reg () in
-    (* Operand type: bool comparisons use i1, otherwise i32. *)
-    let opnd_ty =
-      match a.Ast.ty with
-      | Some t when Ast.walk t = Ast.TyBool -> "i1"
-      | _ -> "i32"
-    in
-    emit_instr (Printf.sprintf "  %s = icmp %s %s %s, %s" r (llvm_cmp_int op) opnd_ty ra rb);
-    r
+    let a_ty = match a.Ast.ty with Some t -> Ast.walk t | _ -> Ast.TyInt in
+    (* Phase 25.1: string comparison uses strcmp instead of icmp. *)
+    (match a_ty with
+     | Ast.TyStr ->
+       let cmp = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp ra rb);
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp %s i32 %s, 0" r (llvm_cmp_int op) cmp);
+       r
+     | _ ->
+       let r = fresh_reg () in
+       let opnd_ty = if a_ty = Ast.TyBool then "i1" else "i32" in
+       emit_instr (Printf.sprintf "  %s = icmp %s %s %s, %s" r (llvm_cmp_int op) opnd_ty ra rb);
+       r)
   | Ast.Logic (op, a, b) ->
     (* Short-circuit semantics matter for effects, but the MVP subset has
        no effects, so eager `and`/`or` on i1 is observationally equivalent. *)
@@ -1798,6 +1803,79 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i32 @__lang_str_index_of(ptr %s, ptr %s)"
                   r hv nv);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
+    (* Phase 25.1: substring s start end_ — 3-arg curried. *)
+    let sv = emit_expr env s_e in
+    let startv = emit_expr env start_e in
+    let endv = emit_expr env end_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @__lang_substring(ptr %s, i32 %s, i32 %s)"
+                  r sv startv endv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "char_at"; _ }, s_e); _ }, i_e) ->
+    let sv = emit_expr env s_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i32 %s)" r sv iv);
+    r
+  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_digit(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_alpha(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_space(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "int_of_str"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @atoi(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @show_int(i32 %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
+    let result_ty =
+      match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
+    in
+    let av = emit_expr env arg in
+    (* Phase 25.1: __lang_fail_impl is noreturn — the return value is
+       unreachable. For ptr / struct / etc. contexts where __lang_fail_int
+       (i32) wouldn't type-check, emit the call (which aborts) then
+       provide an undef of the expected type. *)
+    (match Ast.walk result_ty with
+     | Ast.TyStr ->
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call ptr @__lang_fail_str(ptr %s)" r av);
+       r
+     | Ast.TyBool ->
+       let r_i32 = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i32 @__lang_fail_int(ptr %s)" r_i32 av);
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = trunc i32 %s to i1" r r_i32);
+       r
+     | Ast.TyInt | Ast.TyUnit ->
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i32 @__lang_fail_int(ptr %s)" r av);
+       r
+     | other ->
+       (* For ptr / struct / variant / tuple etc. — call fail then emit
+          undef. fail aborts so undef is never read. *)
+       emit_instr (Printf.sprintf "  call void @__lang_fail_impl(ptr %s)" av);
+       Printf.sprintf "undef" |> fun _ ->
+       (* Need an SSA value of the expected LLVM type. Use undef literal. *)
+       let _ = other in
+       "undef")
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.3: vec_new () — region と要素型を result type の TyCon
        args から取り出し、`@mere_vec_<tag>_new` runtime を call。
@@ -3249,8 +3327,11 @@ let runtime_decls =
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
+      "declare i32 @fprintf(ptr, ptr, ...)";
       "declare i32 @asprintf(ptr, ptr, ...)";
-      "declare void @abort()" ]
+      "declare void @abort()";
+      "declare i32 @atoi(ptr)";
+      "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"" ]
 
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
    expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
@@ -4593,6 +4674,118 @@ let str_concat_helper =
       "  %off = sub i64 %diff, %base";
       "  %r = trunc i64 %off to i32";
       "  ret i32 %r";
+      "}";
+      "";
+      (* Phase 25.1: fail builtin — print msg to stdout then abort.
+         (Skip stderr globals for simplicity; mere's interp also goes to
+         stdout via print. try_or rescue is not yet supported in LLVM,
+         so fail always terminates.) *)
+      "define void @__lang_fail_impl(ptr %msg) noreturn {";
+      "entry:";
+      "  %p1 = call ptr @__lang_str_concat(ptr @.fail_prefix, ptr %msg)";
+      "  call i32 @puts(ptr %p1)";
+      "  call void @abort()";
+      "  unreachable";
+      "}";
+      "define i32 @__lang_fail_int(ptr %msg) {";
+      "entry:";
+      "  call void @__lang_fail_impl(ptr %msg)";
+      "  unreachable";
+      "}";
+      "define ptr @__lang_fail_str(ptr %msg) {";
+      "entry:";
+      "  call void @__lang_fail_impl(ptr %msg)";
+      "  unreachable";
+      "}";
+      "";
+      (* Phase 25.1: char builtins. char_at: per-byte from 256-entry
+         static table (allocated at first call); is_X: inline tests. *)
+      "@__lang_char_table = internal global [256 x [2 x i8]] zeroinitializer";
+      "@__lang_char_table_init = internal global i32 0";
+      "define void @__lang_char_table_setup() {";
+      "entry:";
+      "  %init = load i32, ptr @__lang_char_table_init";
+      "  %already = icmp ne i32 %init, 0";
+      "  br i1 %already, label %done, label %do_init";
+      "do_init:";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i32 [ 0, %do_init ], [ %next, %body ]";
+      "  %cond = icmp slt i32 %i, 256";
+      "  br i1 %cond, label %body, label %finish";
+      "body:";
+      "  %i64 = sext i32 %i to i64";
+      "  %ent = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %i64";
+      "  %i8 = trunc i32 %i to i8";
+      "  store i8 %i8, ptr %ent";
+      "  %ent2 = getelementptr [2 x i8], ptr %ent, i64 0, i64 1";
+      "  store i8 0, ptr %ent2";
+      "  %next = add i32 %i, 1";
+      "  br label %loop";
+      "finish:";
+      "  store i32 1, ptr @__lang_char_table_init";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "define ptr @__lang_char_at(ptr %s, i32 %i) {";
+      "entry:";
+      "  call void @__lang_char_table_setup()";
+      "  %i64 = sext i32 %i to i64";
+      "  %cp = getelementptr i8, ptr %s, i64 %i64";
+      "  %c = load i8, ptr %cp";
+      "  %cz = zext i8 %c to i64";
+      "  %ent = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %cz";
+      "  ret ptr %ent";
+      "}";
+      "define i1 @__lang_is_digit(ptr %s) {";
+      "entry:";
+      "  %c = load i8, ptr %s";
+      "  %ge = icmp uge i8 %c, 48";
+      "  %le = icmp ule i8 %c, 57";
+      "  %r = and i1 %ge, %le";
+      "  ret i1 %r";
+      "}";
+      "define i1 @__lang_is_alpha(ptr %s) {";
+      "entry:";
+      "  %c = load i8, ptr %s";
+      "  %lge = icmp uge i8 %c, 97";
+      "  %lle = icmp ule i8 %c, 122";
+      "  %lo = and i1 %lge, %lle";
+      "  %uge = icmp uge i8 %c, 65";
+      "  %ule = icmp ule i8 %c, 90";
+      "  %up = and i1 %uge, %ule";
+      "  %r = or i1 %lo, %up";
+      "  ret i1 %r";
+      "}";
+      "define i1 @__lang_is_space(ptr %s) {";
+      "entry:";
+      "  %c = load i8, ptr %s";
+      "  %sp = icmp eq i8 %c, 32";
+      "  %tb = icmp eq i8 %c, 9";
+      "  %nl = icmp eq i8 %c, 10";
+      "  %cr = icmp eq i8 %c, 13";
+      "  %r1 = or i1 %sp, %tb";
+      "  %r2 = or i1 %r1, %nl";
+      "  %r3 = or i1 %r2, %cr";
+      "  ret i1 %r3";
+      "}";
+      "";
+      (* Phase 25.1: substring — region alloc + memcpy. *)
+      "define ptr @__lang_substring(ptr %s, i32 %start, i32 %end_) {";
+      "entry:";
+      "  %lendiff = sub i32 %end_, %start";
+      "  %neg = icmp slt i32 %lendiff, 0";
+      "  %len = select i1 %neg, i32 0, i32 %lendiff";
+      "  %len64 = sext i32 %len to i64";
+      "  %sz = add i64 %len64, 1";
+      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %start64 = sext i32 %start to i64";
+      "  %srcp = getelementptr i8, ptr %s, i64 %start64";
+      "  call ptr @memcpy(ptr %r, ptr %srcp, i64 %len64)";
+      "  %endp = getelementptr i8, ptr %r, i64 %len64";
+      "  store i8 0, ptr %endp";
+      "  ret ptr %r";
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
