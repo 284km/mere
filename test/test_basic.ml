@@ -6160,6 +6160,37 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 25.9: LLVM stdlib catch-up — str_split / str_join / str_count /
+     read_file / write_file builtins + Phase 24.4 port of lift_fn_skels. *)
+  check "§25.9: LLVM str_split + str_join roundtrip"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "let xs = str_split \"a,b,c\" \",\" in str_join \"-\" xs") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "__lang_str_split" && has "__lang_str_join" then "ok" else "missing")
+    "ok";
+  check "§25.9: LLVM read_file / write_file emits file I/O runtime"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "let _ = write_file \"/tmp/x\" \"hello\" in read_file \"/tmp/x\"") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "__lang_read_file" && has "__lang_write_file" then "ok" else "missing")
+    "ok";
+
   (* Phase 25.8: short-circuit P_constr tag check before payload deref. *)
   check "§25.8: LLVM nested P_constr no longer SEGVs on tag mismatch"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog

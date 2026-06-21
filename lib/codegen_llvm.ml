@@ -137,6 +137,11 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
+(* Phase 25.9: stdlib catchup — emit each helper only when used. *)
+let str_split_used_llvm = ref false
+let str_join_used_llvm = ref false
+let str_count_used_llvm = ref false
+let file_io_used_llvm = ref false
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
@@ -614,17 +619,22 @@ let fresh_anon_names () =
    (P_var of Fun) and let-recs whose bindings are all single-arg fns.
    Returns the skels and the residual main body. *)
 let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
+  (* Phase 25.9 (port of codegen_c Phase 24.4): walk through ALL top-level
+     Let chains so a non-Fun Let (e.g., `let path = "/tmp/x"`) doesn't
+     break the chain and block subsequent `let rec` from being lifted.
+     Fun-valued Lets with P_var → extract as skel + drop from body.
+     Other Lets → keep in body + walk rest. *)
   let rec go (e : Ast.expr) =
     match e.Ast.node with
-    | Ast.Let (pat, value, rest)
-      when (match pat.Ast.pnode with Ast.P_var _ -> true | _ -> false) ->
-      (match value.Ast.node with
-       | Ast.Fun (param, _, fn_body) ->
-         let name = match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false in
+    | Ast.Let (pat, value, rest) ->
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var name, Ast.Fun (param, _, fn_body) ->
          let more, rest' = go rest in
          { sname = name; sparam = param; sbody = fn_body; sfun = value }
          :: more, rest'
-       | _ -> [], e)
+       | _ ->
+         let more, rest' = go rest in
+         more, { e with Ast.node = Ast.Let (pat, value, rest') })
     | Ast.Let_rec (bindings, rest) ->
       let skels =
         List.map (fun (n, v) ->
@@ -2256,6 +2266,45 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_unescape(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_split"; _ }, s_e); _ }, delim_e) ->
+    (* Phase 25.9: str_split s delim — curried、list_str (list ptr) を返す。 *)
+    str_split_used_llvm := true;
+    let sv = emit_expr env s_e in
+    let dv = emit_expr env delim_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_split(ptr %s, ptr %s)" r sv dv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep_e); _ }, xs_e) ->
+    (* Phase 25.9: str_join sep xs — curried、xs: list_str。 *)
+    str_join_used_llvm := true;
+    let sv = emit_expr env sep_e in
+    let xv = emit_expr env xs_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_join(ptr %s, ptr %s)" r sv xv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_count"; _ }, s_e); _ }, n_e) ->
+    (* Phase 25.9: str_count s needle — non-overlapping. *)
+    str_count_used_llvm := true;
+    let sv = emit_expr env s_e in
+    let nv = emit_expr env n_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" r sv nv);
+    r
+  | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
+    (* Phase 25.9: read_file path — returns str (region-allocated buffer). *)
+    file_io_used_llvm := true;
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_file(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
+    (* Phase 25.9: write_file path content — curried、unit (i32 0) を返す。 *)
+    file_io_used_llvm := true;
+    let pv = emit_expr env path_e in
+    let cv = emit_expr env content_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_write_file(ptr %s, ptr %s)" r pv cv);
     r
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     let av = emit_expr env arg in
@@ -3923,6 +3972,7 @@ let runtime_decls =
       "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
       "declare i32 @strcmp(ptr, ptr)";
+      "declare i32 @strncmp(ptr, ptr, i64)";
       "declare ptr @strstr(ptr, ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
@@ -5513,6 +5563,318 @@ let str_concat_helper =
       "  ret ptr %r";
       "}" ]
 
+(* Phase 25.9: str_count s needle — count non-overlapping occurrences. *)
+let str_count_runtime_llvm =
+  String.concat "\n"
+    [ "define i32 @__lang_str_count(ptr %s, ptr %n) {";
+      "entry:";
+      "  %nl = call i64 @strlen(ptr %n)";
+      "  %sl = call i64 @strlen(ptr %s)";
+      "  %nz = icmp eq i64 %nl, 0";
+      "  br i1 %nz, label %retz, label %loop";
+      "retz:";
+      "  ret i32 0";
+      "loop:";
+      "  %i = phi i64 [0, %entry], [%i_next, %cont]";
+      "  %acc = phi i32 [0, %entry], [%acc_next, %cont]";
+      "  %i_plus_nl = add i64 %i, %nl";
+      "  %done = icmp ugt i64 %i_plus_nl, %sl";
+      "  br i1 %done, label %finish, label %check";
+      "check:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %r = call i32 @strncmp(ptr %sp, ptr %n, i64 %nl)";
+      "  %is_match = icmp eq i32 %r, 0";
+      "  br i1 %is_match, label %hit, label %skip";
+      "hit:";
+      "  %acc_hit = add i32 %acc, 1";
+      "  %i_hit = add i64 %i, %nl";
+      "  br label %cont_hit";
+      "cont_hit:";
+      "  br label %cont";
+      "skip:";
+      "  %i_skip = add i64 %i, 1";
+      "  br label %cont_skip";
+      "cont_skip:";
+      "  br label %cont";
+      "cont:";
+      "  %i_next = phi i64 [%i_hit, %cont_hit], [%i_skip, %cont_skip]";
+      "  %acc_next = phi i32 [%acc_hit, %cont_hit], [%acc, %cont_skip]";
+      "  br label %loop";
+      "finish:";
+      "  ret i32 %acc";
+      "}" ]
+
+(* Phase 25.9: str_split / str_join — list_str (recursive variant) を
+   region に alloc して構築。Cons cell の payload は boxed (Phase 25.0)
+   = `%tuple_str_list_str_node = { ptr_str, ptr_node }` への ptr。 *)
+let str_split_runtime_llvm =
+  String.concat "\n"
+    [ (* Helper: alloc + init a Nil cell. Returns ptr. *)
+      "define ptr @__lang_list_str_nil() {";
+      "entry:";
+      "  %sz_p = getelementptr %list_str_node, ptr null, i32 1";
+      "  %sz = ptrtoint ptr %sz_p to i64";
+      "  %p = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %tp = getelementptr %list_str_node, ptr %p, i32 0, i32 0";
+      "  store i32 0, ptr %tp";
+      "  ret ptr %p";
+      "}";
+      "";
+      (* Helper: alloc + init a Cons cell with given head ptr and tail ptr. *)
+      "define ptr @__lang_list_str_cons(ptr %head, ptr %tail) {";
+      "entry:";
+      "  %sz_p = getelementptr %list_str_node, ptr null, i32 1";
+      "  %sz = ptrtoint ptr %sz_p to i64";
+      "  %p = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %tp = getelementptr %list_str_node, ptr %p, i32 0, i32 0";
+      "  store i32 1, ptr %tp";
+      (* Box the payload (tuple). *)
+      "  %psz_p = getelementptr %tuple_str_list_str, ptr null, i32 1";
+      "  %psz = ptrtoint ptr %psz_p to i64";
+      "  %pl = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %psz)";
+      "  %f0p = getelementptr %tuple_str_list_str, ptr %pl, i32 0, i32 0";
+      "  store ptr %head, ptr %f0p";
+      "  %f1p = getelementptr %tuple_str_list_str, ptr %pl, i32 0, i32 1";
+      "  store ptr %tail, ptr %f1p";
+      "  %plp = getelementptr %list_str_node, ptr %p, i32 0, i32 1";
+      "  store ptr %pl, ptr %plp";
+      "  ret ptr %p";
+      "}";
+      "";
+      (* str_split: returns a list_str ptr. Build the list back-to-front
+         by storing token slices in a stack-allocated array first, then
+         linking Cons cells from last to first. *)
+      "define ptr @__lang_str_split(ptr %s, ptr %delim) {";
+      "entry:";
+      "  %sl = call i64 @strlen(ptr %s)";
+      "  %dl = call i64 @strlen(ptr %delim)";
+      "  %dz = icmp eq i64 %dl, 0";
+      "  br i1 %dz, label %empty_delim, label %count_init";
+      "empty_delim:";
+      "  %nil_e = call ptr @__lang_list_str_nil()";
+      "  %cons_e = call ptr @__lang_list_str_cons(ptr %s, ptr %nil_e)";
+      "  ret ptr %cons_e";
+      (* Pass 1: count delim occurrences → token count = count + 1. *)
+      "count_init:";
+      "  br label %count_loop";
+      "count_loop:";
+      "  %ci = phi i64 [0, %count_init], [%ci_next, %count_cont]";
+      "  %count = phi i64 [0, %count_init], [%count_next, %count_cont]";
+      "  %ci_plus_dl = add i64 %ci, %dl";
+      "  %ci_done = icmp ugt i64 %ci_plus_dl, %sl";
+      "  br i1 %ci_done, label %alloc_arrays, label %count_check";
+      "count_check:";
+      "  %csp = getelementptr i8, ptr %s, i64 %ci";
+      "  %ccmp = call i32 @strncmp(ptr %csp, ptr %delim, i64 %dl)";
+      "  %cis_hit = icmp eq i32 %ccmp, 0";
+      "  br i1 %cis_hit, label %count_hit, label %count_skip";
+      "count_hit:";
+      "  %ci_hit = add i64 %ci, %dl";
+      "  %count_hit_v = add i64 %count, 1";
+      "  br label %count_cont";
+      "count_skip:";
+      "  %ci_skip = add i64 %ci, 1";
+      "  br label %count_cont";
+      "count_cont:";
+      "  %ci_next = phi i64 [%ci_hit, %count_hit], [%ci_skip, %count_skip]";
+      "  %count_next = phi i64 [%count_hit_v, %count_hit], [%count, %count_skip]";
+      "  br label %count_loop";
+      (* Allocate parallel arrays of (start, len) — i64 each. *)
+      "alloc_arrays:";
+      "  %n_tokens = add i64 %count, 1";
+      "  %n_bytes = mul i64 %n_tokens, 8";
+      "  %starts = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %n_bytes)";
+      "  %lens = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %n_bytes)";
+      "  br label %fill_loop";
+      (* Pass 2: extract tokens, store (start, len) into arrays. *)
+      "fill_loop:";
+      "  %fi = phi i64 [0, %alloc_arrays], [%fi_next, %fill_cont]";
+      "  %tstart = phi i64 [0, %alloc_arrays], [%tstart_next, %fill_cont]";
+      "  %tidx = phi i64 [0, %alloc_arrays], [%tidx_next, %fill_cont]";
+      "  %fi_plus_dl = add i64 %fi, %dl";
+      "  %fi_done = icmp ugt i64 %fi_plus_dl, %sl";
+      "  br i1 %fi_done, label %fill_last, label %fill_check";
+      "fill_check:";
+      "  %fsp = getelementptr i8, ptr %s, i64 %fi";
+      "  %fcmp = call i32 @strncmp(ptr %fsp, ptr %delim, i64 %dl)";
+      "  %fis_hit = icmp eq i32 %fcmp, 0";
+      "  br i1 %fis_hit, label %fill_hit, label %fill_skip";
+      "fill_hit:";
+      (* Record token: start=tstart, len=fi-tstart. *)
+      "  %tlen = sub i64 %fi, %tstart";
+      "  %sp_dst = getelementptr i64, ptr %starts, i64 %tidx";
+      "  store i64 %tstart, ptr %sp_dst";
+      "  %lp_dst = getelementptr i64, ptr %lens, i64 %tidx";
+      "  store i64 %tlen, ptr %lp_dst";
+      "  %fi_hit = add i64 %fi, %dl";
+      "  %tstart_hit = add i64 %fi, %dl";
+      "  %tidx_hit = add i64 %tidx, 1";
+      "  br label %fill_cont";
+      "fill_skip:";
+      "  %fi_skip = add i64 %fi, 1";
+      "  br label %fill_cont";
+      "fill_cont:";
+      "  %fi_next = phi i64 [%fi_hit, %fill_hit], [%fi_skip, %fill_skip]";
+      "  %tstart_next = phi i64 [%tstart_hit, %fill_hit], [%tstart, %fill_skip]";
+      "  %tidx_next = phi i64 [%tidx_hit, %fill_hit], [%tidx, %fill_skip]";
+      "  br label %fill_loop";
+      "fill_last:";
+      (* The last token: start=tstart, len=sl-tstart. *)
+      "  %ltlen = sub i64 %sl, %tstart";
+      "  %lsp_dst = getelementptr i64, ptr %starts, i64 %tidx";
+      "  store i64 %tstart, ptr %lsp_dst";
+      "  %llp_dst = getelementptr i64, ptr %lens, i64 %tidx";
+      "  store i64 %ltlen, ptr %llp_dst";
+      (* Now build Cons cells back-to-front. n_tokens = count + 1. *)
+      "  %nil_c = call ptr @__lang_list_str_nil()";
+      "  br label %build_loop";
+      "build_loop:";
+      "  %bi = phi i64 [%n_tokens, %fill_last], [%bi_dec, %build_step]";
+      "  %tail_b = phi ptr [%nil_c, %fill_last], [%cell_new, %build_step]";
+      "  %bi_zero = icmp eq i64 %bi, 0";
+      "  br i1 %bi_zero, label %build_done, label %build_step";
+      "build_step:";
+      "  %bi_dec = sub i64 %bi, 1";
+      "  %bsp_src = getelementptr i64, ptr %starts, i64 %bi_dec";
+      "  %bstart = load i64, ptr %bsp_src";
+      "  %blp_src = getelementptr i64, ptr %lens, i64 %bi_dec";
+      "  %blen = load i64, ptr %blp_src";
+      "  %btk_cap = add i64 %blen, 1";
+      "  %btk = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %btk_cap)";
+      "  %btk_src = getelementptr i8, ptr %s, i64 %bstart";
+      "  call ptr @memcpy(ptr %btk, ptr %btk_src, i64 %blen)";
+      "  %btk_end = getelementptr i8, ptr %btk, i64 %blen";
+      "  store i8 0, ptr %btk_end";
+      "  %cell_new = call ptr @__lang_list_str_cons(ptr %btk, ptr %tail_b)";
+      "  br label %build_loop";
+      "build_done:";
+      "  ret ptr %tail_b";
+      "}" ]
+
+let str_join_runtime_llvm =
+  String.concat "\n"
+    [ (* str_join: walks list_str, concats with sep. *)
+      "define ptr @__lang_str_join(ptr %sep, ptr %xs) {";
+      "entry:";
+      "  %sl = call i64 @strlen(ptr %sep)";
+      (* First pass: compute total length. *)
+      "  br label %len_loop";
+      "len_loop:";
+      "  %cur1 = phi ptr [%xs, %entry], [%next1, %len_cons]";
+      "  %total = phi i64 [0, %entry], [%total_n, %len_cons]";
+      "  %first = phi i1 [1, %entry], [0, %len_cons]";
+      "  %tagp1 = getelementptr %list_str_node, ptr %cur1, i32 0, i32 0";
+      "  %tag1 = load i32, ptr %tagp1";
+      "  %is_nil = icmp eq i32 %tag1, 0";
+      "  br i1 %is_nil, label %alloc, label %len_cons";
+      "len_cons:";
+      "  %plp1 = getelementptr %list_str_node, ptr %cur1, i32 0, i32 1";
+      "  %pl_box1 = load ptr, ptr %plp1";
+      "  %pl1 = load %tuple_str_list_str, ptr %pl_box1";
+      "  %head1 = extractvalue %tuple_str_list_str %pl1, 0";
+      "  %next1 = extractvalue %tuple_str_list_str %pl1, 1";
+      "  %hl = call i64 @strlen(ptr %head1)";
+      "  %add_sep = select i1 %first, i64 0, i64 %sl";
+      "  %t1 = add i64 %total, %add_sep";
+      "  %total_n = add i64 %t1, %hl";
+      "  br label %len_loop";
+      "alloc:";
+      "  %cap = add i64 %total, 1";
+      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %write_loop";
+      "write_loop:";
+      "  %cur2 = phi ptr [%xs, %alloc], [%next2, %w_join]";
+      "  %pos = phi i64 [0, %alloc], [%pos_n, %w_join]";
+      "  %first2 = phi i1 [1, %alloc], [0, %w_join]";
+      "  %tagp2 = getelementptr %list_str_node, ptr %cur2, i32 0, i32 0";
+      "  %tag2 = load i32, ptr %tagp2";
+      "  %is_nil2 = icmp eq i32 %tag2, 0";
+      "  br i1 %is_nil2, label %finish, label %write_cons";
+      "write_cons:";
+      "  %plp2 = getelementptr %list_str_node, ptr %cur2, i32 0, i32 1";
+      "  %pl_box2 = load ptr, ptr %plp2";
+      "  %pl2 = load %tuple_str_list_str, ptr %pl_box2";
+      "  %head2 = extractvalue %tuple_str_list_str %pl2, 0";
+      "  %next2 = extractvalue %tuple_str_list_str %pl2, 1";
+      "  br i1 %first2, label %w_no_sep, label %w_with_sep";
+      "w_no_sep:";
+      "  br label %w_join";
+      "w_with_sep:";
+      "  %sep_dst = getelementptr i8, ptr %r, i64 %pos";
+      "  call ptr @memcpy(ptr %sep_dst, ptr %sep, i64 %sl)";
+      "  %pos_added = add i64 %pos, %sl";
+      "  br label %w_join";
+      "w_join:";
+      "  %pos_after_sep = phi i64 [%pos, %w_no_sep], [%pos_added, %w_with_sep]";
+      "  %hl2 = call i64 @strlen(ptr %head2)";
+      "  %h_dst = getelementptr i8, ptr %r, i64 %pos_after_sep";
+      "  call ptr @memcpy(ptr %h_dst, ptr %head2, i64 %hl2)";
+      "  %pos_n = add i64 %pos_after_sep, %hl2";
+      "  br label %write_loop";
+      "finish:";
+      "  %endp = getelementptr i8, ptr %r, i64 %total";
+      "  store i8 0, ptr %endp";
+      "  ret ptr %r";
+      "}" ]
+
+let file_io_runtime_llvm =
+  String.concat "\n"
+    [ "declare ptr @fopen(ptr, ptr)";
+      "declare i32 @fclose(ptr)";
+      "declare i32 @fseek(ptr, i64, i32)";
+      "declare i64 @ftell(ptr)";
+      "declare i64 @fread(ptr, i64, i64, ptr)";
+      "declare i64 @fwrite(ptr, i64, i64, ptr)";
+      "@.fopen_rb = internal constant [3 x i8] c\"rb\\00\"";
+      "@.fopen_wb = internal constant [3 x i8] c\"wb\\00\"";
+      "@.file_err = internal constant [22 x i8] c\"file open failed\\00\\00\\00\\00\\00\\00\"";
+      "";
+      "define ptr @__lang_read_file(ptr %path) {";
+      "entry:";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_rb)";
+      "  %is_null = icmp eq ptr %f, null";
+      "  br i1 %is_null, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_impl(ptr %path)";
+      "  unreachable";
+      "ok:";
+      "  %_se = call i32 @fseek(ptr %f, i64 0, i32 2)";  (* SEEK_END *)
+      "  %len64 = call i64 @ftell(ptr %f)";
+      "  %_ss = call i32 @fseek(ptr %f, i64 0, i32 0)";  (* SEEK_SET *)
+      "  %cap = add i64 %len64, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %is_zero = icmp eq i64 %len64, 0";
+      "  br i1 %is_zero, label %skip_read, label %do_read";
+      "do_read:";
+      "  %_r = call i64 @fread(ptr %buf, i64 1, i64 %len64, ptr %f)";
+      "  br label %skip_read";
+      "skip_read:";
+      "  %endp = getelementptr i8, ptr %buf, i64 %len64";
+      "  store i8 0, ptr %endp";
+      "  %_c = call i32 @fclose(ptr %f)";
+      "  ret ptr %buf";
+      "}";
+      "";
+      "define i32 @__lang_write_file(ptr %path, ptr %content) {";
+      "entry:";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_wb)";
+      "  %is_null = icmp eq ptr %f, null";
+      "  br i1 %is_null, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_impl(ptr %path)";
+      "  unreachable";
+      "ok:";
+      "  %len64 = call i64 @strlen(ptr %content)";
+      "  %is_zero = icmp eq i64 %len64, 0";
+      "  br i1 %is_zero, label %skip_write, label %do_write";
+      "do_write:";
+      "  %_w = call i64 @fwrite(ptr %content, i64 1, i64 %len64, ptr %f)";
+      "  br label %skip_write";
+      "skip_write:";
+      "  %_c = call i32 @fclose(ptr %f)";
+      "  ret i32 0";
+      "}" ]
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
@@ -5542,6 +5904,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset map_instances;
   Hashtbl.reset vec_to_list_instances;
   strbuf_used := false;
+  str_split_used_llvm := false;
+  str_join_used_llvm := false;
+  str_count_used_llvm := false;
+  file_io_used_llvm := false;
   logger_used := false;
   metrics_used := false;
   show_string_globals := [];
@@ -5980,6 +6346,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
+    @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
+    @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
+    @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
+    @ (if !file_io_used_llvm then [file_io_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_key_eq_helpers = [] then [] else map_key_eq_helpers @ [""])
