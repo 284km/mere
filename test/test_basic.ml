@@ -6160,6 +6160,15 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 25.10: Var-shadowing for stdlib builtins (template_engine). *)
+  check "§25.10: local `let len = ...` shadows stdlib len"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let template = \"hi\" in\n\
+        let len = str_len template in\n\
+        len") in
+     if String.length ll > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 25.9: LLVM stdlib catch-up — str_split / str_join / str_count /
      read_file / write_file builtins + Phase 24.4 port of lift_fn_skels. *)
   check "§25.9: LLVM str_split + str_join roundtrip"

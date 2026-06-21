@@ -1966,9 +1966,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        since pointers are opaque, the global is directly usable as a ptr. *)
     fresh_str_global s
   | Ast.Var name ->
+    (* Phase 25.10 (port of codegen_c): a local binding (env / current_var_types)
+       can shadow a stdlib builtin name like `len`. Treat as regular var if
+       shadowed; only reject if it's the actual stdlib builtin as a value. *)
+    let is_shadowed =
+      List.mem_assoc name env
+      || List.mem_assoc name !current_var_types
+    in
     (* Phase 15.3: vec_new / vec_push / vec_get / vec_len は App handler
        で special-case 処理。first-class value 用法のみここで reject。 *)
-    if name = "vec_new" || name = "vec_push"
+    if not is_shadowed && (
+       name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
        || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
@@ -1979,10 +1987,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" || name = "map_iter" then
+       || name = "map_has" || name = "map_len" || name = "map_iter") then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "len" || name = "vec_to_list" then
+    if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
@@ -2986,6 +2994,19 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         (match f.Ast.ty with
          | Some t -> Ast.walk t
          | None -> unsupported f.Ast.loc "closure call: missing fn type")
+    in
+    (* Phase 25.10: if arrow_ty still has free tyvars, try to recover
+       concrete types from arg.ty and e.ty (the surrounding context).
+       This helps when poly fn calls leave tyvars in the head's .ty. *)
+    let arrow_ty =
+      if ty_is_concrete arrow_ty then arrow_ty
+      else
+        match arg.Ast.ty, e.Ast.ty with
+        | Some pt, Some rt when ty_is_concrete (Ast.walk pt) && ty_is_concrete (Ast.walk rt) ->
+          let target = Ast.TyArrow (Ast.walk pt, Ast.walk rt) in
+          (try Typer.unify Loc.dummy arrow_ty target with _ -> ());
+          Ast.walk arrow_ty
+        | _ -> arrow_ty
     in
     let cname =
       match arrow_ty with
