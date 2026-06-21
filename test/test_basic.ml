@@ -6369,6 +6369,52 @@ let () =
      in
      if has "__lifted_go_" then "ok" else "no-lift")
     "ok";
+  (* Phase 30.0 (DEFERRED §1.12 fix): builtin の hardcoded dispatch を
+     user-defined fn が shadow できることを検証。is_alpha が builtin だが
+     user 定義があれば builtin 呼び出しを skip して user fn にディスパッチ。 *)
+  check "§30.0: C codegen — user-defined is_alpha shadows __lang_is_alpha"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "let is_alpha = fn (c: str) -> c == \"_\";\n\
+        is_alpha \"_\"") in
+     let has_user_fn =
+       let nlen = String.length c and plen = String.length "int is_alpha(" in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = "int is_alpha(" then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has_user_fn then "shadowed" else "builtin-leak")
+    "shadowed";
+  check "§30.0: LLVM codegen — user-defined is_alpha shadows __lang_is_alpha"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "let is_alpha = fn (c: str) -> c == \"_\";\n\
+        is_alpha \"_\"") in
+     let has_user_fn =
+       let nlen = String.length ll and plen = String.length "@is_alpha(" in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = "@is_alpha(" then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has_user_fn then "shadowed" else "builtin-leak")
+    "shadowed";
+  check "§30.0: Wasm codegen — user-defined is_alpha shadows __lang_is_alpha"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "let is_alpha = fn (c: str) -> c == \"_\";\n\
+        is_alpha \"_\"") in
+     let has_user_fn =
+       let nlen = String.length wat and plen = String.length "(func $is_alpha " in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = "(func $is_alpha " then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has_user_fn then "shadowed" else "builtin-leak")
+    "shadowed";
+
   check "§26.3: Wasm fn dedup — user-defined name shadows stdlib"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "type 'a list = Nil | Cons of 'a * 'a list;\n\

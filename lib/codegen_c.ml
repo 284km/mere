@@ -975,11 +975,14 @@ let rec emit_expr (e : Ast.expr) : string =
              memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
              __res; })"
          default_c fn_invoke_c
-     | Ast.Var "is_digit" ->
+     (* Phase 30.0 (DEFERRED §1.12 fix): user-defined fn が同名で存在する
+        場合は builtin ディスパッチを skip して通常の user fn call path に
+        fall through。LLVM Phase 25.7 の C 版。 *)
+     | Ast.Var "is_digit" when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
        Printf.sprintf "__lang_is_digit(%s)" (emit_expr arg)
-     | Ast.Var "is_alpha" ->
+     | Ast.Var "is_alpha" when not (Hashtbl.mem toplevel_fn_names "is_alpha") ->
        Printf.sprintf "__lang_is_alpha(%s)" (emit_expr arg)
-     | Ast.Var "is_space" ->
+     | Ast.Var "is_space" when not (Hashtbl.mem toplevel_fn_names "is_space") ->
        Printf.sprintf "__lang_is_space(%s)" (emit_expr arg)
      | Ast.Var "str_of_int" ->
        (* Phase 22.3: str_of_int は show_int と同じ。alias として emit。 *)

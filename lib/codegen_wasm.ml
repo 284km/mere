@@ -1109,13 +1109,17 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr s_e;
     emit_expr i_e;
     emit_instr "call $__lang_char_at"
-  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg) ->
+  (* Phase 30.0 (DEFERRED §1.12 fix): user-defined shadow を尊重 *)
+  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     emit_expr arg;
     emit_instr "call $__lang_is_digit"
-  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg) ->
+  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_alpha") ->
     emit_expr arg;
     emit_instr "call $__lang_is_alpha"
-  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg) ->
+  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_space") ->
     emit_expr arg;
     emit_instr "call $__lang_is_space"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->

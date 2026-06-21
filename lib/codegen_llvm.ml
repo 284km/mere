@@ -2248,17 +2248,22 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i32 %s)" r sv iv);
     r
-  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg) ->
+  (* Phase 30.0 (DEFERRED §1.12 fix): user-defined fn が同名で存在する
+     場合は builtin ディスパッチを skip、通常 user fn call path に fall through *)
+  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_digit(ptr %s)" r av);
     r
-  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg) ->
+  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_alpha") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_alpha(ptr %s)" r av);
     r
-  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg) ->
+  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg)
+    when not (Hashtbl.mem toplevel_fn_names "is_space") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_space(ptr %s)" r av);

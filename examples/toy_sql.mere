@@ -121,7 +121,7 @@ let show_tok = fn (t: tok) ->
   | TEnd      -> "End";
 
 // === Char helpers ===
-let is_letter_or_under = fn (c: str) ->
+let is_alpha = fn (c: str) ->
   (c == "a" || c == "b" || c == "c" || c == "d" || c == "e" ||
    c == "f" || c == "g" || c == "h" || c == "i" || c == "j" ||
    c == "k" || c == "l" || c == "m" || c == "n" || c == "o" ||
@@ -135,7 +135,7 @@ let is_letter_or_under = fn (c: str) ->
    c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" ||
    c == "Z" || c == "_");
 
-let is_alnum = fn (c: str) -> is_letter_or_under c || is_digit c;
+let is_alnum = fn (c: str) -> is_alpha c || is_digit c;
 
 let is_ws = fn (c: str) -> c == " " || c == "\t" || c == "\n";
 
@@ -235,7 +235,7 @@ let rec tokenize_aux = fn (src: str) -> fn (i: int) -> fn (acc: tok list) ->
     else if is_digit c then
       let (n, j) = read_int src i in
       tokenize_aux src j (Cons (TIntLit n, acc))
-    else if is_letter_or_under c then
+    else if is_alpha c then
       let (id, j) = read_ident src i in
       let t = if is_keyword id then TKW (to_upper id) else TIdent id in
       tokenize_aux src j (Cons (t, acc))
