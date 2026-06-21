@@ -6221,6 +6221,26 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 26.4: Wasm multi-instantiation specialization
+     (LLVM Phase 25.5 の Wasm 版). *)
+  check "§26.4: Wasm multi-inst poly fn emits 2 specs (int + str)"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec id = fn x -> x in\n\
+        let a = id 5 in\n\
+        let b = id \"hi\" in\n\
+        let __ = print b in\n\
+        a") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$id__int" && has "$id__str" then "ok" else "missing-spec")
+    "ok";
+
   (* Phase 26.3: Wasm inner let-rec lifting (LLVM Phase 25.3 の Wasm 版). *)
   check "§26.3: Wasm inner let-rec lifts (self-recursive)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
