@@ -6071,5 +6071,49 @@ let () =
      if has "@show_opt" && has "load ptr" then "ok" else "missing")
     "ok";
 
+  (* Phase 25.5: LLVM multi-instantiation specialization (LLVM port of
+     Phase 23.3). poly fn called at 2+ distinct concrete arrow types →
+     emit one spec per type with mangled name + dispatch at call site. *)
+  check "§25.5: LLVM multi-instantiation poly fn — int + str emits 2 specs"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec id = fn x -> x in\n\
+        let a = id 5 in\n\
+        let b = id \"hi\" in\n\
+        let __ = print b in\n\
+        a") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "id__int" && has "id__str" then "ok" else "missing-spec")
+    "ok";
+  check "§25.5: LLVM multi-inst rev (json_parser style — 2 list types)"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let rec rev_aux = fn (l: 'a list, acc: 'a list) ->\n\
+          match l with\n\
+          | Nil -> acc\n\
+          | [h, ...t] -> rev_aux t (Cons (h, acc));\n\
+        let rev = fn (l: 'a list) -> rev_aux l Nil;\n\
+        let _ = rev (Cons (1, Cons (2, Nil)));\n\
+        let _ = rev (Cons (\"a\", Cons (\"b\", Nil)));\n\
+        0") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "rev__list_int" && has "rev__list_str" then "ok" else "missing-spec")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
