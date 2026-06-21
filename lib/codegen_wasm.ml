@@ -901,9 +901,15 @@ let rec emit_expr (e : Ast.expr) : unit =
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i32.const %d" off)
   | Ast.Var name ->
+    (* Phase 26.6 (port of codegen_c Phase 24.1 / codegen_llvm Phase 25.10):
+       a local binding (locals) can shadow a stdlib builtin name like `len`.
+       Treat as regular var if shadowed; only reject if it's the actual
+       stdlib builtin as a value. *)
+    let is_shadowed = List.mem_assoc name !locals in
     (* Phase 15.4: vec_new / vec_push / vec_get / vec_len は App handler
        で special-case 処理。first-class value 用法のみここで reject。 *)
-    if name = "vec_new" || name = "vec_push"
+    if not is_shadowed && (
+       name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
        || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
@@ -914,11 +920,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get" || name = "map_iter"
-       || name = "map_has" || name = "map_len" then
+       || name = "map_has" || name = "map_len") then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.4〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応)"));
-    if name = "len" || name = "vec_to_list" then
+    if not is_shadowed && (name = "len" || name = "vec_to_list") then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)"));
@@ -2144,10 +2150,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       t_off f_off
   | Ast.TyStr ->
     let q_off = intern_show_str "\"" in
+    (* Phase 26.6 (port of LLVM Phase 25.6): run %s through
+       __lang_str_escape so output matches interp's show_str behavior. *)
     Printf.sprintf
       "  (func $show_str (param $s i32) (result i32)\n\
       \    (call $__lang_str_concat\n\
-      \      (call $__lang_str_concat (i32.const %d) (local.get $s))\n\
+      \      (call $__lang_str_concat (i32.const %d) (call $__lang_str_escape (local.get $s)))\n\
       \      (i32.const %d)))"
       q_off q_off
   | Ast.TyUnit ->
@@ -2522,6 +2530,46 @@ let runtime_helpers = {|
             (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $c))
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (local.set $j (i32.add (local.get $j) (i32.const 1)))))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (local.get $r))
+  ;; Phase 26.6: str_escape s — backslash-escape newline / tab / cr / backslash
+  ;; / quote. show_str pipes through this so output matches interp. Worst-case
+  ;; 2x byte expansion, region-allocated.
+  (func $__lang_str_escape (param $s i32) (result i32)
+    (local $n i32) (local $r i32) (local $i i32) (local $j i32) (local $c i32) (local $ec i32)
+    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (local.set $j (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        ;; if c is special (10/9/13/92/34), emit backslash + replacement
+        (if (i32.or
+              (i32.or (i32.eq (local.get $c) (i32.const 10))
+                      (i32.eq (local.get $c) (i32.const 9)))
+              (i32.or (i32.or (i32.eq (local.get $c) (i32.const 13))
+                              (i32.eq (local.get $c) (i32.const 92)))
+                      (i32.eq (local.get $c) (i32.const 34))))
+          (then
+            (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 92))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (local.set $ec (local.get $c))
+            (if (i32.eq (local.get $c) (i32.const 10))
+              (then (local.set $ec (i32.const 110))))
+            (if (i32.eq (local.get $c) (i32.const 9))
+              (then (local.set $ec (i32.const 116))))
+            (if (i32.eq (local.get $c) (i32.const 13))
+              (then (local.set $ec (i32.const 114))))
+            (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $ec)))
+          (else
+            (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $c))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump

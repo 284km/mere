@@ -6221,6 +6221,29 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 26.6: Wasm polishing — Var shadowing for stdlib builtins
+     (template_engine unlock) + str_escape via show_str. *)
+  check "§26.6: Wasm Var shadowing — local `let len = ...` shadows stdlib"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let template = \"hi\" in\n\
+        let len = str_len template in\n\
+        len") in
+     if String.length wat > 0 then "ok" else "empty")
+    "ok";
+  check "§26.6: Wasm show_str pipes through str_escape"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "show \"hi\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_str_escape" && has "call $__lang_str_escape" then "ok" else "missing")
+    "ok";
+
   (* Phase 26.5: Wasm stdlib catch-up (str_split / str_join / str_count /
      read_file / write_file) + lift_fn_skels non-Fun walk. *)
   check "§26.5: Wasm str_split + str_join roundtrip emit"
