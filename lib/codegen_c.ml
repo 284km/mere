@@ -453,6 +453,41 @@ let pattern_vars (p : Ast.pattern) : string list =
   in
   go p
 
+(* Phase 28.1 (DEFERRED §1.9 fix): pattern bindings with inferred types.
+   Used by Match emission to update current_var_types for the arm body
+   so nested closure capture sees pattern-bound names (e.g., the `rest`
+   in `Cons (head, rest) -> ... (fn pair -> ... parse_pairs rest ...)`). *)
+let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
+  : (string * Ast.ty) list =
+  let rec go p t =
+    match p.Ast.pnode with
+    | Ast.P_var n -> [(n, Ast.walk t)]
+    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+    | Ast.P_as (inner, n) -> (n, Ast.walk t) :: go inner t
+    | Ast.P_or (a, _) -> go a t
+    | Ast.P_tuple ps ->
+      let elem_tys =
+        match Ast.walk t with
+        | Ast.TyTuple ts -> ts
+        | _ -> List.map (fun _ -> Ast.TyInt) ps
+      in
+      List.concat (List.mapi (fun i sub ->
+        let et = try List.nth elem_tys i with _ -> Ast.TyInt in
+        go sub et) ps)
+    | Ast.P_constr (cname, None) ->
+      ignore cname; []
+    | Ast.P_constr (cname, Some sub) ->
+      (match payload_ty_for_ctor t cname with
+       | Some pt -> go sub pt
+       | None -> [])
+    | Ast.P_record (_, fs) ->
+      (* Record の field type lookup は payload_ty_for_ctor 経由ではないので
+         省略。最低限の closure-capture 修正には field 単位の正確な型は
+         不要 (field 値そのもの) なので scrut_ty を流用する保守的実装。 *)
+      List.concat_map (fun (_, sub) -> go sub t) fs
+  in
+  go p scrut_ty
+
 (* Free variables of an expression with respect to a given set of bound
    names. Used to compute captures for inner fn lifting. *)
 let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
@@ -1508,13 +1543,25 @@ let rec emit_expr (e : Ast.expr) : string =
       | (pat, guard, body) :: rest ->
         let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
         let next = emit_arms rest in
-        let body_c = emit_expr body in
+        (* Phase 28.1 (DEFERRED §1.9 fix): add pattern-bound names to
+           current_var_types so nested closures emitted within the arm
+           body can capture them. Otherwise the free_vars filter strips
+           them out and emits undeclared-identifier C. *)
+        let pat_bindings = pattern_vars_with_types pat scrut_ty in
+        let with_pat f =
+          let prev = !current_var_types in
+          current_var_types := pat_bindings @ prev;
+          let r = try f () with ex -> current_var_types := prev; raise ex in
+          current_var_types := prev;
+          r
+        in
+        let body_c = with_pat (fun () -> emit_expr body) in
         let bound =
           match guard with
           | None ->
             Printf.sprintf "({ %s%s; })" bindings body_c
           | Some g ->
-            let guard_c = emit_expr g in
+            let guard_c = with_pat (fun () -> emit_expr g) in
             Printf.sprintf "({ %s(%s) ? (%s) : (%s); })"
               bindings guard_c body_c next
         in

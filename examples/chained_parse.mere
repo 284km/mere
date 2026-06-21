@@ -63,19 +63,16 @@ let rec find_field = fn (key: str) -> fn (fields: (str * str) list) ->
     else find_field key rest;
 
 // 4) raw "k1:v1,k2:v2" を分解 → list of (key, value)。
-//    1 個でも parse_field が Err なら全体 Err。実装は素直に match で書く
-//    (result_and_then の deep nested lambda は C codegen の capture
-//    バグを踏む可能性があるため明示的 match で回避)。
+//    1 個でも parse_field が Err なら全体 Err (result_and_then 連鎖)。
+//    Phase 28.1 で C codegen の deep nested lambda capture が動くようになった
+//    ので、本来の result_and_then 連鎖で書ける。
 let rec parse_pairs = fn (chunks: str list) ->
   match chunks with
   | Nil -> Ok Nil
   | Cons (head, rest) ->
-    match parse_field head with
-    | Err e -> Err e
-    | Ok pair ->
-      match parse_pairs rest with
-      | Err e -> Err e
-      | Ok tail -> Ok (Cons (pair, tail));
+    result_and_then (parse_field head) (fn pair ->
+      result_and_then (parse_pairs rest) (fn tail ->
+        Ok (Cons (pair, tail))));
 
 // 5) 全体 pipeline: "name:Alice,age:30" → User ("Alice", 30)
 let parse_user = fn (raw: str) ->
