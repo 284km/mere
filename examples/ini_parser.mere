@@ -1,0 +1,143 @@
+// ini_parser: section + key=value ini file parser
+//
+// 目的: examples roadmap I1。json_parser とは別系統の parser パターン:
+//   - 行指向 (改行で chunk)
+//   - section header [name]
+//   - コメント (; or #)
+//   - key=value
+//   - 順序を保持
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+//
+// INI モデル:
+//   ini = list of (section_name, list of (key, value))
+//   section_name "" = "default" section (header 前の entries)
+//
+// Phase 27.1 で interp Map iter order を insertion order にしたので、
+// このような順序依存の parse + emit を全 backend で同じ stdout に揃え
+// られる (Phase 27.0/27.1 のドッグフード)。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+// 文字列の trim (前後の空白 / タブを除去)
+let trim = fn (s: str) ->
+  let n = str_len s in
+  let rec skip_left = fn (i: int) ->
+    if i >= n then i
+    else
+      let c = char_at s i in
+      if c == " " || c == "\t" then skip_left (i + 1)
+      else i
+  in
+  let rec skip_right = fn (j: int) ->
+    if j <= 0 then 0
+    else
+      let c = char_at s (j - 1) in
+      if c == " " || c == "\t" then skip_right (j - 1)
+      else j
+  in
+  let l = skip_left 0 in
+  let r = skip_right n in
+  if l >= r then "" else substring s l r;
+
+// 文字列が指定 prefix で始まるかチェック
+let starts_with = fn (s: str) -> fn (prefix: str) ->
+  let sn = str_len s in
+  let pn = str_len prefix in
+  if sn < pn then false
+  else substring s 0 pn == prefix;
+
+// 文字列が指定 suffix で終わるかチェック
+let ends_with = fn (s: str) -> fn (suffix: str) ->
+  let sn = str_len s in
+  let xn = str_len suffix in
+  if sn < xn then false
+  else substring s (sn - xn) sn == suffix;
+
+// 1 行を分類して section / kv / empty / comment のいずれかに
+type line_kind =
+  | LSection of str
+  | LKV of (str * str)
+  | LSkip;
+
+let classify_line = fn (raw: str) ->
+  let line = trim raw in
+  let n = str_len line in
+  if n == 0 then LSkip
+  else
+    let c = char_at line 0 in
+    if c == ";" || c == "#" then LSkip
+    else if starts_with line "[" && ends_with line "]" then
+      LSection (trim (substring line 1 (n - 1)))
+    else
+      let eq = str_index_of line "=" in
+      if eq < 0 then LSkip  // "=" 無しの行はスキップ (parse error にはしない)
+      else
+        let key = trim (substring line 0 eq) in
+        let value = trim (substring line (eq + 1) n) in
+        LKV (key, value);
+
+// (section_name, key-value list) のペアを保持する型
+type section = Sect of (str * (str * str) list);
+
+// reverse helper (prelude に無いので自前)
+let rec rev_aux = fn (l: 'a list) -> fn (acc: 'a list) ->
+  match l with
+  | Nil -> acc
+  | Cons (h, t) -> rev_aux t (Cons (h, acc));
+let rev = fn (l: 'a list) -> rev_aux l Nil;
+
+// メイン parse: 行 list を受け取り、section list を返す。
+//   - 1 つ目の section header より前の entry は "" section に入れる
+//   - 各 section の entries は出現順 (reverse の result_順序保持)
+let parse_ini = fn (lines: str list) ->
+  let rec walk = fn (lines: str list) -> fn (cur_name: str) -> fn (cur_entries: (str * str) list) -> fn (done_sections: section list) ->
+    match lines with
+    | Nil ->
+      // 最後の section を done に push して reverse
+      let final_sect = Sect (cur_name, rev cur_entries) in
+      rev (Cons (final_sect, done_sections))
+    | Cons (raw, rest) ->
+      match classify_line raw with
+      | LSkip -> walk rest cur_name cur_entries done_sections
+      | LSection name ->
+        let prev_sect = Sect (cur_name, rev cur_entries) in
+        walk rest name Nil (Cons (prev_sect, done_sections))
+      | LKV (k, v) ->
+        walk rest cur_name (Cons ((k, v), cur_entries)) done_sections
+  in
+  walk lines "" Nil Nil;
+
+// pretty-print section list back to ini text (round-trip)
+let rec print_entries = fn (entries: (str * str) list) ->
+  match entries with
+  | Nil -> ()
+  | Cons ((k, v), rest) ->
+    let _ = print ("  " ++ k ++ " = " ++ v) in
+    print_entries rest;
+
+let rec print_sections = fn (sects: section list) ->
+  match sects with
+  | Nil -> ()
+  | Cons (Sect (name, entries), rest) ->
+    let _ = if name == "" then print "(default)" else print ("[" ++ name ++ "]") in
+    let _ = print_entries entries in
+    print_sections rest;
+
+// === Self-tests ===
+
+// テスト 1: 標準的な ini
+let lines1 = Cons ("# leading comment", Cons ("[server]", Cons ("host = localhost", Cons ("port = 8080", Cons ("", Cons ("[database]", Cons ("; comment in section", Cons ("name = mydb", Cons ("user = admin", Nil)))))))));
+let lines2 = Cons ("global_key = global_value", Cons ("[section_a]", Cons ("a_key = a_value", Nil)));
+let lines3 = Cons ("  ", Cons ("# only comment", Cons ("[neat]", Cons ("  spaced_key   =   value with trailing   ", Cons ("bare_line_no_eq", Cons (";; another comment", Cons ("ok = yes", Nil)))))));
+
+let _ = print "--- test 1: basic ini ---";
+let _ = print_sections (parse_ini lines1);
+let _ = print "";
+let _ = print "--- test 2: default section ---";
+let _ = print_sections (parse_ini lines2);
+let _ = print "";
+let _ = print "--- test 3: messy input ---";
+let _ = print_sections (parse_ini lines3);
+
+0

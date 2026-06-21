@@ -1,0 +1,94 @@
+// state_machine: variant + match transition の demo
+//
+// 目的: examples roadmap C1。「状態 = ADT」「遷移 = pattern match」で
+//   不正状態を type-level で防ぐ書き方を示す。typer の exhaustiveness
+//   check (Phase 13) が漏れを検出することを意図的に活用。
+//
+// モデル: 信号機 (Red / Yellow / Green) + 歩行者ボタン (Pending true/false)
+//   - Red → Green (button が押されていれば Yellow を skip して Green へ)
+//   - Red → Green via Yellow (通常)
+//   - Green → Yellow
+//   - Yellow → Red
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+
+// 信号の色 (nullary variant の集合 = enum 相当)
+type light = Red | Yellow | Green;
+
+// 状態 = 色 + 歩行者ボタン押下フラグ
+type state = State of (light * bool);
+
+// 1 tick 進める。tick = 経過時間 (ms) みたいなもの、ここでは数値 dispatch
+let step = fn (s: state) ->
+  match s with
+  | State (Red, true)    -> State (Green, false)   // ボタン押されていたら即 Green、フラグリセット
+  | State (Red, false)   -> State (Yellow, false)  // 通常 Yellow へ
+  | State (Yellow, _)    -> State (Red, false)     // Yellow → Red (button フラグは無視)
+  | State (Green, _)     -> State (Yellow, false); // Green → Yellow
+
+// 歩行者ボタンを押す (Red 中だけ受け付ける、それ以外は state そのまま)
+let press_button = fn (s: state) ->
+  match s with
+  | State (Red, _) -> State (Red, true)
+  | State (other, p) -> State (other, p);
+
+// light を表示用文字列に
+let show_light = fn (l: light) ->
+  match l with
+  | Red -> "RED"
+  | Yellow -> "YEL"
+  | Green -> "GRN";
+
+// state を表示用に整形
+let show_state = fn (s: state) ->
+  match s with
+  | State (l, true)  -> show_light l ++ " (button)"
+  | State (l, false) -> show_light l;
+
+// === Self-tests ===
+
+let _ = print "--- normal cycle (no button) ---";
+let s0 = State (Red, false);
+let _ = print ("t=0: " ++ show_state s0);
+let s1 = step s0;
+let _ = print ("t=1: " ++ show_state s1);
+let s2 = step s1;
+let _ = print ("t=2: " ++ show_state s2);
+let s3 = step s2;
+let _ = print ("t=3: " ++ show_state s3);
+let s4 = step s3;
+let _ = print ("t=4: " ++ show_state s4);
+
+let _ = print "";
+let _ = print "--- with button press at Red ---";
+let b0 = State (Red, false);
+let _ = print ("t=0: " ++ show_state b0);
+let b1 = press_button b0;
+let _ = print ("t=1 (pressed): " ++ show_state b1);
+let b2 = step b1;
+let _ = print ("t=2 (step): " ++ show_state b2);
+let b3 = step b2;
+let _ = print ("t=3: " ++ show_state b3);
+
+let _ = print "";
+let _ = print "--- button press is ignored mid-cycle ---";
+let m0 = State (Green, false);
+let _ = print ("t=0: " ++ show_state m0);
+let m1 = press_button m0;
+let _ = print ("t=1 (try press): " ++ show_state m1);
+let m2 = step m1;
+let _ = print ("t=2 (step): " ++ show_state m2);
+
+// 連続 N tick を回す helper (let rec で再帰)
+let rec run_n = fn (s: state) -> fn (n: int) ->
+  if n <= 0 then s
+  else
+    let next = step s in
+    let _ = print ("  tick: " ++ show_state next) in
+    run_n next (n - 1);
+
+let _ = print "";
+let _ = print "--- 6 ticks from Yellow ---";
+let _ = run_n (State (Yellow, false)) 6;
+
+0

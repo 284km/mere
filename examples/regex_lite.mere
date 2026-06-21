@@ -1,0 +1,234 @@
+// regex_lite: minimal regex matcher with backtracking
+//
+// 目的: examples roadmap C5。recursive variant (regex AST) + NFA-ish な
+//   backtracking matching を Mere で書く。Phase 22-27 で固めた多相
+//   user let-rec + nested P_constr + str ops を実投入。
+//
+// サポートする regex 構文 (小さく絞る):
+//   c       文字リテラル (ascii 1 byte)
+//   .       任意 1 文字
+//   ^       行頭アンカー
+//   $       行末アンカー
+//   c*      0 回以上の繰り返し (greedy)
+//   c+      1 回以上の繰り返し (greedy)
+//   c?      0 or 1 回 (optional)
+//   ab      連結 (concat)
+//
+// 対応しない: グループ (), 文字クラス [...], 選択 |
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+//
+// 設計:
+//   - regex AST = recursive variant
+//   - match_re re s = bool (s 全体が re にマッチするか)
+//   - parse_re src = regex (簡易 parser)
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+// regex AST
+//   RChar c    : 1 文字リテラル
+//   RDot       : 任意 1 文字
+//   RStart     : ^ アンカー
+//   RDollar    : $ アンカー
+//   RStar atom : atom*
+//   RPlus atom : atom+
+//   ROpt atom  : atom?
+//   RSeq xs    : 連結 (list of atoms)
+type regex =
+  | RChar  of str
+  | RDot
+  | RStart
+  | RDollar
+  | RStar  of regex
+  | RPlus  of regex
+  | ROpt   of regex
+  | RSeq   of regex list;
+
+// --- Parser (極簡易) ---
+//   parse は文字単位で線形に進み、直前 atom に */+/? を post-fix
+//
+//   parse_atoms : str list -> int -> regex list -> regex list
+//   各 char を 1 atom にし、次 char が */+/? なら quantify
+
+// 1 文字 c を atom に
+let char_to_atom = fn (c: str) ->
+  if c == "." then RDot
+  else if c == "^" then RStart
+  else if c == "$" then RDollar
+  else RChar c;
+
+// (再帰で atoms を構築。post-fix 演算子は直前 atom を変換)
+let rec parse_atoms = fn (src: str) -> fn (i: int) -> fn (acc: regex list) ->
+  let n = str_len src in
+  if i >= n then acc
+  else
+    let c = char_at src i in
+    if c == "*" || c == "+" || c == "?" then
+      // 直前 atom を quantify (acc は逆順なので head = 直前)
+      match acc with
+      | Nil -> parse_atoms src (i + 1) acc  // 先頭 quantifier は無視
+      | Cons (h, t) ->
+        let q =
+          if c == "*" then RStar h
+          else if c == "+" then RPlus h
+          else ROpt h
+        in
+        parse_atoms src (i + 1) (Cons (q, t))
+    else
+      // 通常 atom を積む
+      let atom = char_to_atom c in
+      parse_atoms src (i + 1) (Cons (atom, acc));
+
+// list を逆順にする
+let rec rev_aux = fn (l: 'a list) -> fn (acc: 'a list) ->
+  match l with
+  | Nil -> acc
+  | Cons (h, t) -> rev_aux t (Cons (h, acc));
+let rev = fn (l: 'a list) -> rev_aux l Nil;
+
+let parse_re = fn (src: str) ->
+  let atoms = parse_atoms src 0 Nil in
+  RSeq (rev atoms);
+
+// --- Matcher ---
+//   match_seq : regex list -> str -> int -> bool
+//     atoms を順に消費しつつ s の位置 i を進める。
+//     match 不成立で false (backtrack は star/plus 内のみ)
+//
+//   match_atom : regex -> str -> int -> int (= new position or -1)
+//     1 atom が i から match できればその後の位置、不成立なら -1
+//     star/plus は内部で greedy + backtrack
+
+let rec match_atom = fn (re: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: regex list) ->
+  let n = str_len s in
+  match re with
+  | RChar c ->
+    if i >= n then -1
+    else if char_at s i == c then
+      if match_seq rest s (i + 1) then i + 1
+      else -1
+    else -1
+  | RDot ->
+    if i >= n then -1
+    else if match_seq rest s (i + 1) then i + 1
+    else -1
+  | RStart ->
+    if i == 0 then
+      if match_seq rest s i then i else -1
+    else -1
+  | RDollar ->
+    if i == n then
+      if match_seq rest s i then i else -1
+    else -1
+  | RStar inner ->
+    // greedy: できる限り match して backtrack
+    match_star inner s i rest
+  | RPlus inner ->
+    // a+ = a a*
+    let first = match_one inner s i in
+    if first < 0 then -1
+    else match_star inner s first rest
+  | ROpt inner ->
+    // 1 回試して失敗したら 0 回で続行
+    let one = match_one inner s i in
+    if one >= 0 then
+      if match_seq rest s one then one
+      else if match_seq rest s i then i else -1
+    else
+      if match_seq rest s i then i else -1
+  | RSeq atoms ->
+    // RSeq inside an atom slot は無いはず、念のため
+    if match_seq atoms s i then i else -1
+
+and match_one = fn (re: regex) -> fn (s: str) -> fn (i: int) ->
+  let n = str_len s in
+  match re with
+  | RChar c ->
+    if i >= n then -1
+    else if char_at s i == c then i + 1
+    else -1
+  | RDot ->
+    if i >= n then -1 else i + 1
+  | RStart -> if i == 0 then i else -1
+  | RDollar -> if i == n then i else -1
+  | RStar _ -> i  // 0 回 match で常に true、位置不変
+  | RPlus _ -> match_one re s i  // ここには本来来ないが安全側で
+  | ROpt _ -> i
+  | RSeq _ -> i
+
+and match_star = fn (inner: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: regex list) ->
+  // greedy: できる限り match を集め、後で 1 つずつ戻して rest match を試す
+  let rec collect = fn (pos: int) -> fn (acc: int list) ->
+    let next = match_one inner s pos in
+    if next > pos then collect next (Cons (next, acc))
+    else acc
+  in
+  let positions = Cons (i, collect i Nil) in
+  // positions = [..., greedy_max, ..., i] (前が long match)
+  let rec try_each = fn (poss: int list) ->
+    match poss with
+    | Nil -> -1
+    | Cons (p, rest_poss) ->
+      if match_seq rest s p then p
+      else try_each rest_poss
+  in
+  try_each positions
+
+and match_seq = fn (atoms: regex list) -> fn (s: str) -> fn (i: int) ->
+  match atoms with
+  | Nil -> true
+  | Cons (atom, rest) ->
+    let next = match_atom atom s i rest in
+    next >= 0;
+
+// 全体 match: ^ や $ アンカーを意識しつつ 0..n の任意位置から match を試す
+let match_re = fn (pat: regex) -> fn (s: str) ->
+  match pat with
+  | RSeq atoms ->
+    match atoms with
+    | Nil -> true
+    | Cons (RStart, rest) ->
+      // ^ anchored — 位置 0 のみ
+      match_seq rest s 0
+    | _ ->
+      // 任意位置から match を試す
+      let n = str_len s in
+      let rec try_pos = fn (i: int) ->
+        if i > n then false
+        else if match_seq atoms s i then true
+        else try_pos (i + 1)
+      in
+      try_pos 0
+  | _ -> match_seq (Cons (pat, Nil)) s 0;
+
+// === Self-tests ===
+
+let case = fn (label: str) -> fn (pat_src: str) -> fn (subject: str) -> fn (expected: bool) ->
+  let pat = parse_re pat_src in
+  let actual = match_re pat subject in
+  let mark = if actual == expected then "ok " else "FAIL" in
+  print (mark ++ " | " ++ label ++ " | /" ++ pat_src ++ "/ " ++ subject ++ " => " ++ show actual);
+
+let _ = case "literal-hit"   "abc"    "abc"      true;
+let _ = case "literal-prefix" "abc"   "abcde"    true;
+let _ = case "literal-mid"   "bc"     "abcde"    true;
+let _ = case "literal-no"    "xyz"    "abc"      false;
+let _ = case "dot-mid"       "a.c"    "abc"      true;
+let _ = case "dot-no-empty"  "a.c"    "ac"       false;
+let _ = case "star-zero"     "ab*c"   "ac"       true;
+let _ = case "star-many"     "ab*c"   "abbbc"    true;
+let _ = case "star-mid"      "a.*z"   "anything-then-z"  true;
+let _ = case "plus-one"      "ab+c"   "abc"      true;
+let _ = case "plus-many"     "ab+c"   "abbbc"    true;
+let _ = case "plus-zero-no"  "ab+c"   "ac"       false;
+let _ = case "opt-zero"      "ab?c"   "ac"       true;
+let _ = case "opt-one"       "ab?c"   "abc"      true;
+let _ = case "opt-two-no"    "ab?c"   "abbc"     false;
+let _ = case "start-yes"     "^abc"   "abcdef"   true;
+let _ = case "start-no"      "^abc"   "xabc"     false;
+let _ = case "end-yes"       "abc$"   "xabc"     true;
+let _ = case "end-no"        "abc$"   "abcx"     false;
+let _ = case "full-yes"      "^a.+z$" "anything-then-z" true;
+let _ = case "full-no"       "^a.+z$" "a-then-y"  false;
+
+0

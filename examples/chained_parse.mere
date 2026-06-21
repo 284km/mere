@@ -1,0 +1,119 @@
+// chained_parse: Result chain idiom を realistic に demo する例
+//
+// 目的: examples roadmap D2。Phase 23.2 で prelude に追加した
+//   result_map / result_and_then / result_or_else を realistic な
+//   パイプラインで使う。`"name:Alice,age:30"` のような文字列を分解し、
+//   user record を構成する流れで Result<T, str> を連鎖。
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+//   (Phase 27 達成の 4 backend feature parity を流用)
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/chained_parse.mere
+//
+// パターン:
+//   1. parse_field s = Result (key, value)
+//   2. parse_int s = Result int       (atoi 失敗で Err)
+//   3. require_field key map = Result value
+//   4. validate_user fields = Result user_record
+//   5. result_and_then で連鎖、result_or_else で fallback、
+//      result_map で純粋変換
+//
+// Phase 22-27 で固めた:
+//   - prelude の result_* helpers (Phase 23.2)
+//   - 多相 user let-rec の multi-instantiation (Phase 23.3 / 25.5 / 26.4)
+//   - polymorphic ('a list / Result 等) を 3 backend で具体型に展開
+//   - show_str escape (Phase 23.5 / 25.6 / 26.6)
+
+// 簡単 user record (record type を使わず variant + tuple で素朴に書く)
+type user = User of (str * int);  // (name, age)
+
+// 1) 単一 "key:value" を分解。空文字 / ':' 無し / 不正 key は Err。
+let parse_field = fn (raw: str) ->
+  let n = str_len raw in
+  if n == 0 then Err "empty field"
+  else
+    let colon = str_index_of raw ":" in
+    if colon < 0 then Err ("missing ':' in: " ++ raw)
+    else if colon == 0 then Err ("empty key in: " ++ raw)
+    else
+      let key = substring raw 0 colon in
+      let value = substring raw (colon + 1) n in
+      Ok (key, value);
+
+// 2) 文字列を int に。数字以外を含む / 空 → Err。
+let parse_int_str = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 then Err "expected integer but got empty"
+  else
+    let rec all_digits = fn (i: int) ->
+      if i >= n then true
+      else if is_digit (char_at s i) then all_digits (i + 1)
+      else false
+    in
+    if all_digits 0 then Ok (int_of_str s)
+    else Err ("not a valid integer: " ++ s);
+
+// 3) (key, value) tuple 列から指定 key を探す (linear scan)。
+let rec find_field = fn (key: str) -> fn (fields: (str * str) list) ->
+  match fields with
+  | Nil -> Err ("missing field: " ++ key)
+  | Cons ((k, v), rest) ->
+    if k == key then Ok v
+    else find_field key rest;
+
+// 4) raw "k1:v1,k2:v2" を分解 → list of (key, value)。
+//    1 個でも parse_field が Err なら全体 Err。実装は素直に match で書く
+//    (result_and_then の deep nested lambda は C codegen の capture
+//    バグを踏む可能性があるため明示的 match で回避)。
+let rec parse_pairs = fn (chunks: str list) ->
+  match chunks with
+  | Nil -> Ok Nil
+  | Cons (head, rest) ->
+    match parse_field head with
+    | Err e -> Err e
+    | Ok pair ->
+      match parse_pairs rest with
+      | Err e -> Err e
+      | Ok tail -> Ok (Cons (pair, tail));
+
+// 5) 全体 pipeline: "name:Alice,age:30" → User ("Alice", 30)
+let parse_user = fn (raw: str) ->
+  let chunks = str_split raw "," in
+  // ステップ 1: 全 chunk を parse_field で (key, value) tuple list に
+  result_and_then (parse_pairs chunks) (fn fields ->
+  // ステップ 2: name field を取得 (Result<str, str>)
+  result_and_then (find_field "name" fields) (fn name ->
+  // ステップ 3: age field を取得し int 化
+  result_and_then (find_field "age" fields) (fn age_str ->
+  result_map (parse_int_str age_str) (fn age ->
+    User (name, age)))));
+
+// helper: Result の中身を表示用文字列に。
+let show_user_result = fn (r) ->
+  match r with
+  | Err msg -> "error: " ++ msg
+  | Ok (User (n, a)) -> "user(name=" ++ n ++ ", age=" ++ show a ++ ")";
+
+// === Self-tests ===
+
+let case = fn (name: str) -> fn (raw: str) ->
+  print (name ++ " | " ++ raw ++ " => " ++ show_user_result (parse_user raw));
+
+let _ = case "ok"             "name:Alice,age:30";
+let _ = case "ok-swap"        "age:42,name:Bob";
+let _ = case "missing-age"    "name:Charlie";
+let _ = case "missing-name"   "age:7";
+let _ = case "non-int-age"    "name:Dave,age:abc";
+let _ = case "empty"          "";
+let _ = case "no-colon"       "name=Eve";
+let _ = case "empty-value"    "name:,age:99";
+
+// result_or_else で default 値に救う使い方:
+let _ = print "";
+let _ = print "--- default fallback (result_or_else) ---";
+let default_user = User ("anonymous", 0);
+let recovered = result_or_else (parse_user "broken") (fn _msg -> Ok default_user : (user, str) result);
+let _ = print ("recovered: " ++ show_user_result recovered);
+
+0
