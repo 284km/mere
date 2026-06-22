@@ -1,2 +1,38 @@
+# dune / OCaml build artifacts
 _build/
 *.install
+*.merlin
+.merlin
+_opam/
+
+# Compiled native artifacts (生成 source を実機で試した時の出力)
+a.out
+*.exe
+*.byte
+*.native
+*.wasm
+*.o
+*.so
+*.dylib
+
+# Codegen 出力 (examples を手元でビルドした際の中間ファイル)
+*.c.out
+*.ll.out
+*.wat.out
+*.s
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.#*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# direnv / env
+.envrc
+.env

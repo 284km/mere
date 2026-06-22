@@ -1,0 +1,16 @@
+# Phase 37: 公開前に GitHub Linguist が `.mere` を未認識のため、
+# 暫定的に OCaml としてハイライトさせる (両言語とも ML 系で表面が近い)。
+# 将来 tree-sitter-mere を整備して Linguist PR を出した後に削除予定。
+*.mere linguist-language=OCaml
+
+# scripts/run_wasm.js は generated でなくテストハーネス
+scripts/run_wasm.js linguist-vendored=false
+
+# Line endings
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Binary
+*.png binary
+*.jpg binary
+*.wasm binary
