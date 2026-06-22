@@ -36,13 +36,10 @@ let _ = map_iter scores (fn (n: str) -> fn (p: int) ->
   let _ = owned_vec_push points p in
   ());
 
-// 注: `let n = owned_vec_len names;` を top-level に置くと Phase 30.2
-// global 化のせいで names がまだ空のときに 0 で固定される (initialization
-// 順序問題)。fn 内で都度 owned_vec_len を呼ぶ形にする。
+let n = owned_vec_len names;
 let printed = map_new ();
 
 let rec rank_loop = fn (rank: int) ->
-  let n = owned_vec_len names in
   if rank > n then ()
   else
     let rec find_best = fn (i: int) -> fn (bi: int) -> fn (bv: int) ->

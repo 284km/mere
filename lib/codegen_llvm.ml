@@ -2185,6 +2185,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
        in
        current_var_types := (name, value_ty) :: saved;
+       (* Phase 36 (DEFERRED §1.18 fix): if name is a file-scope global,
+          store the value into @name so subsequent reads (via Var emit
+          which does `load ... @name`) see the updated value at the
+          right source-order point. *)
+       if Hashtbl.mem top_globals_llvm name then
+         emit_instr (Printf.sprintf "  store %s %s, ptr @%s"
+                       (llvm_ty_of value_ty) rv name);
        let r = emit_expr ((name, rv) :: env) body in
        current_var_types := saved;
        r
@@ -6842,26 +6849,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [] skels
   in
   let needs_global_llvm name = List.mem name fvs_used_in_skels_llvm in
-  let top_globals_list, body_expr =
+  (* Phase 36 (DEFERRED §1.18 fix): keep Let bindings in body_expr so
+     globals get initialized at their source-order position (via
+     `store` emit_expr Let). We only collect (name, ty) for declaring
+     `@name = internal global`. *)
+  let top_globals_list =
     let rec go e =
       match e.Ast.node with
       | Ast.Let (pat, value, rest) ->
         (match pat.Ast.pnode with
          | Ast.P_var name when needs_global_llvm name ->
            (match value.Ast.node with
-            | Ast.Fun _ ->
-              let gs, rest' = go rest in
-              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
+            | Ast.Fun _ -> go rest
             | _ ->
               let ty = match value.Ast.ty with
                 | Some t -> Ast.walk t | None -> Ast.TyInt
               in
-              let gs, rest' = go rest in
-              (name, value, ty) :: gs, rest')
-         | _ ->
-           let gs, rest' = go rest in
-           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
-      | _ -> [], e
+              (name, value, ty) :: go rest)
+         | _ -> go rest)
+      | _ -> []
     in
     go body_expr
   in
@@ -7005,13 +7011,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
-  (* Phase 30.2b: initialize top-level globals BEFORE the rest of main. *)
-  List.iter (fun (name, value_expr, ty) ->
-    let init_r = emit_expr [] value_expr in
-    emit_instr
-      (Printf.sprintf "  store %s %s, ptr @%s"
-         (llvm_ty_of ty) init_r name))
-    top_globals_list;
+  (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
+     body_expr (the Let bindings stayed in body and emit_expr Let emits
+     `store ... @name`). No upfront init needed. *)
+  ignore top_globals_list;
   let r = emit_expr [] body_expr in
   (* Optional printf of main result. *)
   let print_lines =

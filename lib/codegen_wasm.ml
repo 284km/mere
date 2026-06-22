@@ -1134,6 +1134,13 @@ let rec emit_expr (e : Ast.expr) : unit =
           value has been pushed up; just emit the body, which will dispatch
           via App-Var to the lifted name. *)
        emit_expr body
+     | Ast.P_var name when Hashtbl.mem top_globals_wasm name ->
+       (* Phase 36 (DEFERRED §1.18 fix): file-scope global. Assign at
+          source-order position so subsequent reads (via Var emit which
+          does `global.get $name`) see the updated value. *)
+       emit_expr value;
+       emit_instr (Printf.sprintf "global.set $%s" name);
+       emit_expr body
      | Ast.P_var name ->
        let slot = fresh_local () in
        emit_expr value;
@@ -4528,23 +4535,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [] skels
   in
   let needs_global_wasm name = List.mem name fvs_used_in_skels_wasm in
-  let top_globals_list, body_expr =
+  (* Phase 36 (DEFERRED §1.18 fix): keep Let bindings in body so global
+     init happens at source-order position. emit_expr Let emits
+     `global.set $name` for top_globals_wasm names. *)
+  let top_globals_list =
     let rec go e =
       match e.Ast.node with
       | Ast.Let (pat, value, rest) ->
         (match pat.Ast.pnode with
          | Ast.P_var name when needs_global_wasm name ->
            (match value.Ast.node with
-            | Ast.Fun _ ->
-              let gs, rest' = go rest in
-              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
-            | _ ->
-              let gs, rest' = go rest in
-              (name, value) :: gs, rest')
-         | _ ->
-           let gs, rest' = go rest in
-           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
-      | _ -> [], e
+            | Ast.Fun _ -> go rest
+            | _ -> (name, value) :: go rest)
+         | _ -> go rest)
+      | _ -> []
     in
     go body_expr
   in
@@ -4594,11 +4598,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   (* Reset counters for the main body. *)
   reset ();
-  (* Phase 30.2c: initialize top-level globals BEFORE the main body. *)
-  List.iter (fun (name, value_expr) ->
-    emit_expr value_expr;
-    emit_instr (Printf.sprintf "global.set $%s" name))
-    top_globals_list;
+  (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
+     body_expr via emit_expr Let emitting `global.set $name`. *)
+  ignore top_globals_list;
   emit_expr body_expr;
   (* Phase 27.2: print main's result to stdout via $puts so wasm runtime
      output matches interp's `Pipeline.process s |> print_endline`. The

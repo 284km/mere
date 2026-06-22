@@ -828,9 +828,17 @@ let rec emit_expr (e : Ast.expr) : string =
            current_env_subst := prev_subst;
            raise ex
        in
-       Printf.sprintf
-         "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
-         name value_c name name body_c
+       (* Phase 36 (DEFERRED §1.18 fix): if name is a file-scope global,
+          assign to it directly. The static declaration is emitted in
+          emit_program; here we just emit the assignment so source-order
+          side effects in main_body are preserved. *)
+       if Hashtbl.mem top_globals name then
+         Printf.sprintf
+           "({ %s = %s; %s; })" (c_safe_name name) value_c body_c
+       else
+         Printf.sprintf
+           "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
+           name value_c name name body_c
      | Ast.P_wild | Ast.P_unit ->
        (* Phase 21.1 (DEFERRED §1.7) fix: `let _ = E in B` / `let () = E in B`
           — evaluate E for side effects then continue with B. Block sequence
@@ -4441,27 +4449,28 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [] skels
   in
   let needs_global name = List.mem name fvs_used_in_skels in
-  let top_globals_list, body_expr =
+  (* Phase 36 (DEFERRED §1.18 fix): keep the Let bindings in body_expr
+     so global init happens at the SOURCE-ORDER position (interleaved
+     with side-effecting code in main_body), not pre-emitted upfront
+     where dependent reads (e.g. `let n = owned_vec_len names` after a
+     map_iter that populates names) would see stale empty values.
+     We still record (name, ty) for emitting the file-scope `static T X;`
+     declaration. *)
+  let top_globals_list =
     let rec go e =
       match e.Ast.node with
       | Ast.Let (pat, value, rest) ->
         (match pat.Ast.pnode with
          | Ast.P_var name when needs_global name ->
            (match value.Ast.node with
-            | Ast.Fun _ ->
-              (* Shouldn't happen after lift_fn_skels, but be defensive. *)
-              let gs, rest' = go rest in
-              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
+            | Ast.Fun _ -> go rest
             | _ ->
               let ty = match value.Ast.ty with
                 | Some t -> Ast.walk t | None -> Ast.TyInt
               in
-              let gs, rest' = go rest in
-              (name, value, ty) :: gs, rest')
-         | _ ->
-           let gs, rest' = go rest in
-           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
-      | _ -> [], e
+              (name, value, ty) :: go rest)
+         | _ -> go rest)
+      | _ -> []
     in
     go body_expr
   in
@@ -4719,15 +4728,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     end
   in
   drain ();
-  (* Phase 30.2: emit init code for top-level globals BEFORE main_body.
-     Each `let X = E` becomes `X = <emit E>;` at main start. emit_expr is
-     called here because it may push closure adapters / register types. *)
-  let top_global_inits =
-    List.map (fun (name, value_expr, _) ->
-      let init_c = emit_expr value_expr in
-      Printf.sprintf "  %s = %s;" (c_safe_name name) init_c)
-      top_globals_list
-  in
+  (* Phase 36 (DEFERRED §1.18 fix): globals are now initialized inline
+     in main_body (the Let bindings stayed in body_expr), so we no longer
+     pre-emit init code. Only the file-scope declarations are emitted. *)
+  let top_global_inits = ([] : string list) in
   let top_global_decls =
     List.map (fun (name, _, ty) ->
       Printf.sprintf "static %s %s;" (c_type_of ty) (c_safe_name name))
