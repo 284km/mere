@@ -6,8 +6,8 @@
  (github 284km/mere))
 
 (license MIT)
-(authors "Kazuma Furuhashi <284km@users.noreply.github.com>")
-(maintainers "Kazuma Furuhashi <284km@users.noreply.github.com>")
+(authors "Kazuma Furuhashi <k.furuhashi10@gmail.com>")
+(maintainers "Kazuma Furuhashi <k.furuhashi10@gmail.com>")
 
 (package
  (name mere)
