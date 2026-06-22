@@ -342,9 +342,10 @@ let rec parse_program_internal tokens =
       (match rest with
        | (_, T_eq) :: rest ->
          let value, rest = expr rest in
-         (* Phase 36: `let x = e? in body` desugars to
-            `match e with | None -> None | Some x -> body`.
-            The enclosing function must return `'b opt`. *)
+         (* Phase 36: `let x = e? in body` → Option early-return:
+              match e with | None -> None | Some x -> body
+            `let x = e?! in body` → Result early-return:
+              match e with | Err v -> Err v | Ok x -> body *)
          (match rest with
           | (_, T_question) :: (_, T_in) :: rest2 ->
             let body, rest = expr rest2 in
@@ -356,11 +357,27 @@ let rec parse_program_internal tokens =
               (mkp pos (Ast.P_constr ("Some", Some pat)), None, body)
             in
             mk pos (Ast.Match (value, [none_arm; some_arm])), rest
+          | (_, T_question_bang) :: (_, T_in) :: rest2 ->
+            let body, rest = expr rest2 in
+            let err_var = "__err" in
+            let err_pat =
+              mkp pos (Ast.P_constr ("Err",
+                Some (mkp pos (Ast.P_var err_var))))
+            in
+            let err_body =
+              mk pos (Ast.Constr ("Err",
+                Some (mk pos (Ast.Var err_var))))
+            in
+            let ok_pat =
+              mkp pos (Ast.P_constr ("Ok", Some pat))
+            in
+            mk pos (Ast.Match (value,
+              [(err_pat, None, err_body); (ok_pat, None, body)])), rest
           | (_, T_in) :: rest ->
             let body, rest = expr rest in
             mk pos (Ast.Let (pat, value, body)), rest
           | _ ->
-            raise (Parse_error (pos_of rest, "expected 'in' or '?' in let binding")))
+            raise (Parse_error (pos_of rest, "expected 'in' or '?' / '?!' in let binding")))
        | _ ->
          raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
     | (pos, T_with) :: (_, T_ident name) :: (_, T_eq) :: rest ->

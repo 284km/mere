@@ -76,4 +76,33 @@ let _ = print "alice -> {show_opt_str r_alice}";    // admin
 let _ = print "bob   -> {show_opt_str r_bob}";      // user
 let _ = print "carol -> {show_opt_str r_carol}";    // none (no user)
 
+// --- `?!` for Result ---
+let parse_num = \s ->
+  if s == "42" then Ok 42
+  else if s == "7" then Ok 7
+  else if s == "0" then Ok 0
+  else Err ("not a number: " ++ s);
+
+let safe_div_r = \a b ->
+  if b == 0 then Err "division by zero" else Ok (a / b);
+
+let calc_chain = \xs ys ->
+  let x = parse_num xs?! in
+  let y = parse_num ys?! in
+  let q = safe_div_r x y?! in
+  Ok (q * 2);
+
+let show_r = \r ->
+  match r with
+  | Ok n  -> "ok " ++ show n
+  | Err e -> "err: " ++ e;
+
+let _ = print "--- ?! for Result chain ---";
+let case1 = calc_chain "42" "7";
+let case2 = calc_chain "42" "0";
+let case3 = calc_chain "abc" "7";
+let _ = print "42 / 7 * 2 = {show_r case1}";   // ok 12
+let _ = print "42 / 0     = {show_r case2}";   // err div0
+let _ = print "abc / 7    = {show_r case3}";   // err parse
+
 0

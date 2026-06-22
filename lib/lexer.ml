@@ -42,6 +42,7 @@ type token =
   | T_backslash       (* \  — lambda shorthand `\x -> body` (Phase 36) *)
   | T_at_at           (* @@ — low-precedence application (Phase 36) *)
   | T_question        (* ?  — Option early-return (`let x = e? in body`) (Phase 36) *)
+  | T_question_bang   (* ?! — Result early-return (`let x = e?! in body`) (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -129,7 +130,10 @@ let rec tokenize s =
       (* Phase 36: `@@` low-precedence application (OCaml-style, alias of `<|`). *)
       | '@' when i + 1 < len && s.[i + 1] = '@' ->
         advance 2; aux (i + 2) ((pos, T_at_at) :: acc)
-      (* Phase 36: `?` for Option early-return (`let x = expr? in body`). *)
+      (* Phase 36: `?` for Option early-return (`let x = expr? in body`).
+         `?!` for Result early-return. *)
+      | '?' when i + 1 < len && s.[i + 1] = '!' ->
+        advance 2; aux (i + 2) ((pos, T_question_bang) :: acc)
       | '?' -> advance 1; aux (i + 1) ((pos, T_question) :: acc)
       | '.' -> advance 1; aux (i + 1) ((pos, T_dot) :: acc)
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
