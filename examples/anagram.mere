@@ -1,0 +1,56 @@
+// anagram: 2 文字列がアナグラム関係か判定 (Phase 36)
+//
+// 目的: Map[str, int] で文字頻度を集計し、両者が一致するかで判定する
+//   典型的アルゴリズム。大文字小文字とスペースを正規化。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 文字 → 出現回数の頻度表を作る (空白は除外、小文字に正規化)
+let freq_of = fn (s: str) ->
+  let lo = to_lower s in
+  let n = str_len lo in
+  let m = map_new () in
+  let rec loop = fn (i: int) ->
+    if i >= n then ()
+    else
+      let c = char_at lo i in
+      if c == " " then loop (i + 1)
+      else
+        let cur = if map_has m c then map_get m c else 0 in
+        let _ = map_set m c (cur + 1) in
+        loop (i + 1) in
+  let _ = loop 0 in
+  m;
+
+// 2 つの map_str_int が key/値ともに一致しているか
+let freqs_equal = fn a -> fn b ->
+  if map_len a != map_len b then false
+  else
+    // a の全 key について b に同じ value があるか線形 scan
+    // (map_iter は each 要素を visit する)
+    let ok = map_new () in
+    let _ = map_set ok "v" 1 in   // single-cell flag、1 = まだ ok
+    let _ = map_iter a (fn (k: str) -> fn (v: int) ->
+      if map_has b k && map_get b k == v then ()
+      else let _ = map_set ok "v" 0 in ()) in
+    map_get ok "v" == 1;
+
+let is_anagram = fn (a: str) -> fn (b: str) ->
+  freqs_equal (freq_of a) (freq_of b);
+
+let check = fn (a: str) -> fn (b: str) ->
+  print ("\"" ++ a ++ "\" <-> \"" ++ b ++ "\" => "
+         ++ (if is_anagram a b then "ANAGRAM" else "no"));
+
+let _ = print "=== anagram (Phase 36) ===";
+
+let _ = check "listen" "silent";
+let _ = check "evil" "vile";
+let _ = check "Astronomer" "Moon starer";
+let _ = check "The eyes" "They see";
+let _ = check "Dormitory" "Dirty room";
+let _ = check "Hello" "World";
+let _ = check "abc" "abcd";
+let _ = check "" "";
+
+0
