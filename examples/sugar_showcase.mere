@@ -1,0 +1,91 @@
+// sugar_showcase: Phase 36 で追加した全 sugar を combined で使うショーケース
+//
+// 投入されている sugar:
+//   - `a..b`        range literal
+//   - `(op X)`      operator section
+//   - `h :: t`      cons
+//   - `f <| x`      reverse pipe
+//   - `f @@ x`      alias of <|
+//   - `\x y -> ...` lambda shorthand
+//   - `"hello {x}"` string interpolation
+//   - `e?`          Option early-return
+//   - `e?!`         Result early-return
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== sugar_showcase (Phase 36) ===";
+
+// 数論 + range + section + sum
+let _ = print "--- prime sieve via fold ---";
+let is_prime = \n ->
+  if n < 2 then false
+  else
+    let candidates = 2..(n - 1) in
+    let rec any_divisor = \xs ->
+      match xs with
+      | Nil -> false
+      | Cons (h, t) -> if n % h == 0 then true else any_divisor t in
+    not (any_divisor candidates);
+
+// section + filter
+let rec list_filter = \xs p ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) -> if p h then h :: list_filter t p else list_filter t p;
+
+// 注: `list_filter (2..n) is_prime` のように top-level fn を closure 経由で
+// 渡すと Wasm codegen が落ちる (Phase 36 で発掘した小バグ)。回避策として
+// inline lambda で呼ぶ。
+let primes_under = \n -> list_filter (2..n) (\x -> is_prime x);
+let _ = list_iter (primes_under 30) <| \p -> print "{show p}";
+
+// Map + ?  +  string interp
+let _ = print "--- inventory lookup with ? ---";
+let stock = map_new ();
+let _ = map_set stock "apple"  120;
+let _ = map_set stock "banana" 75;
+let _ = map_set stock "cherry" 30;
+
+let lookup = \k -> if map_has stock k then Some (map_get stock k) else None;
+
+// `?` で 2 段検索を chain
+let total_2 = \a b ->
+  let x = lookup a? in
+  let y = lookup b? in
+  Some (x + y);
+
+let show_opt = \o -> match o with | Some n -> show n | None -> "missing";
+let r1 = total_2 "apple" "banana";
+let r2 = total_2 "apple" "grape";
+let _ = print "apple+banana = {show_opt r1}";
+let _ = print "apple+grape  = {show_opt r2}";
+
+// Result chain with ?!
+let _ = print "--- Result chain with ?! ---";
+
+let parse_int = \s ->
+  if s == "1" then Ok 1
+  else if s == "2" then Ok 2
+  else if s == "10" then Ok 10
+  else Err ("can't parse: " ++ s);
+
+let calc = \xs ys ->
+  let x = parse_int xs?! in
+  let y = parse_int ys?! in
+  Ok (x * y * 100);
+
+let show_r = \r -> match r with | Ok n -> "= " ++ show n | Err e -> "err: " ++ e;
+let c1 = calc "2" "10";
+let c2 = calc "2" "x";
+let _ = print "2*10*100 {show_r c1}";
+let _ = print "2*x*100  {show_r c2}";
+
+// cons + lambda + pipe で 1 行 fold
+let _ = print "--- one-line fold ---";
+let sum = list_fold (1 :: 2 :: 3 :: 4 :: 5 :: Nil) 0 (\a x -> a + x);
+let _ = print "sum = {show sum}";
+
+let prod = list_fold (1..6) 1 (\a x -> a * x);
+let _ = print "6! = {show prod}";
+
+0
