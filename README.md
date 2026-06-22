@@ -12,21 +12,23 @@ feature-parity で動く段階。
 
 ## ステータス (2026-06-22 時点)
 
-- **1480 tests passing**
+- **1488 tests passing**
 - **4 backend feature parity**: interp + C / LLVM IR / Wasm runtime
   すべてが 16 realistic examples (~1500 LoC) で **diff = 0 PERFECT 一致**
-  (Phase 24-27)
+  (Phase 24-27)、Phase 36 で実例集を 118 本まで拡張
 - メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
   3 codegen backend すべてで動く
 - エフェクトシステム: cap-passing パターン + `signature ... = (...)` 引数束ね + `using [cap]` sugar + builtin Logger / Metrics
 - 借用注釈の細分化: `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` の 4 mode + borrow checker (place expression + if/match 分岐の伝播 + conflict matrix 完全網羅)
 - Q-010 標準コレクション: `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` が **interpreter + 3 backend** で動作 (Phase 15.x)
-- ポリモーフィズム: HM 推論 + let-poly + **多相 user let-rec の per-instantiation 特殊化** (Phase 23.3 / 25.5 / 26.4)
+- ポリモーフィズム: HM 推論 + let-poly + **多相 user let-rec の per-instantiation 特殊化** (Phase 23.3 / 25.5 / 26.4) + Phase 36 で narrow value restriction (mutable container を含む型を let-bind した時は generalize しない)
 - inner-fn lifting: `let rec inner = fn ... -> ...` を top-level に持ち上げ + 自由変数を prepend (Phase 25.3 / 26.3)
 - top-level 値 binding: `let total = mk_metrics();` のような非-fn let を fn body から参照可 (Phase 30.2 で 3 backend に global 化)
 - Wasm runtime: `scripts/run_wasm.js` (Node.js host harness, puts / read_file / write_file) で runtime 実行検証 (Phase 27.2)
 - FFI: `extern fn <name>: <ty>;` で libc 関数を 4 backend から直接呼出 (Phase 32、curried multi-arg 対応、int/bool/str/unit 型のみ MVP)
 - 言語 surface: `module M { ... }` (入れ子可) + `M.f` qualified access、`import "./path";` (importer-relative + canonical) によるファイル分割、`open M;`
+- **Phase 36 syntactic sugar (13 種)**: range `a..b` / operator section `(+ 1)` / cons `1 :: xs` / reverse pipe `f <| x` / apply `f @@ x` / lambda shorthand `\x -> ...` / string interpolation `"x = {show n}"` / `?` (Option) / `?!` (Result) early-return / list comprehension `[f x | x <- xs, p x]` / `if let pat = e then ... else ...` / `for x in xs do body` / `while cond do body`
+- **Phase 36 prelude 強化 (16 entry 追加)**: `range` / `list_filter` / `list_take` / `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` / `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` / `list_product` / `list_max` / `list_min` (累計 34 entry)
 - REPL: multi-line 入力、`:env` / `:show` / `:load` / `:reset`、Rust 風 code frame でエラー表示
 - 設計コンテキストは別リポ `internal design notes` (private)
 
@@ -83,6 +85,13 @@ $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 $ dune exec ./bin/mere.exe -- examples/toy_sql.mere
 # 1165 行の toy SQL engine (tokenizer + parser + executor + JOIN)、
 # 4 backend (interp + C + LLVM + Wasm) で 59 tests を diff=0 一致
+
+$ dune exec ./bin/mere.exe -- examples/calc.mere
+# Phase 36: recursive descent な arithmetic parser + `?!` Result chain。
+# `1 + 2 * 3` → 7、`(1 + 2) * 3` → 9、`10 / 0` → ERR division
+
+$ dune exec ./bin/mere.exe -- examples/maze_solver.mere
+# Phase 36: ASCII 8x12 maze の BFS pathfinding + path 可視化
 ```
 
 ## ドキュメント
@@ -94,14 +103,20 @@ $ dune exec ./bin/mere.exe -- examples/toy_sql.mere
 - **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
 - **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く `.mere` ファイル群 (61 本、[examples/README.md](examples/README.md) で
+- `examples/` — 動く `.mere` ファイル群 (118 本、[examples/README.md](examples/README.md) で
   カテゴリ別索引)。基本的な FizzBuzz / JSON parser / word count から、
   Q-010 collection の codegen demo (`vec_codegen_*.mere` /
   `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`)、
   realistic application (16 examples が 4 backend で PERFECT 一致): `json_parser` /
   `template_engine` / `word_freq` / `mini_shell` / `json_writer` / `chained_parse` /
-  `state_machine` / `ini_parser` / `regex_lite` まで、そして **1165 行の `toy_sql`**
-  (toy SQL engine — Phase 29 dogfood で書いた 59 tests、4 backend PERFECT)
+  `state_machine` / `ini_parser` / `regex_lite` まで、**1165 行の `toy_sql`**
+  (toy SQL engine — Phase 29 dogfood で書いた 59 tests、4 backend PERFECT)、
+  そして Phase 36 で追加した 47 本の sugar dogfood example: `calc` (recursive
+  descent arithmetic parser + `?!` Result chain) / `maze_solver` (BFS) /
+  `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` /
+  `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` /
+  `csv_summary` / `markdown_to_text` / `comprehension` / `if_let_demo` /
+  `for_loop_demo` / `while_loop_demo` / `sugar_showcase` ほか
 
 ## ビルド・実行
 
@@ -111,7 +126,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1480 tests
+dune runtest                                         # 1488 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -151,7 +166,7 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1480 tests
+├── test/test_basic.ml  # 1488 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js, puts / read_file / write_file)
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
