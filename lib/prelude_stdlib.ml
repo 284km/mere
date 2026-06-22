@@ -110,6 +110,60 @@ let rec list_flat_map = fn xs -> fn f ->
   | Nil -> Nil
   | Cons (h, t) -> list_append (f h) (list_flat_map t f);
 
+// Phase 36: 2 つの list を tuple に zip。長さが違う場合は短い方に合わせる
+let rec list_zip = fn xs -> fn ys ->
+  match xs with
+  | Nil -> Nil
+  | Cons (a, ta) ->
+    match ys with
+    | Nil -> Nil
+    | Cons (b, tb) -> Cons ((a, b), list_zip ta tb);
+
+// Phase 36: 全要素が述語を満たすか
+let rec list_for_all = fn xs -> fn p ->
+  match xs with
+  | Nil -> true
+  | Cons (h, t) -> if p h then list_for_all t p else false;
+
+// Phase 36: 述語を満たす要素が 1 つでもあるか
+let rec list_any = fn xs -> fn p ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if p h then true else list_any t p;
+
+// Phase 36: 等しい要素が含まれているか (== で比較)
+let rec list_member = fn xs -> fn v ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == v then true else list_member t v;
+
+// Phase 36: int list の総和 / 総積。`let rec` で書く理由は test の
+// codegen_with_decls helper が Top_let_rec を skip しつつ Top_let は処理
+// するため、list_fold 参照 (let rec で定義済) が解決できる順序を保つ。
+let rec list_sum = fn xs -> list_fold xs 0 (fn a -> fn x -> a + x);
+let rec list_product = fn xs -> list_fold xs 1 (fn a -> fn x -> a * x);
+
+// Phase 36: 最大 / 最小 (空 list は fail)
+let rec list_max = fn xs ->
+  match xs with
+  | Nil -> fail "list_max: empty list"
+  | Cons (h, t) ->
+    match t with
+    | Nil -> h
+    | Cons _ ->
+      let m = list_max t in
+      if h > m then h else m;
+
+let rec list_min = fn xs ->
+  match xs with
+  | Nil -> fail "list_min: empty list"
+  | Cons (h, t) ->
+    match t with
+    | Nil -> h
+    | Cons _ ->
+      let m = list_min t in
+      if h < m then h else m;
+
 // === Option helpers ===
 
 let rec option_map = fn opt -> fn f ->

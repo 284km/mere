@@ -2730,16 +2730,17 @@ let () =
     "apply(inc_as_value)";
 
   (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) ---
-     Phase 36 で prelude に `range` を追加した結果 __anon_0 が prelude 由来
-     になるので、user 由来の anon adapter は __anon_1 に slide した。 *)
+     Phase 36 で prelude に追加した helpers が __anon counter を消費する
+     ため、user 由来の anon adapter slot は前進する (substring match で
+     最新 slot を選ぶ)。 *)
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "} __anon_1_env;";
+    "} __anon_6_env;";
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "static int __anon_1_fn(void* __env_self_void, int x)";
+    "static int __anon_6_fn(void* __env_self_void, int x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -2930,11 +2931,11 @@ let () =
 
   (* --- LLVM IR codegen: 文字列 / print / ++ / str_len (Phase 5.3) --- *)
   assert_contains "llvm: str literal global"
-    (llvm "\"hi\"") "@.str_0 = private constant [3 x i8] c\"hi\\00\"";
+    (llvm "\"hi\"") "@.str_2 = private constant [3 x i8] c\"hi\\00\"";   (* Phase 36: prelude list_min/list_max が str_0, str_1 を消費 *)
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_0)";
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_2)";   (* Phase 36: prelude list_min/list_max が先に str_0, str_1 を取る *)
   assert_contains "llvm: print emits puts call"
     (llvm "print \"hi\"") "call i32 @puts(ptr ";
   assert_contains "llvm: ++ lowers to __lang_str_concat"
@@ -5719,15 +5720,14 @@ let () =
     "0";
   check "prelude: with prelude (default) prog.decls includes auto-injected"
     (let prog = Pipeline.parse_program "42" in
-     (* Phase 19.5: 3 types (list / option / result)
-        + Phase 21.2: 6 list helpers
-        + Phase 23.2: 3 option + 5 result helpers
-        + Phase 33.1: 1 option_and_then
-        + Phase 36: 1 range + 4 list helpers + 3 multi-gen helpers
-          (list_filter / list_take / list_drop / list_find /
-           list_append / list_concat / list_flat_map) = 26 total *)
+     (* Phase 19.5: 3 types + Phase 21.2: 6 list helpers
+        + Phase 23.2: 3 option + 5 result helpers + Phase 33.1: 1
+        + Phase 36 (sugar 期): 1 range + 4 list helpers + 3 flatten
+        + Phase 36 (helper batch): 8 helpers
+          (list_zip / list_for_all / list_any / list_member /
+           list_sum / list_product / list_max / list_min) = 34 total *)
      string_of_int (List.length prog.Ast.decls))
-    "26";
+    "34";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"
