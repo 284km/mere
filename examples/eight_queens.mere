@@ -16,10 +16,6 @@ let rec safe = fn (c: int) -> fn (queens: int list) -> fn (dist: int) ->
     else if (q - c == dist) || (c - q == dist) then false   // 対角
     else safe c rest (dist + 1);
 
-let rec range = fn (i: int) -> fn (n: int) ->
-  if i >= n then Nil
-  else Cons (i, range (i + 1) n);
-
 // 解の数を共有する単一セル Map (mutable cell の代わり)
 let counter = map_new ();
 let display_limit = 3;

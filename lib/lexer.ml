@@ -36,6 +36,7 @@ type token =
   | T_as              (* as — as-pattern: `| pat as name -> body` *)
   | T_underscore
   | T_ellipsis        (* ... — for spreading signature params *)
+  | T_dotdot          (* .. — range literal (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -100,6 +101,9 @@ let tokenize s =
         aux j acc
       | '.' when i + 2 < len && s.[i + 1] = '.' && s.[i + 2] = '.' ->
         advance 3; aux (i + 3) ((pos, T_ellipsis) :: acc)
+      | '.' when i + 1 < len && s.[i + 1] = '.' ->
+        (* Phase 36: `..` for range literals (e.g. `1..10`). *)
+        advance 2; aux (i + 2) ((pos, T_dotdot) :: acc)
       | '/' -> advance 1; aux (i + 1) ((pos, T_slash) :: acc)
       | '%' -> advance 1; aux (i + 1) ((pos, T_percent) :: acc)
       | '+' when i + 1 < len && s.[i + 1] = '+' ->

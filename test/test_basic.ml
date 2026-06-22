@@ -2729,15 +2729,17 @@ let () =
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "apply(inc_as_value)";
 
-  (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) --- *)
+  (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) ---
+     Phase 36 で prelude に `range` を追加した結果 __anon_0 が prelude 由来
+     になるので、user 由来の anon adapter は __anon_1 に slide した。 *)
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "} __anon_0_env;";
+    "} __anon_1_env;";
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "static int __anon_0_fn(void* __env_self_void, int x)";
+    "static int __anon_1_fn(void* __env_self_void, int x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -5720,9 +5722,10 @@ let () =
      (* Phase 19.5: 3 types (list / option / result)
         + Phase 21.2: 6 list helpers
         + Phase 23.2: 3 option + 5 result helpers
-        + Phase 33.1: 1 option_and_then = 18 total *)
+        + Phase 33.1: 1 option_and_then
+        + Phase 36: 1 range = 19 total *)
      string_of_int (List.length prog.Ast.decls))
-    "18";
+    "19";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"

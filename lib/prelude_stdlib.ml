@@ -55,6 +55,13 @@ let rec list_rev_into = fn acc -> fn xs ->
 // this binding's body under an env that lacks list_rev_into.
 let rec list_rev = fn xs -> list_rev_into Nil xs;
 
+// Phase 36: range literal `a..b` desugars to `range a b`.
+// Inclusive lower / inclusive upper: `range 1 5` = [1, 2, 3, 4, 5].
+// b < a → 空 list。逆向きが必要なら `list_rev (range b a)`。
+let rec range = fn (a: int) -> fn (b: int) ->
+  if a > b then Nil
+  else Cons (a, range (a + 1) b);
+
 // === Option helpers ===
 
 let rec option_map = fn opt -> fn f ->

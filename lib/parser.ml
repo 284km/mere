@@ -719,7 +719,7 @@ let rec parse_program_internal tokens =
     in
     loop lhs toks
   and cmp toks =
-    let lhs, toks = sum toks in
+    let lhs, toks = range_expr toks in
     let cmp_op = function
       | T_eq_eq -> Some Ast.Eq
       | T_bang_eq -> Some Ast.Ne
@@ -733,9 +733,20 @@ let rec parse_program_internal tokens =
     | (pos, tk) :: rest ->
       (match cmp_op tk with
        | Some op ->
-         let rhs, toks = sum rest in
+         let rhs, toks = range_expr rest in
          mk pos (Ast.Cmp (op, lhs, rhs)), toks
        | None -> lhs, toks)
+    | _ -> lhs, toks
+  (* Phase 36: range literal `e1 .. e2` desugars to `range e1 e2`
+     (returns `int list`). Below cmp so `1..10` works as one expr. *)
+  and range_expr toks =
+    let lhs, toks = sum toks in
+    match toks with
+    | (pos, T_dotdot) :: rest ->
+      let rhs, toks = sum rest in
+      let range_var = mk pos (Ast.Var "range") in
+      let app1 = mk pos (Ast.App (range_var, lhs)) in
+      mk pos (Ast.App (app1, rhs)), toks
     | _ -> lhs, toks
   and sum toks =
     let lhs, toks = term toks in

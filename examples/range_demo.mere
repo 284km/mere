@@ -1,0 +1,45 @@
+// range_demo: Phase 36 で導入した `a..b` range literal の demo
+//
+// 構文: `a..b` は `range a b` の syntactic sugar で、a..b (両端 inclusive)
+//   の int list を返す。`range` は prelude に追加された組み込み関数。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== range_demo (Phase 36) ===";
+
+// 基本: 1..5
+let _ = print "--- basic 1..5 ---";
+let _ = list_iter (1..5) (fn (x: int) -> print (show x));
+
+// 空 range
+let _ = print "--- empty 10..5 ---";
+let _ = print ("len = " ++ show (list_len (10..5)));
+
+// fold + show: 1..10 の合計
+let _ = print "--- sum 1..10 ---";
+let total = list_fold (1..10) 0 (fn (acc: int) -> fn (x: int) -> acc + x);
+let _ = print ("sum = " ++ show total);
+
+// 計算式の range
+let n = 5;
+let _ = print ("--- range with expr (1..(n*2-1)) ---");
+let _ = list_iter (1..(n * 2 - 1)) (fn (x: int) -> print (show x));
+
+// 階乗を range + fold で
+let factorial = fn (m: int) ->
+  list_fold (1..m) 1 (fn (acc: int) -> fn (x: int) -> acc * x);
+
+let _ = print "--- factorials ---";
+let _ = print ("5! = " ++ show (factorial 5));
+let _ = print ("8! = " ++ show (factorial 8));
+let _ = print ("10! = " ++ show (factorial 10));
+
+// 平方の合計: sum of i*i for i in 1..n
+let sum_sq = fn (m: int) ->
+  list_fold (1..m) 0 (fn (acc: int) -> fn (x: int) -> acc + x * x);
+
+let _ = print "--- sum of squares ---";
+let _ = print ("1..10 -> " ++ show (sum_sq 10));   // 385
+let _ = print ("1..20 -> " ++ show (sum_sq 20));   // 2870
+
+0
