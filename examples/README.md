@@ -95,6 +95,7 @@ backend いずれかへ codegen。
 | [prime_sieve.mere](prime_sieve.mere) ⭐ | エラトステネスのふるい (Vec[R, bool] + vec_set + let rec loop、50 未満の素数 15 個を抽出)。H1 |
 | [rate_limiter.mere](rate_limiter.mere) ⭐ | 固定 60 秒 window の rate limiter (2 つの Map で window_start + count を保持)。Phase 30.2 top-level global を 2 つ dogfood、4 backend で diff = 0。G5 |
 | [stack_calc.mere](stack_calc.mere) ⭐ | RPN evaluator (tok variant + op_kind variant + `'a stk` linked list stack)。div-by-zero fallback、8 test cases。C4 |
+| [markdown_toc.mere](markdown_toc.mere) ⭐ | Markdown heading 検出 + TOC 生成 (`#`/`##`/`###` … で depth 判定、region 内 StrBuf で組み立て)。G6 |
 
 ### Q-010 collection 基本
 
