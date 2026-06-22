@@ -1269,6 +1269,32 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_instr "call $__lang_float_of_str";  (* env import, f64 *)
     emit_float_alloc_from_f64_on_stack ()
+  (* Phase 34.4: libm functions — Wasm intrinsic は sqrt のみ、他は host import *)
+  | Ast.App ({ node = Ast.Var "sqrt"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "f64.sqrt";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var fname; _ }, a_e)
+    when fname = "sin" || fname = "cos" || fname = "tan" ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr (Printf.sprintf "call $__lang_%s" fname);
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_expr b_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "call $__lang_f_pow";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_expr b_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "call $__lang_atan2";
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
     when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     emit_expr arg;
@@ -4367,7 +4393,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     "  (import \"env\" \"__lang_str_of_float\" (func $__lang_str_of_float (param f64) (result i32)))\n\
     \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n"
   in
-  let file_io_imports = file_io_imports ^ float_io_imports in
+  (* Phase 34.4: libm host imports (sin / cos / tan / pow / atan2)。sqrt は
+     Wasm intrinsic で済むので host import 不要。 *)
+  let libm_imports =
+    "  (import \"env\" \"__lang_sin\" (func $__lang_sin (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_cos\" (func $__lang_cos (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_tan\" (func $__lang_tan (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_f_pow\" (func $__lang_f_pow (param f64) (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_atan2\" (func $__lang_atan2 (param f64) (param f64) (result f64)))\n"
+  in
+  let file_io_imports = file_io_imports ^ float_io_imports ^ libm_imports in
   (* Phase 32.4 (C1 FFI): extern fn を env host imports として宣言。
      str / bool / int / unit を全て i32 として表現。unit 引数は param なし、
      unit return は result なし。 *)

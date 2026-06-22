@@ -1,0 +1,66 @@
+// math_demo: float + libm 関数で簡単な数学を実演 (Phase 34.5)
+//
+// 目的: Phase 34 で 3 backend に投入した float (TyFloat / Float_lit / f_*
+//   演算) と libm (sqrt / sin / cos / tan / f_pow / atan2) を combined で
+//   dogfood。Pythagorean theorem, 三角関数の identity, べき乗計算等を
+//   4 backend で diff = 0 一致させる。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/math_demo.mere
+
+let _ = print "=== math_demo (Phase 34) ===";
+
+// pi / e 定数
+let _ = print ("pi    = " ++ str_of_float pi);
+let _ = print ("e     = " ++ str_of_float e);
+
+// Pythagorean theorem: 3^2 + 4^2 = 25, sqrt(25) = 5
+let _ = print "--- Pythagorean theorem (a=3, b=4) ---";
+let _ =
+  let a2 = f_mul 3.0 3.0 in
+  let b2 = f_mul 4.0 4.0 in
+  let c = sqrt (f_add a2 b2) in
+  print ("hypotenuse = " ++ str_of_float c);  // 5.
+
+// sin(0) = 0, cos(0) = 1, sin(pi) ≈ 0
+let _ = print "--- trigonometric identities ---";
+let _ = print ("sin(0)  = " ++ str_of_float (sin 0.0));   // 0.
+let _ = print ("cos(0)  = " ++ str_of_float (cos 0.0));   // 1.
+let _ = print ("sin(pi) ≈ " ++ str_of_float (sin pi));    // ~0 (1.22e-16)
+
+// sin^2 + cos^2 = 1 (for any x)
+let _ =
+  let x = 0.7 in
+  let s = sin x in
+  let c = cos x in
+  let identity = f_add (f_mul s s) (f_mul c c) in
+  print ("sin^2(0.7) + cos^2(0.7) = " ++ str_of_float identity);   // 1.
+
+// Powers
+let _ = print "--- powers ---";
+let _ = print ("2^10  = " ++ str_of_float (f_pow 2.0 10.0));   // 1024.
+let _ = print ("3^3   = " ++ str_of_float (f_pow 3.0 3.0));    // 27.
+let _ = print ("sqrt(2)^2 = " ++ str_of_float (f_pow (sqrt 2.0) 2.0));  // ~2
+
+// Int <-> Float conversions
+let _ = print "--- conversions ---";
+let _ = print ("float_of_int 42       = " ++ str_of_float (float_of_int 42));   // 42.
+let _ = print ("int_of_float 3.7      = " ++ show (int_of_float 3.7));          // 3
+let _ = print ("int_of_float (-2.9)   = " ++ show (int_of_float (f_neg 2.9)));  // -2
+
+// Atan2 (4 象限)
+let _ = print "--- atan2 (in radians) ---";
+let _ = print ("atan2(1, 1) = pi/4 ≈ " ++ str_of_float (atan2 1.0 1.0));   // ~0.785
+let _ = print ("atan2(1, 0) = pi/2 ≈ " ++ str_of_float (atan2 1.0 0.0));   // ~1.571
+
+// 円周 + 面積
+let _ =
+  let r = 5.0 in
+  let circumference = f_mul (f_mul 2.0 pi) r in
+  let area = f_mul pi (f_pow r 2.0) in
+  let _ = print ("circumference of r=5 circle = " ++ str_of_float circumference) in
+  print ("area of r=5 circle           = " ++ str_of_float area);
+
+0

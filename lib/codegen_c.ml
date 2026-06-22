@@ -1049,6 +1049,19 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
      | Ast.Var "float_of_str" ->
        Printf.sprintf "(atof(%s))" (emit_expr arg)
+     (* Phase 34.4: libm math functions — clang -lm で自動リンク *)
+     | Ast.Var "sqrt" ->
+       Printf.sprintf "sqrt(%s)" (emit_expr arg)
+     | Ast.Var "sin" ->
+       Printf.sprintf "sin(%s)" (emit_expr arg)
+     | Ast.Var "cos" ->
+       Printf.sprintf "cos(%s)" (emit_expr arg)
+     | Ast.Var "tan" ->
+       Printf.sprintf "tan(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e) ->
+       Printf.sprintf "pow(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "atan2"; _ }, a_e) ->
+       Printf.sprintf "atan2(%s, %s)" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->
        (* Phase 24.3: str_split s delim — curried. Returns list_str. *)
        str_split_used := true;
@@ -4548,6 +4561,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <stdlib.h>";
       "#include <string.h>";
       "#include <setjmp.h>";
+      "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
       "";
       region_runtime_helpers;
       "";

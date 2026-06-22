@@ -87,6 +87,12 @@ const wasmPath = process.argv[2];
       const s = readCStr(ptr);
       return parseFloat(s);
     },
+    // Phase 34.4: libm 関数 (Wasm intrinsic に無いものを host から提供)
+    __lang_sin: Math.sin,
+    __lang_cos: Math.cos,
+    __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow,
+    __lang_atan2: Math.atan2,
     // Phase 32.4 (C1 FFI): default impls for common libc functions that
     // Mere programs declare via `extern fn`. Add more as needed.
     getpid: () => process.pid,

@@ -98,6 +98,8 @@ backend いずれかへ codegen。
 | [markdown_toc.mere](markdown_toc.mere) ⭐ | Markdown heading 検出 + TOC 生成 (`#`/`##`/`###` … で depth 判定、region 内 StrBuf で組み立て)。G6 |
 | [bank_account.mere](bank_account.mere) ⭐ | functional な銀行口座 (account variant + tx variant + state-passing replay + Vec[R, tx] ledger)。G4 |
 | [graph_bfs.mere](graph_bfs.mere) ⭐ | 有向グラフの BFS (Map[int, int list] 隣接 + Map[int, bool] visited)。3 component シナリオを 4 backend で検証。H3 |
+| **Phase 34 (2026-06-22) 追加 — float + libm** | |
+| [math_demo.mere](math_demo.mere) ⭐ | float の四則演算 + sqrt / sin / cos / tan / f_pow / atan2 を combined で dogfood。Pythagorean / 三角恒等式 / 円周計算等。4 backend で diff = 0 |
 
 ### Q-010 collection 基本
 

@@ -2380,6 +2380,32 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call double @atof(ptr %s)" r av);
     r
+  (* Phase 34.4: libm functions (intrinsics where available) *)
+  | Ast.App ({ node = Ast.Var fname; _ }, a_e)
+    when fname = "sqrt" || fname = "sin" || fname = "cos" || fname = "tan" ->
+    let llvm_fn = match fname with
+      | "sqrt" -> "@llvm.sqrt.f64"
+      | "sin" -> "@llvm.sin.f64"
+      | "cos" -> "@llvm.cos.f64"
+      | "tan" -> "@tan"  (* tan は LLVM intrinsic に無いので libm *)
+      | _ -> "@sqrt"
+    in
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double %s(double %s)" r llvm_fn av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @llvm.pow.f64(double %s, double %s)" r av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @atan2(double %s, double %s)" r av bv);
+    r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     (* Phase 25.1: substring s start end_ — 3-arg curried. *)
     let sv = emit_expr env s_e in
@@ -4019,13 +4045,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
   | Ast.Float_lit f ->
-    (* Phase 34.2: LLVM IR の double リテラル。LLVM は hexadecimal float も
-       受理するが、十分な精度の decimal で OK (clang は roundtrip 保証)。
-       NaN / Infinity は LLVM 標準キーワード。 *)
+    (* Phase 34.2: LLVM IR の double リテラル。LLVM は integer-valued な
+       float でも decimal point を要求するので、bit pattern を直接 hex で
+       emit する (roundtrip 安全 + format 不要)。 *)
     if f <> f then "0x7FF8000000000000"  (* canonical NaN *)
     else if f = infinity then "0x7FF0000000000000"
     else if f = neg_infinity then "0xFFF0000000000000"
-    else Printf.sprintf "%.17g" f
+    else
+      let bits = Int64.bits_of_float f in
+      Printf.sprintf "0x%016Lx" bits
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
    from `%env_self`, then evaluate the original Fun body with the
@@ -4193,6 +4221,13 @@ let runtime_decls =
       "declare i32 @atoi(ptr)";
       "declare double @atof(ptr)";  (* Phase 34.2: float_of_str *)
       "declare double @llvm.fabs.f64(double)";  (* Phase 34.2: f_abs *)
+      (* Phase 34.4: libm intrinsics + functions (linked via -lm by clang) *)
+      "declare double @llvm.sqrt.f64(double)";
+      "declare double @llvm.sin.f64(double)";
+      "declare double @llvm.cos.f64(double)";
+      "declare double @tan(double)";
+      "declare double @llvm.pow.f64(double, double)";
+      "declare double @atan2(double, double)";
       "declare i32 @setjmp(ptr) returns_twice";
       "declare void @longjmp(ptr, i32) noreturn";
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
