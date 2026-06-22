@@ -1,0 +1,60 @@
+// edit_distance: Levenshtein distance (insert / delete / substitute = each cost 1)
+//
+// 古典的 DP: D[i][j] = min(D[i-1][j]+1, D[i][j-1]+1, D[i-1][j-1] + (a[i]==b[j] ? 0 : 1))
+// Map[str, int] を 2D table として使用 (key は "i,j")。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let min3 = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let ab = if a < b then a else b in
+  if ab < c then ab else c;
+
+let key2 = fn (i: int) -> fn (j: int) -> show i ++ "," ++ show j;
+
+let edit_distance = fn (a: str) -> fn (b: str) ->
+  let m = str_len a in
+  let n = str_len b in
+  let dp = map_new () in
+  // 境界: D[0][j] = j, D[i][0] = i
+  let rec init_col = fn j ->
+    if j > n then ()
+    else
+      let _ = map_set dp (key2 0 j) j in
+      init_col (j + 1) in
+  let rec init_row = fn i ->
+    if i > m then ()
+    else
+      let _ = map_set dp (key2 i 0) i in
+      init_row (i + 1) in
+  let _ = init_col 0 in
+  let _ = init_row 0 in
+  // fill table by row
+  let rec fill = fn i -> fn j ->
+    if i > m then ()
+    else if j > n then fill (i + 1) 1
+    else
+      let ca = char_at a (i - 1) in
+      let cb = char_at b (j - 1) in
+      let cost = if ca == cb then 0 else 1 in
+      let d_del = map_get dp (key2 (i - 1) j) + 1 in
+      let d_ins = map_get dp (key2 i (j - 1)) + 1 in
+      let d_sub = map_get dp (key2 (i - 1) (j - 1)) + cost in
+      let _ = map_set dp (key2 i j) (min3 d_del d_ins d_sub) in
+      fill i (j + 1) in
+  let _ = fill 1 1 in
+  map_get dp (key2 m n);
+
+let report = fn (a: str) -> fn (b: str) ->
+  print ("edit_distance " ++ a ++ " " ++ b ++ " = " ++ show (edit_distance a b));
+
+let _ = print "=== Levenshtein distance ===";
+let _ = report "kitten" "sitting";   // 3
+let _ = report "saturday" "sunday";   // 3
+let _ = report "" "abc";              // 3
+let _ = report "abc" "";              // 3
+let _ = report "same" "same";         // 0
+let _ = report "abc" "abd";           // 1
+let _ = report "intention" "execution";  // 5
+let _ = report "a" "b";               // 1
+
+0

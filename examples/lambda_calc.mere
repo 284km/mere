@@ -1,0 +1,100 @@
+// lambda_calc: 純粋無型 λ計算の interpreter (normal-order substitution)
+//
+// AST: Var (name) | Lam (name, body) | LApp (f, arg)
+// 簡略化のため capture-avoiding substitution は無し (variable shadowing 制御
+// のみ)。 実用には α-rename が要るが、 demo の Church numeral では衝突回避
+// 可能な named scheme で書く。
+//
+// 実行モード: interp + C + LLVM で diff = 0。 Wasm は深い variant 再帰で
+// 現状 runtime trap (要調査、 Wasm の stack / heap limit 周り疑い)。
+// `step` の Lam 再帰節を外せば Wasm でも HNF まで動くが、 完全な normal
+// form が出ないため demo の Church arithmetic が成立しない。
+
+type lambda =
+  | Var of str
+  | Lam of str * lambda
+  | LApp of lambda * lambda;
+
+// substitution: e[x ↦ replacement]
+let rec sub = fn (x: str) -> fn (replacement: lambda) -> fn (expr: lambda) ->
+  match expr with
+  | Var y -> if x == y then replacement else expr
+  | Lam (y, body) ->
+    if x == y then expr  // y が x を shadow している
+    else Lam (y, sub x replacement body)
+  | LApp (f, a) -> LApp (sub x replacement f, sub x replacement a);
+
+// 1 step β reduction (normal-order: leftmost-outermost redex を 1 つ縮約)
+let rec step = fn (e: lambda) ->
+  match e with
+  | LApp (Lam (x, body), arg) -> sub x arg body
+  | LApp (f, a) ->
+    let f2 = step f in
+    if not (eq_expr f f2) then LApp (f2, a)
+    else LApp (f, step a)
+  | Lam (x, body) -> Lam (x, step body)
+  | Var _ -> e
+
+and eq_expr = fn (a: lambda) -> fn (b: lambda) ->
+  match a with
+  | Var x ->
+    (match b with | Var y -> x == y | _ -> false)
+  | Lam (x, ba) ->
+    (match b with | Lam (y, bb) -> x == y && eq_expr ba bb | _ -> false)
+  | LApp (f1, a1) ->
+    (match b with | LApp (f2, a2) -> eq_expr f1 f2 && eq_expr a1 a2 | _ -> false);
+
+// max_steps 回まで step、 fixed point に達したら停止
+let rec normalize = fn (e: lambda) -> fn (n: int) ->
+  if n <= 0 then e
+  else
+    let e2 = step e in
+    if eq_expr e e2 then e
+    else normalize e2 (n - 1);
+
+let rec show_lambda = fn (e: lambda) ->
+  match e with
+  | Var x -> x
+  | Lam (x, body) -> "(λ" ++ x ++ "." ++ show_lambda body ++ ")"
+  | LApp (f, a) -> "(" ++ show_lambda f ++ " " ++ show_lambda a ++ ")";
+
+// Church encoding
+//   0 = λf.λx.x
+//   1 = λf.λx.f x
+//   2 = λf.λx.f (f x)
+//   3 = λf.λx.f (f (f x))
+let zero = Lam ("f", Lam ("x", Var "x"));
+let one = Lam ("f", Lam ("x", LApp (Var "f", Var "x")));
+let two = Lam ("f", Lam ("x", LApp (Var "f", LApp (Var "f", Var "x"))));
+let three = Lam ("f", Lam ("x", LApp (Var "f", LApp (Var "f", LApp (Var "f", Var "x")))));
+
+// 後者関数: succ = λn.λf.λx.f (n f x)
+let succ_e = Lam ("n", Lam ("f", Lam ("x",
+  LApp (Var "f", LApp (LApp (Var "n", Var "f"), Var "x")))));
+
+// 加算: add = λm.λn.λf.λx.m f (n f x)
+let add_e = Lam ("m", Lam ("n", Lam ("f", Lam ("x",
+  LApp (LApp (Var "m", Var "f"),
+    LApp (LApp (Var "n", Var "f"), Var "x"))))));
+
+let _ = print "=== Church numerals ===";
+let _ = print ("0 = " ++ show_lambda zero);
+let _ = print ("1 = " ++ show_lambda one);
+let _ = print ("2 = " ++ show_lambda two);
+
+let _ = print "=== succ 0 should beta-reduce to 1 ===";
+let _ = print ("succ 0 = " ++ show_lambda (normalize (LApp (succ_e, zero)) 20));
+let _ = print ("(eq 1)  " ++ show_lambda one);
+
+let _ = print "=== succ 1 (= 2) ===";
+let _ = print ("succ 1 = " ++ show_lambda (normalize (LApp (succ_e, one)) 50));
+
+let _ = print "=== add 1 2 (= 3) ===";
+let _ = print ("add 1 2 = " ++ show_lambda (normalize (LApp (LApp (add_e, one), two)) 80));
+let _ = print ("(eq 3)    " ++ show_lambda three);
+
+let _ = print "=== identity I = λx.x、 (I I) = I ===";
+let id_e = Lam ("x", Var "x");
+let _ = print ("(I I) = " ++ show_lambda (normalize (LApp (id_e, id_e)) 5));
+
+0

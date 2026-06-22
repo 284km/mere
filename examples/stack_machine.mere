@@ -1,0 +1,129 @@
+// stack_machine: 簡易 RPN (逆ポーランド記法) VM
+//
+// 命令を順に実行する小さなスタックマシン。 命令は variant `instr` で表現、
+// stack は Map[str, int] を「LIFO 配列」として使う (top カウンタ + 数値 slot)。
+//
+// 命令セット:
+//   Push n      — n を push
+//   Add         — top 2 つを add してその結果を push
+//   Sub / Mul / Div  同様
+//   Neg         — top の符号反転
+//   Dup         — top を複製
+//   Swap        — top 2 つを入れ替え
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type instr =
+  | Push of int
+  | Add
+  | Sub
+  | Mul
+  | Divv     // `div` は libc にあるので `divv` (docs/patterns.md §5)
+  | Neg
+  | Dup
+  | Swap;
+
+let st_new = fn () ->
+  let s = map_new () in
+  let _ = map_set s "top" 0 in
+  s;
+
+let st_push = fn s -> fn (x: int) ->
+  let t = map_get s "top" in
+  let _ = map_set s (show t) x in
+  let _ = map_set s "top" (t + 1) in
+  ();
+
+let st_pop = fn s ->
+  let t = map_get s "top" in
+  let v = map_get s (show (t - 1)) in
+  let _ = map_set s "top" (t - 1) in
+  v;
+
+let exec_one = fn s -> fn (i: instr) ->
+  match i with
+  | Push n -> st_push s n
+  | Add ->
+    let b = st_pop s in
+    let a = st_pop s in
+    st_push s (a + b)
+  | Sub ->
+    let b = st_pop s in
+    let a = st_pop s in
+    st_push s (a - b)
+  | Mul ->
+    let b = st_pop s in
+    let a = st_pop s in
+    st_push s (a * b)
+  | Divv ->
+    let b = st_pop s in
+    let a = st_pop s in
+    st_push s (a / b)
+  | Neg ->
+    let x = st_pop s in
+    st_push s (0 - x)
+  | Dup ->
+    let x = st_pop s in
+    let _ = st_push s x in
+    st_push s x
+  | Swap ->
+    let b = st_pop s in
+    let a = st_pop s in
+    let _ = st_push s b in
+    st_push s a;
+
+let run = fn (prog: instr list) ->
+  let s = st_new () in
+  let _ = list_iter prog (fn i -> exec_one s i) in
+  if (map_get s "top") == 0 then 0
+  else st_pop s;
+
+// 表示用
+let show_instr = fn (i: instr) ->
+  match i with
+  | Push n -> "Push " ++ show n
+  | Add -> "Add"
+  | Sub -> "Sub"
+  | Mul -> "Mul"
+  | Divv -> "Div"
+  | Neg -> "Neg"
+  | Dup -> "Dup"
+  | Swap -> "Swap";
+
+let rec show_prog = fn (xs: instr list) -> fn first ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, t) ->
+    let p = if first then "" else "; " in
+    p ++ show_instr h ++ show_prog t false;
+
+let report = fn (label: str) -> fn (prog: instr list) ->
+  print (label ++ "  ⇒  " ++ show (run prog) ++ "    (program: [" ++ show_prog prog true ++ "])");
+
+let _ = print "=== stack machine RPN ===";
+
+// 1 + 2 = 3
+let _ = report "1 + 2" [Push 1, Push 2, Add];
+
+// (3 + 4) * 5 = 35
+let _ = report "(3 + 4) * 5" [Push 3, Push 4, Add, Push 5, Mul];
+
+// 10 - 4 = 6
+let _ = report "10 - 4" [Push 10, Push 4, Sub];
+
+// 100 / 4 = 25
+let _ = report "100 / 4" [Push 100, Push 4, Divv];
+
+// -42
+let _ = report "-(42)" [Push 42, Neg];
+
+// (1 + 2) * (3 + 4) = 21
+let _ = report "(1 + 2) * (3 + 4)" [Push 1, Push 2, Add, Push 3, Push 4, Add, Mul];
+
+// Dup test: 5 * 5 = 25
+let _ = report "5 * 5 (via Dup)" [Push 5, Dup, Mul];
+
+// Swap test: 10 - 3 with Swap inverts to 3 - 10
+let _ = report "3 - 10 (via Push 10/3 + Swap)" [Push 10, Push 3, Swap, Sub];
+
+0

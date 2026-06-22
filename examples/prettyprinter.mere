@@ -1,0 +1,126 @@
+// prettyprinter: Wadler-style pretty printer combinator (簡略版)
+//
+// 文献: Philip Wadler, "A prettier printer" (2003)
+// document を combinator で記述、 layout 戦略 (line break vs space) を
+// width に基づいて自動選択。
+//
+// doc:
+//   Empty             - 空
+//   Text s            - 文字列
+//   Line              - 改行 (group 内では space)
+//   Concat (d1, d2)   - 連結
+//   Nest (n, d)       - インデント +n
+//   Group d           - flat (1 行) or break (改行) を選択
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type doc =
+  | DEmpty
+  | DText of str
+  | DLine
+  | DConcat of doc * doc
+  | DNest of int * doc
+  | DGroup of doc;
+
+// 「flat = true なら DLine を space に、 false なら改行 + indent に」 で
+// レイアウト。 width はここでは固定 fitsCheck (簡略)。
+let space_chars = fn (n: int) ->
+  let rec go = fn i -> fn acc ->
+    if i <= 0 then acc
+    else go (i - 1) (acc ++ " ") in
+  go n "";
+
+// document を flat にしたときの長さ (DLine は 1 char = space として算入)
+let rec doc_width = fn (d: doc) ->
+  match d with
+  | DEmpty -> 0
+  | DText s -> str_len s
+  | DLine -> 1
+  | DConcat (a, b) -> doc_width a + doc_width b
+  | DNest (_, d2) -> doc_width d2
+  | DGroup d2 -> doc_width d2;
+
+// d を indent level=k で render。 各 DLine で改行 + indent。 ただし
+// enclosing group が fit するなら flat (space に).
+let rec layout = fn (d: doc) -> fn (k: int) -> fn (width: int) -> fn (col: int) ->
+  match d with
+  | DEmpty -> ""
+  | DText s -> s
+  | DLine -> "\n" ++ space_chars k
+  | DConcat (a, b) ->
+    let sa = layout a k width col in
+    let len_a = str_len sa in
+    // col after sa: 改行があれば再計算が面倒なので簡略化 (col 追跡しない)
+    let _ = len_a in
+    sa ++ layout b k width col
+  | DNest (n, d2) -> layout d2 (k + n) width col
+  | DGroup d2 ->
+    // remaining width で d2 が flat に収まるか
+    if col + doc_width d2 <= width then
+      flat d2
+    else
+      layout d2 k width col
+
+and flat = fn (d: doc) ->
+  match d with
+  | DEmpty -> ""
+  | DText s -> s
+  | DLine -> " "
+  | DConcat (a, b) -> flat a ++ flat b
+  | DNest (_, d2) -> flat d2
+  | DGroup d2 -> flat d2;
+
+let pretty = fn (width: int) -> fn (d: doc) ->
+  layout d 0 width 0;
+
+// よく使う combinators
+let text = fn s -> DText s;
+let line = DLine;
+let concat = fn d1 -> fn d2 -> DConcat (d1, d2);
+let nest = fn n -> fn d -> DNest (n, d);
+let group = fn d -> DGroup d;
+let empty = DEmpty;
+
+// 複数 doc を [d1, d2, ...] で渡せる helper
+let rec concat_all = fn (xs: doc list) ->
+  match xs with
+  | Nil -> empty
+  | Cons (h, t) -> concat h (concat_all t);
+
+// 区切り sep を間に挟む
+let rec join_with = fn (sep: doc) -> fn (xs: doc list) ->
+  match xs with
+  | Nil -> empty
+  | Cons (h, Nil) -> h
+  | Cons (h, t) -> concat h (concat sep (join_with sep t));
+
+let _ = print "=== Wadler pretty printer ===";
+
+let _ = print "--- short doc (fits in 40 cols) ---";
+// short tuple printed flat: (1, 2, 3)
+let small_doc = group (concat_all [
+  text "(",
+  join_with (concat (text ",") line) [text "1", text "2", text "3"],
+  text ")"
+]);
+let _ = print (pretty 40 small_doc);
+
+let _ = print "--- big doc (40 col width, wraps) ---";
+// big tuple breaks across lines when width exceeded
+let big_doc = group (concat_all [
+  text "Function(",
+  nest 2 (concat line (join_with (concat (text ",") line) [
+    text "very_long_argument_name_1",
+    text "very_long_argument_name_2",
+    text "very_long_argument_name_3"
+  ])),
+  line,
+  text ")"
+]);
+let _ = print (pretty 40 big_doc);
+
+// Note: 簡略化のため col 追跡を実装していないので、 group 判定は doc 全体の
+// flat 幅 vs width のみで判断する。 完全な Wadler 流アルゴリズムは
+// 39 行目以降の Daan Leijen "Wadler/Leijen pp" を参照。
+
+0

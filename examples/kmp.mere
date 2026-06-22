@@ -1,0 +1,83 @@
+// kmp: Knuth-Morris-Pratt 文字列検索 (O(N+M))
+//
+// 失敗関数 (failure function / prefix function) を pattern から事前計算、
+// text を 1 pass で走査して mismatch 時に shift。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// pat の failure function を Map で計算: fail[i] = pat[0..i-1] の最長
+// proper prefix && suffix の長さ
+let compute_fail = fn (pat: str) ->
+  let m = str_len pat in
+  let fail = map_new () in
+  let _ = map_set fail "0" 0 in
+  let _ = if m >= 1 then let _ = map_set fail "1" 0 in () else () in
+  let rec build = fn i -> fn k ->
+    if i >= m then ()
+    else
+      let pi = char_at pat i in
+      let pk = char_at pat k in
+      if k > 0 && pi != pk then
+        // mismatch: 失敗関数を辿って k を減らす
+        build i (map_get fail (show k))
+      else
+        let new_k = if pi == pk then k + 1 else 0 in
+        let _ = map_set fail (show (i + 1)) new_k in
+        build (i + 1) new_k in
+  let _ = build 1 0 in
+  fail;
+
+// pat を text 内で検索、 見つけた全 index の list (左端) を返す
+let kmp_search = fn (text: str) -> fn (pat: str) ->
+  let n = str_len text in
+  let m = str_len pat in
+  if m == 0 then Nil
+  else
+    let fail = compute_fail pat in
+    let acc = map_new () in
+    let _ = map_set acc "count" 0 in
+    let rec scan = fn i -> fn j -> fn results ->
+      if i >= n then results
+      else
+        let ti = char_at text i in
+        let pj = char_at pat j in
+        if ti == pj then
+          if j == m - 1 then
+            // match found at i - (m - 1)
+            scan (i + 1) (map_get fail (show (j + 1))) (Cons (i - m + 1, results))
+          else
+            scan (i + 1) (j + 1) results
+        else if j > 0 then
+          scan i (map_get fail (show j)) results
+        else
+          scan (i + 1) 0 results in
+    // reverse to get left-to-right
+    let rec rev = fn (xs: int list) -> fn (acc: int list) ->
+      match xs with
+      | Nil -> acc
+      | Cons (h, t) -> rev t (Cons (h, acc)) in
+    let _ = acc in
+    rev (scan 0 0 (Nil: int list)) Nil;
+
+let show_list = fn (xs: int list) ->
+  let rec go = fn (xs: int list) -> fn first ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) ->
+      let prefix = if first then "" else ", " in
+      prefix ++ show h ++ go t false in
+  "[" ++ go xs true ++ "]";
+
+let report = fn (text: str) -> fn (pat: str) ->
+  print ("kmp_search \"" ++ text ++ "\" \"" ++ pat ++ "\" = " ++ show_list (kmp_search text pat));
+
+let _ = print "=== KMP string search ===";
+let _ = report "abracadabra" "abra";          // [0, 7]
+let _ = report "aaaaa" "aa";                  // [0, 1, 2, 3]
+let _ = report "aabaabaaab" "aabaaab";        // [3]
+let _ = report "hello world hello again" "hello";  // [0, 12]
+let _ = report "ABABDABACDABABCABAB" "ABABCABAB";  // [10]
+let _ = report "xxxx" "yyyy";                  // []
+let _ = report "match exact" "match exact";    // [0]
+
+0
