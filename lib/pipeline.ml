@@ -35,10 +35,70 @@ let parse_only s =
   Ast.desugar_program prog
 
 (* Process top-decls in order, updating envs and the typer's constructor table. *)
+(* Phase 38.A3: top-level fn 名が libc / libm / C キーワードと衝突すると
+   C codegen 時 compile error になる。 typer / eval は影響を受けないが、
+   parser を通った段階で warning を出して user を助ける。 詳細は
+   docs/patterns.md §5 参照。 *)
+let reserved_c_names =
+  [
+    (* C keywords *)
+    "short"; "long"; "int"; "char"; "float"; "double";
+    "signed"; "unsigned"; "register"; "static"; "auto"; "extern";
+    "const"; "volatile"; "restrict"; "inline";
+    "goto"; "return"; "break"; "continue"; "switch"; "case"; "default";
+    "do"; "while"; "for"; "if"; "else";
+    "sizeof"; "typedef"; "struct"; "union"; "enum"; "void";
+    (* libc stdlib.h *)
+    "div"; "ldiv"; "exit"; "abort"; "atexit"; "atof"; "atoi"; "atol";
+    "free"; "malloc"; "calloc"; "realloc"; "system";
+    "getenv"; "setenv"; "putenv"; "unsetenv";
+    "rand"; "srand"; "abs"; "labs";
+    "qsort"; "bsearch"; "mergesort";
+    (* libm math.h *)
+    "pow"; "sqrt"; "sin"; "cos"; "tan"; "asin"; "acos"; "atan"; "atan2";
+    "exp"; "log"; "log10"; "log2"; "ceil"; "floor"; "round"; "trunc";
+    "fabs"; "fmod"; "hypot"; "sinh"; "cosh"; "tanh";
+    (* libc time.h *)
+    "time"; "clock"; "ctime"; "asctime"; "gmtime"; "localtime"; "mktime";
+    "difftime"; "strftime";
+    (* POSIX I/O *)
+    "read"; "write"; "open"; "close"; "lseek"; "stat"; "fstat";
+    "fopen"; "fclose"; "fread"; "fwrite"; "fseek"; "ftell"; "rewind";
+    "printf"; "scanf"; "fprintf"; "fscanf"; "sprintf"; "sscanf";
+    "puts"; "gets"; "fputs"; "fgets"; "putchar"; "getchar";
+    (* misc libc *)
+    "strlen"; "strcpy"; "strncpy"; "strcat"; "strncat"; "strcmp"; "strncmp";
+    "strchr"; "strrchr"; "strstr"; "strdup"; "strerror";
+    "memcpy"; "memmove"; "memset"; "memcmp"; "memchr";
+    "main";
+  ]
+
+let warn_reserved_name loc name =
+  if List.mem name reserved_c_names then
+    Printf.eprintf
+      "%s: warning: top-level name `%s` collides with a C keyword or libc/libm \
+       symbol — codegen に出すと compile error になります。 名前を変える \
+       (例: `%s_` / `m_%s` / `%s_v`) ことを推奨 (docs/patterns.md §5 参照)\n%!"
+      (Loc.to_string loc) name name name name
+
+let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
+  match p.Ast.pnode with
+  | Ast.P_var n -> warn_reserved_name p.Ast.ploc n
+  | Ast.P_tuple ps -> List.iter warn_reserved_in_pattern ps
+  | Ast.P_record (_, fs) -> List.iter (fun (_, sp) -> warn_reserved_in_pattern sp) fs
+  | Ast.P_as (inner, n) ->
+    warn_reserved_name p.Ast.ploc n;
+    warn_reserved_in_pattern inner
+  | Ast.P_or (a, b) ->
+    warn_reserved_in_pattern a;
+    warn_reserved_in_pattern b
+  | _ -> ()
+
 let process_decls eval_env type_env decls =
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
+      warn_reserved_in_pattern pat;
       let outer_env = !type_env in
       let t = Typer.infer outer_env value in
       let bindings = Typer.check_pattern pat t in
@@ -54,6 +114,8 @@ let process_decls eval_env type_env decls =
         let sch = Typer.generalize outer_env ty in
         (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
+      List.iter (fun (n, value) ->
+        warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
       let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
@@ -140,6 +202,7 @@ let type_of s =
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
+      warn_reserved_in_pattern pat;
       let outer_env = !type_env in
       let t = Typer.infer outer_env value in
       let bindings = Typer.check_pattern pat t in
@@ -148,6 +211,8 @@ let type_of s =
         (n, sch) :: acc) outer_env bindings;
       eval_env := !eval_env  (* unused *)
     | Ast.Top_let_rec bindings ->
+      List.iter (fun (n, value) ->
+        warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
       let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
