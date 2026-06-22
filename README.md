@@ -1,5 +1,8 @@
 # Mere
 
+[![CI](https://github.com/284km/mere/actions/workflows/ci.yml/badge.svg)](https://github.com/284km/mere/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > *Make Explicit Region-bound Effects.*
 
 新プログラミング言語 **Mere** (古英語の「湖」、4 文字、region メタファー)
