@@ -4,6 +4,35 @@
 
 ---
 
+## 2026-06-22 (続き — Phase 38.G-1 OwnedVec auto scope-bound Drop)
+
+Phase 38.C 完了後、 公開準備セッションの中で DEFERRED §1.3 の **Level 1** を消化。
+**1515 → 1526 tests**。 設計 doc (`39_nll_linear_design.md`) で paper-validated
+されていた N1/N2/N3 分解の N1 を実装。
+
+- **動作**: `let v = owned_vec_new () in body` で body が v を **lexical に
+  escape させない** ことを静的解析で確認できた場合、 scope 末で
+  `free(v->data)` を auto-emit (Phase 15.13 `with` と同じ shape)
+- **静的解析** (codegen_c.ml の新 helpers):
+  - `no_value_leak v body`: Var v が Tuple / Constr payload / Record_lit /
+    Record_update / Fun body の値位置に出現しないか
+  - `tail_does_not_return_v v body`: body の tail expression の型に
+    OwnedVec が transitively 含まれないか
+  - 両方 pass で auto-Drop、 一方でも fail なら既存の registry +
+    main-end sweep にフォールバック (safe-by-default、 conservative)
+- **対応 backend**: C + LLVM。 Wasm は bump-arena 方式で per-allocation
+  free が無いため Phase 38.G-1 では no-op (将来 GC / linear-memory free
+  が入ったら enable)
+- **escape pattern (auto-Drop しない)**: body's tail が v を返す / v を
+  tuple に stash / closure が v を capture / tail 型が OwnedVec を含む
+- **auto-Drop pattern**: build → query → return scalar / if 各 arm が scalar /
+  nested let chain で tail が scalar / Phase 38.C partial app との両立
+- **Level 2/3 (N2 NLL Light、 N3 Full Linear、 ~5-15 slice) は依然 defer** —
+  dogfood で痛みが顕在化するまで保留
+- **対応 commit**: `76f00f8`
+
+---
+
 ## 2026-06-22 (続き — Phase 38.C multi-arg curried builtin first-class)
 
 Phase 37 完了後、 公開準備セッションのまま **DEFERRED §1.2 A2 を消化**。

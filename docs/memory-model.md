@@ -120,6 +120,25 @@ let-bind** は generalize しない (`'a` のまま leak しない)。詳細:
 含む型に限定) — 通常の `let inc = fn x -> x + 1` のような関数 let は
 依然多相化される。
 
+**Phase 38.G-1 (2026-06-22) で追加**: `let v = owned_vec_new () in body` の
+**自動 scope-bound Drop** (Level 1)。 設計 doc `39_nll_linear_design.md` の
+N1/N2/N3 分解の N1 を実装:
+
+- body が v を lexical に escape させない場合、 scope 末で `free(v->data)`
+  を auto-emit (Phase 15.13 `with` と同じ shape)
+- 静的解析: `no_value_leak v body` (Tuple / Constr / Record_lit / Fun
+  に v が出現しないか) + `tail_does_not_return_v v body` (body の tail
+  expression の型に OwnedVec が含まれないか)
+- 両方 pass で auto-Drop、 一方でも fail なら既存の registry +
+  main-end sweep にフォールバック (safe-by-default)
+- C + LLVM で実装、 Wasm は bump-arena 方式で per-allocation free 不要
+- Level 2 (NLL Light: last-use での drop)、 Level 3 (Full Linear:
+  use-after-move 静的検出) は依然 defer (DEFERRED §1.3 参照)
+
+これは「明示性 > 簡潔性」の哲学からの妥協点で、 `with` の明示記述は
+依然 supported かつ推奨される (custom Drop 型のため)、 OwnedVec の典型
+パターン (build → query → return scalar) では auto-Drop が効く。
+
 ### 動くこと (Phase 2: 構文 + 値式 + escape check + view 宣言 + 構築の region 強制 + field access の region 伝播)
 - `region R { body }` 式 — R を region 名としてスコープに導入
 - `&R T` 参照型 — region-tagged reference
