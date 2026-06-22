@@ -1,0 +1,60 @@
+// event_counter: variant を key にした Map で event 集計 (Phase 36)
+//
+// 目的: examples roadmap A2。Map[variant, int] — variant を Map key に
+//   使うパターンを 4 backend で dogfood。Phase 15.15/15.16 で variant key
+//   support が入って以降、明示的な dogfood example が無かった。
+//
+// 設計:
+//   - event variant (nullary): Login / Click / Purchase / Logout
+//   - events list を畳んで Map[event, int] を構築
+//   - 各 event の集計値を print
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type event = Login | Click | Purchase | Logout;
+
+let label = fn e ->
+  match e with
+  | Login    -> "Login"
+  | Click    -> "Click"
+  | Purchase -> "Purchase"
+  | Logout   -> "Logout";
+
+let counts = map_new ();
+
+let bump = fn (e: event) ->
+  if map_has counts e then
+    let n = map_get counts e in
+    let _ = map_set counts e (n + 1) in
+    ()
+  else
+    let _ = map_set counts e 1 in
+    ();
+
+let _ = print "=== event_counter (Phase 36) ===";
+
+// 観測した event 列。typical な session のシミュレーション。
+let events =
+  [Login, Click, Click, Click, Purchase, Logout,
+   Login, Click, Logout,
+   Login, Click, Click, Purchase, Purchase, Logout];
+
+let _ = list_iter events (fn (e: event) -> bump e);
+
+// 各 event の集計を順に表示 (insertion order に依存しない deterministic 順)
+let show_event = fn (e: event) ->
+  if map_has counts e then
+    let n = (map_get counts e : int) in
+    print (label e ++ ": " ++ show n)
+  else
+    print (label e ++ ": 0");
+
+let _ = show_event Login;
+let _ = show_event Click;
+let _ = show_event Purchase;
+let _ = show_event Logout;
+
+// total event 数 (prelude の list_len)
+let total = list_len events;
+let _ = print ("total events = " ++ show total);
+0

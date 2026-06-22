@@ -102,8 +102,12 @@ backend いずれかへ codegen。
 | [math_demo.mere](math_demo.mere) ⭐ | float の四則演算 + sqrt / sin / cos / tan / f_pow / atan2 を combined で dogfood。Pythagorean / 三角恒等式 / 円周計算等。4 backend で diff = 0 |
 | **Phase 35 (2026-06-22) 追加 — first-class builtin (DEFERRED §1.2 A1)** | |
 | [factory_value.mere](factory_value.mere) ⭐ | nullary factory builtin (vec_new / owned_vec_new / strbuf_new / map_new) を first-class value として HOF に渡す。Phase 35 eta-wrap で 4 backend 対応 (MVP は HOF 引数注釈で ret_ty を固定する必要あり) |
-| **Phase 36 (2026-06-22) 追加 — histogram dogfood** | |
+| **Phase 36 (2026-06-22) 追加 — example batch** | |
 | [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket カウンタ + 最頻 bucket 検出。10 単位 bucket に 20 件の観測値を accumulate、map_iter で線形 scan して mode を求める。**新摩擦 (DEFERRED §1.13)**: top-level `let v = map_get m k` が let-poly で 'a 化 → `(... : int)` 注釈で workaround |
+| [traffic_light.mere](traffic_light.mere) ⭐ | 最小 enum (`Red \| Yellow \| Green`) + `next` / `cycle` recursion。ADT 入門教材として最も単純な variant demo (C2) |
+| [event_counter.mere](event_counter.mere) ⭐ | Map[event, int] — variant を Map key にする dogfood (Phase 15.15/15.16 機能の使用例)。Login / Click / Purchase / Logout の集計 (A2) |
+| [html_builder.mere](html_builder.mere) ⭐ | StrBuf + tag 関数 helper で nested HTML 構築。region 内 StrBuf に `<ul><li>...</li></ul>` を畳み込む (B3) |
+| [fallible_lookup.mere](fallible_lookup.mere) ⭐ | Map[str, str] 2 段を `result_and_then` で chain。user→email→role の連鎖 lookup と `result_default` の fallback パターン (D4) |
 
 ### Q-010 collection 基本
 
