@@ -2158,12 +2158,29 @@ let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
          Let (e.g., `let path = "/tmp/x"`) doesn't break the chain and
          block subsequent `let rec` from being lifted. Fun-valued Lets
          with P_var → extract as skel + drop from body. Other Lets →
-         keep in body + walk rest. *)
+         keep in body + walk rest.
+         Phase 37.A: `let _ = while ... ;` at top-level desugars to
+         `Let (P_wild, Let_rec (bs, call_loop), rest)`. Recognize that
+         shape and lift the inner Let_rec bindings as top-level skels,
+         replacing the value with the inner Let_rec body. *)
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var name, Ast.Fun (param, _, fn_body) ->
          let more, rest' = go rest in
          { sname = name; sparam = param; sbody = fn_body; sfun = value }
          :: more, rest'
+       | _, Ast.Let_rec (bindings, lr_body) ->
+         let lr_skels =
+           List.map (fun (n, v) ->
+             match v.Ast.node with
+             | Ast.Fun (p, _, fb) ->
+               { sname = n; sparam = p; sbody = fb; sfun = v }
+             | _ ->
+               raise (Codegen_error (v.Ast.loc,
+                 "let rec inside top-level let value must bind a single-arg function")))
+             bindings
+         in
+         let more, rest' = go { e with Ast.node = Ast.Let (pat, lr_body, rest) } in
+         lr_skels @ more, rest'
        | _ ->
          let more, rest' = go rest in
          more, { e with Ast.node = Ast.Let (pat, value, rest') })

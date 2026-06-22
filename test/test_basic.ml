@@ -1878,6 +1878,18 @@ let () =
        | None          -> 0
        | Some n as all -> n") "";
 
+  (* --- Phase 37.A: `while` at top-level (Let_rec lifting from Let value) --- *)
+  check "Phase 37.A: while at top-level via Map mutable container (interp)"
+    (Pipeline.process
+      "let counter = map_new ();
+       let _ = map_set counter \"n\" 2;
+       let _ = while (map_get counter \"n\") > 0 do
+         map_set counter \"n\" ((map_get counter \"n\") - 1);
+       map_get counter \"n\"")
+    "0";
+  (* codegen 側 (C/LLVM/Wasm) の emit 検証は scope の都合で typed_prog
+     helpers が見える後段 (vec/map codegen sections) で実施。 *)
+
   (* --- exhaustiveness Phase 2 (tuple / record / typed wildcard hint) --- *)
   check "Phase 2: tuple destructure is total (no warning)"
     (warnings_of "match (1, 2) with | (a, b) -> a + b") "";
@@ -5800,6 +5812,28 @@ let () =
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let _ = print \"side effect\" in 42") in
      if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
+  (* Phase 37.A: while at top-level の codegen 検証 (Let_rec lifting
+     from Let value position) *)
+  let while_top_src =
+    "let counter = map_new ();
+     let _ = map_set counter \"n\" 2;
+     let _ = while (map_get counter \"n\") > 0 do
+       map_set counter \"n\" ((map_get counter \"n\") - 1);
+     0"
+  in
+  check "Phase 37.A: while at top-level emits C codegen (no Let_rec error)"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog while_top_src) in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 37.A: while at top-level emits LLVM IR"
+    (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog while_top_src) in
+     if String.length ll_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 37.A: while at top-level emits Wasm WAT"
+    (let wat_src = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog while_top_src) in
+     if String.length wat_src > 0 then "ok" else "empty")
     "ok";
 
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
