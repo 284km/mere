@@ -4,6 +4,123 @@
 
 ---
 
+## 2026-06-22
+
+Phase 29-31 を深夜跨ぎで 11 slice。**4 backend で 16 examples PERFECT** を
+出発点に、dogfood (toy_sql 1165 LoC) → bug 発掘 → 全 fix → README polish
+を 1 日で完結。1469 → 1480 tests、DEFERRED §1.10 / §1.11 / §1.12 を完全解決、
+mere が外向け説明に耐える状態に。
+
+- **Phase 31.1**: README を Phase 22-31 まで反映 (1268 → 1480 tests、3 → 4
+  backend feature parity、toy_sql 1165 LoC、signature spread / Result helpers
+  / inner-fn lifting / top-level global 化 / Wasm runtime 実行 / str_compare
+  3 backend)。
+- **Phase 31.0**: `str_compare` を 3 backend (C / LLVM / Wasm) に移植。interp
+  の OCaml `compare s t` (-1/0/1) と完全一致するよう sign-normalize。
+  C は inline strcmp、LLVM は strcmp + select、Wasm は専用 runtime helper。
+- **Phase 30.2c** ⭐: Wasm codegen で top-level 非-fn let を `(global $name
+  (mut i32))` として宣言、main 開始時に `global.set $name` で初期化。
+  Var emit は `global.get $name`。値が全 i32 で uniform に動く。
+- **Phase 30.2b**: LLVM codegen で `@<name> = internal global <ll_type>
+  zeroinitializer` として宣言、main 開始時に `store <ll_type> <init>, ptr
+  @<name>`、Var 参照は load。
+- **Phase 30.2a**: C codegen で top-level 非-fn let を file-scope の
+  `static <type> <name>;` として宣言、main 開始時に `<name> = <init>;` で
+  初期化。**skels の free_vars に名前が出る let だけ**を global 化する
+  heuristic で既存 test を保護。**DEFERRED §1.10 を 3 backend 全部で
+  完全解決**。
+- **Phase 30.1** ⭐: closure 内で captured 名を let で shadow した時、body
+  emission で `current_env_subst` から shadow 名を一時的に除外。bug の
+  root cause は P_tuple 特有ではなく **env_subst が shadow を尊重して
+  いなかった** こと。Let P_var / Let P_tuple 両方で適用。**DEFERRED §1.11
+  完全解決**。
+- **Phase 30.0** ⭐: builtin (`is_alpha` / `is_digit` / `is_space`) の
+  hardcoded dispatch に `when not (Hashtbl.mem toplevel_fn_names ...)` guard
+  を追加。user-defined fn が同名で存在する場合 builtin dispatch を skip。
+  C / LLVM / Wasm の 3 backend で同パターンを適用。**DEFERRED §1.12 完全解決**。
+- **Phase 29.3** ⭐: toy_sql に nested-loop JOIN 実装 + qualify_row +
+  project_join + 7 JOIN tests。**toy_sql 全体で 1165 LoC、4 backend で
+  diff = 0 PERFECT、59 tests** (tokenizer 22 + parser 13 + executor 17
+  + JOIN 7)。N1/N2/N3 dogfood の最終評価: 1165 LoC では需要が顕在化せず、
+  痛みは codegen の足回り (DEFERRED §1.10-§1.12) に集中。
+- **Phase 29.2**: toy_sql executor (Catalog Map[str, table_meta] + Storage
+  OwnedVec[tagged_row] + WHERE filter + project + 17 tests)。Map[K, V=variant]
+  と OwnedVec[variant] codegen が一発動作 (Phase 15.16 と対称)。
+- **Phase 29.1**: toy_sql SQL parser (AST + continuation 流 + 13 tests)。
+  **dogfood 発掘**: C codegen の tuple destructure rebind バグ (DEFERRED
+  §1.11)、Wasm memory 1 page (64KB) を 16 pages (1MB) に拡張 (string-heavy
+  app 対応)。
+- **Phase 29.0**: toy_sql foundation (Value variant + Token variant + 手書き
+  tokenizer + 22 self-tests)。**dogfood 発掘**: C codegen の record field
+  × nested lambda capture バグ (DEFERRED §1.10)、C codegen が builtin で
+  user-defined fn を shadow (DEFERRED §1.12)。
+
+---
+
+## 2026-06-21
+
+Phase 21 で deferred を 1 件閉じた後、Phase 22 → 23 → **Phase 24-27 (29
+slice 連続)** で 4 backend feature parity を完成、Phase 28 で dogfood
+examples を 4 本追加。**1268 → 1469 tests passing**、DEFERRED §1.7 /
+§1.8 / §1.9 を解決、4 backend で 16 examples が diff = 0 PERFECT 一致。
+
+- **Phase 28.1**: C codegen の deep nested lambda capture bug を fix
+  (DEFERRED §1.9)。`pattern_vars_with_types` helper を追加、Match emit_arms
+  で arm body / guard を with_pat スコープに包んで pattern bindings を
+  current_var_types に prepend。これで arm body 内 nested closure の
+  free_vars filter が pattern-bound names を pick up、closure env に
+  書き込まれる。LLVM Phase 25.3 と同形 (2 件目の N+1 → N 逆移植)。
+- **Phase 28.0**: 新規 examples 4 本を 4 backend で動作確認:
+  - D2 `chained_parse.mere`: Result chain idiom (result_and_then / result_map
+    / result_or_else)
+  - C1 `state_machine.mere`: variant + match transition
+  - I1 `ini_parser.mere`: line parser + Map (Phase 27.1 insertion order
+    dogfood)
+  - C5 `regex_lite.mere`: recursive AST + backtracking matcher
+  **12 → 16 examples が 4 backend で PERFECT 一致**。chained_parse で
+  C codegen `undeclared identifier 'rest'` を発掘 (DEFERRED §1.9)。
+- **Phase 27.3** ⭐: Wasm ty_tag が StrBuf を許可 (Phase 15.9 実装済の
+  mere_strbuf_* runtime が StrBuf in tuple/variant payload で使えなかった
+  blocker を解除)。**json_writer が Wasm runtime PERFECT 一致 → Wasm 12/12
+  PERFECT 達成 → 4 backend feature parity 完全達成**。
+- **Phase 27.2** ⭐: Wasm runtime 実行検証。`scripts/run_wasm.js` (Node.js
+  host harness with puts / read_file / write_file imports) を追加、Wasm
+  main 末尾に show_<main_ty> + puts を emit、add_show_type main_ty で
+  main_ty 用 show を強制 emit。**11/11 examples が Wasm runtime で interp
+  と PERFECT 一致**。
+- **Phase 27.1** ⭐: interp Map iter order を insertion order に固定。
+  V_map を `(Hashtbl, value list ref)` に変更、map_set で新規 key を
+  append、map_iter は list 経由で iterate。**全 3 backend で 12/12 PERFECT
+  達成** (C/LLVM 10 → 12、word_freq + mini_shell の Map order cosmetic
+  diff 解消)。
+- **Phase 27.0**: C codegen が unit main_ty で `"()"` を print するように
+  (LLVM Phase 25.11 の C 逆移植)。template_engine / json_writer / inventory
+  / cap_handler が C で trailing `()` 解消、C PERFECT が 6 → 10 に。
+- **Phase 26 (7 slice)**: Wasm codegen で 11/12 examples が EMIT+wat2wasm
+  成功。Phase 22-25 の累積機能 (variant boxed payload / stdlib builtins /
+  try_or / inner let-rec lifting / multi-instantiation specialization /
+  str_split / str_join / read_file / write_file / lift_fn_skels non-Fun
+  walk / 各種 polishing) を Wasm に逐次移植。
+- **Phase 25 (13 slice)**: LLVM codegen で 12/12 examples が動作 (PERFECT
+  10)。Phase 24.x の C 機能と並列に、LLVM 側で boxed payload / stdlib /
+  try_or / inner let-rec lifting / multi-instantiation specialization /
+  show_str escape / fn dedup / nested P_constr / 不足 builtin / 各種
+  polishing を実装。
+- **Phase 24 (5 slice)**: C codegen で 12/12 example 動作 (template_engine
+  / json_writer / inventory / cap_handler / word_freq / mini_shell)。
+  variant payload を `{ tag, payload_ptr }` の boxed 表現に変更し
+  ポリモーフィックな variant コンテナを 3 backend で統一。
+- **Phase 23 (5 slice)**: json_parser が C codegen で interp と 100%
+  一致 (Phase 23.2 で prelude に result_map / result_and_then /
+  result_or_else 追加、Phase 23.3 で多相 user let-rec の per-instantiation
+  specialization、Phase 23.5 で show_str escape — **DEFERRED §1.7 完全解決**)。
+- **Phase 22 (5 slice)**: try_or + str ops (str_split / str_join /
+  str_count / str_index_of) を全 backend で動作。
+- **Phase 21 (1 slice)**: DEFERRED §1.7 部分解決 (poly user let-rec の
+  C codegen monomorphization の第一段階)。
+
+---
+
 ## 2026-06-20
 
 Phase 15 第 16 から始まり、Phase 16 / 17 / 18 を一気に走った 1 日。
