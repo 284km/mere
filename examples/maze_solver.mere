@@ -1,0 +1,159 @@
+// maze_solver: grid maze の BFS pathfinding (Phase 36)
+//
+// 入力: ASCII maze。`#` = 壁, `.` = 通路, `S` = start, `G` = goal。
+// 出力: S から G までの最短距離 + 経路の可視化。
+//
+// アルゴリズム: BFS で各セルの distance を Map に記録、goal に着いたら
+//   prev Map から逆引きで path を復元。
+//
+// Phase 36 sugar combined dogfood:
+//   - `for r in 0..rows do for c in 0..cols do ...`
+//   - `if let Some d = ... then ... else ...`
+//   - `[(dr, dc) | dr <- -1..1, dc <- -1..1, ...]` (4 近傍を作るが今回は固定)
+//   - string interpolation
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// Maze (固定 8x12)
+let raw_maze =
+  ["############",
+   "#S.........#",
+   "#.######.#.#",
+   "#.#....#.#.#",
+   "#.#.##.#.#.#",
+   "#...##...#G#",
+   "########.#.#",
+   "############"];
+
+let rows = list_len raw_maze;
+let cols = str_len (match raw_maze with | Cons (h, _) -> h | Nil -> "");
+
+let key = fn (r: int) -> fn (c: int) -> show r ++ "," ++ show c;
+
+let cell_at = fn (r: int) -> fn (c: int) ->
+  let rec nth = fn (xs: str list) -> fn (i: int) ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) -> if i == 0 then h else nth t (i - 1) in
+  let row = nth raw_maze r in
+  char_at row c;
+
+let is_open = fn (r: int) -> fn (c: int) ->
+  if r < 0 || r >= rows || c < 0 || c >= cols then false
+  else
+    let c_str = cell_at r c in
+    c_str != "#";
+
+// start / goal を探す
+let find_char = fn (target: str) ->
+  let cell = map_new () in
+  let _ = map_set cell "r" (-1) in
+  let _ = map_set cell "c" (-1) in
+  let _ = for r in 0..(rows - 1) do
+    for c in 0..(cols - 1) do
+      if cell_at r c == target then
+        let _ = map_set cell "r" r in
+        let _ = map_set cell "c" c in
+        ()
+      else () in
+  (map_get cell "r", map_get cell "c");
+
+let start = find_char "S";
+let goal = find_char "G";
+
+let _ = print "=== maze_solver (Phase 36) ===";
+let _ = print "rows = {show rows}, cols = {show cols}";
+let _ = print "start = ({show (fst start)}, {show (snd start)})";
+let _ = print "goal  = ({show (fst goal)}, {show (snd goal)})";
+
+// BFS: queue は OwnedVec[str] (key)、distance + prev は Map で
+let dist = map_new ();
+let prev = map_new ();
+
+let push = fn (q: OwnedVec[str]) -> fn (v: str) ->
+  let _ = owned_vec_push q v in ();
+
+// queue head position を Map で管理 (OwnedVec に shift が無いため)
+let qhead = map_new ();
+let _ = map_set qhead "i" 0;
+
+let queue = owned_vec_new ();
+let start_key = key (fst start) (snd start);
+let _ = push queue start_key;
+let _ = map_set dist start_key 0;
+
+let goal_key = key (fst goal) (snd goal);
+
+// 4 近傍の (dr, dc)
+let dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+let parse_key = fn (k: str) ->
+  let parts = str_split k "," in
+  match parts with
+  | Cons (rs, Cons (cs, _)) -> (int_of_str rs, int_of_str cs)
+  | _ -> (-1, -1);
+
+// BFS body は再帰で
+let rec bfs = fn (_unused: unit) ->
+  let i = map_get qhead "i" in
+  if i >= owned_vec_len queue then ()
+  else
+    let _ = map_set qhead "i" (i + 1) in
+    let here = owned_vec_get queue i in
+    if here == goal_key then ()    // 早期終了 (continue でも可)
+    else
+      let coord = parse_key here in
+      let r = fst coord in
+      let c = snd coord in
+      let d = map_get dist here in
+      let _ = list_iter dirs (fn (dlt: int * int) ->
+        let nr = r + fst dlt in
+        let nc = c + snd dlt in
+        if is_open nr nc then
+          let nk = key nr nc in
+          if map_has dist nk then ()
+          else
+            let _ = map_set dist nk (d + 1) in
+            let _ = map_set prev nk here in
+            let _ = push queue nk in
+            ()
+        else ()) in
+      bfs ();
+
+let _ = bfs ();
+
+let _ = if map_has dist goal_key then
+  print "found! distance = {show (map_get dist goal_key)}"
+else
+  print "no path";
+
+// path 復元
+let rec collect_path = fn (k: str) -> fn (acc: str list) ->
+  if k == start_key then Cons (k, acc)
+  else if map_has prev k then
+    collect_path (map_get prev k) (Cons (k, acc))
+  else acc;
+
+let path =
+  if map_has dist goal_key then collect_path goal_key Nil else Nil;
+
+// 経路を Map に登録
+let on_path = map_new ();
+let _ = list_iter path (fn (k: str) -> let _ = map_set on_path k 1 in ());
+
+let _ = print "--- maze (with path) ---";
+let _ = for r in 0..(rows - 1) do
+  let buf = strbuf_new () in
+  let _ = for c in 0..(cols - 1) do
+    let k = key r c in
+    let ch =
+      if map_has on_path k then
+        if cell_at r c == "S" then "S"
+        else if cell_at r c == "G" then "G"
+        else "*"
+      else cell_at r c in
+    let _ = strbuf_push buf ch in
+    () in
+  print (strbuf_to_str buf);
+
+0

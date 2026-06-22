@@ -148,6 +148,7 @@ backend いずれかへ codegen。
 | [game_of_life.mere](game_of_life.mere) ⭐ | Conway's Game of Life (8x12 grid)。OwnedVec[int] で 1D flatten した cell 状態 + 8 近傍走査で time evolution。glider pattern (5 cell) の 4 step migration を visualize、各 gen の live count も出力 |
 | [sudoku_check.mere](sudoku_check.mere) ⭐ | 9x9 sudoku 盤面の valid 性検証。9 row + 9 col + 9 (3x3 box) について 1..9 が網羅されているかチェック。`list_for_all` + `list_member` + list comprehension で box cells を生成、3 シナリオ (正解 / 行重複 / 列重複) で検証 |
 | [calc.mere](calc.mere) ⭐ | operator-precedence な arithmetic parser + evaluator。tokenize → recursive descent (expr / term / factor / primary) → eval。`+ - * /` の優先順位、unary minus、ネストした paren に対応。`?!` Result chain で error 伝播。10 ケース検証 (除算 by zero / syntax error 含む) |
+| [maze_solver.mere](maze_solver.mere) ⭐ | ASCII maze (8x12) の BFS pathfinding。`#` = 壁 / `S` = start / `G` = goal。OwnedVec[str] を queue、Map を dist + prev に。最短距離を計算し path を `*` で可視化 |
 
 ### Q-010 collection 基本
 
