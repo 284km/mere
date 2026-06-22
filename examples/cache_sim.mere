@@ -69,7 +69,7 @@ let put = fn (k: str) -> fn (v: str) ->
       ();
 
 let get = fn (k: str) ->
-  if alive_contains k && (map_has cache k) && (map_has evicted k == false) then
+  if alive_contains k && (map_has cache k) && not (map_has evicted k) then
     "HIT(" ++ map_get cache k ++ ")"
   else
     "MISS";

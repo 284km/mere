@@ -110,10 +110,14 @@ str_index_of "hello" "xyz"                     // -1
 ```
 
 **★ codegen 状況**: `str_index_of` / `str_split` / `str_join` / `str_count` /
-`str_compare` / `str_trim` / `str_starts_with` / `str_replace` はすべて
+`str_compare` / `str_trim` / `str_starts_with` / `str_ends_with` /
+`str_contains` / `str_replace` / `str_repeat` / `str_rev` はすべて
 **4 backend 全部で動く** (Phase 19.1.1 で str_index_of、Phase 22 で
 str_split / str_join、Phase 26.5 で Wasm 全 str ops、Phase 31.0 で
-str_compare、Phase 36 で str_trim / str_starts_with / str_replace 追加)。
+str_compare、Phase 36 で str_trim / starts_with / ends_with / contains /
+replace / repeat / rev を追加)。`not` / `abs` / `min` / `max` / `clamp` /
+`chr` / `ord` も Phase 36 で 3 backend に揃った。`fn (_: unit) -> body`
+の wildcard parameter も Phase 36 で parser fix。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"

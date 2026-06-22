@@ -51,6 +51,12 @@ let current_base_dir : string ref = ref ""
 let region_stack : string list ref = ref []
 
 (* Counter for fresh variable names synthesized by `<<` / `>>` desugaring. *)
+(* Phase 36: fresh wildcard param name for `fn (_: ...) -> body`. *)
+let wildcard_param_counter = ref 0
+let fresh_wildcard_param () =
+  incr wildcard_param_counter;
+  Printf.sprintf "__wild_%d" !wildcard_param_counter
+
 let compose_var_counter = ref 0
 let fresh_compose_var () =
   let n = !compose_var_counter in
@@ -411,6 +417,14 @@ let rec parse_program_internal tokens =
           (name, Some t), rest
         | (_, T_ident name) :: rest ->
           (name, None), rest
+        (* Phase 36: `_` as a wildcard parameter, like `fn (_: unit) -> body`.
+           Desugar to a fresh ignored name. Multiple `_` in one param list
+           are fine since each gets a fresh name. *)
+        | (_, T_underscore) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          (fresh_wildcard_param (), Some t), rest
+        | (_, T_underscore) :: rest ->
+          (fresh_wildcard_param (), None), rest
         | _ -> raise (Parse_error (pos_of toks, "expected parameter name"))
       in
       let params, toks = parse_params rest in

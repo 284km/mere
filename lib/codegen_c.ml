@@ -1144,6 +1144,39 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Phase 36: str_replace s old new — curried 3-arg *)
        Printf.sprintf "__lang_str_replace(%s, %s, %s)"
          (emit_expr s_e) (emit_expr old_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_ends_with"; _ }, s_e) ->
+       (* Phase 36: str_ends_with s p — curried 2-arg *)
+       Printf.sprintf "__lang_str_ends_with(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_contains"; _ }, h_e) ->
+       (* Phase 36: str_contains haystack needle — bool *)
+       Printf.sprintf "(strstr(%s, %s) != NULL)"
+         (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e) ->
+       Printf.sprintf "__lang_str_repeat(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.Var "str_rev" ->
+       Printf.sprintf "__lang_str_rev(%s)" (emit_expr arg)
+     | Ast.Var "not" ->
+       Printf.sprintf "(!(%s))" (emit_expr arg)
+     | Ast.Var "abs" ->
+       Printf.sprintf "({ int __a = (%s); __a < 0 ? -__a : __a; })" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "min"; _ }, a_e) ->
+       Printf.sprintf "({ int __a = (%s); int __b = (%s); __a < __b ? __a : __b; })"
+         (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "max"; _ }, a_e) ->
+       Printf.sprintf "({ int __a = (%s); int __b = (%s); __a > __b ? __a : __b; })"
+         (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e) ->
+       (* Phase 36: clamp lo hi x — curried 3-arg、interp と同じ順 *)
+       Printf.sprintf "({ int __lo = (%s); int __hi = (%s); int __x = (%s); __x < __lo ? __lo : (__x > __hi ? __hi : __x); })"
+         (emit_expr lo_e) (emit_expr hi_e) (emit_expr arg)
+     | Ast.Var "chr" ->
+       (* Phase 36: chr n — int in [0,255] → single-byte str via char_table *)
+       Printf.sprintf "__lang_char_at_chr(%s)" (emit_expr arg)
+     | Ast.Var "ord" ->
+       (* Phase 36: ord s — single-byte str → int *)
+       Printf.sprintf "((int)(unsigned char)((%s)[0]))" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
        (* Phase 24.4: write_file path content — curried. *)
        Printf.sprintf "__lang_write_file(%s, %s)"
@@ -2814,6 +2847,40 @@ let str_concat_helper =
       "static int __lang_str_starts_with(const char* s, const char* p) {";
       "  size_t pl = strlen(p);";
       "  return strncmp(s, p, pl) == 0;";
+      "}";
+      "";
+      (* Phase 36: str_ends_with — bool. *)
+      "static int __lang_str_ends_with(const char* s, const char* p) {";
+      "  size_t sl = strlen(s);";
+      "  size_t pl = strlen(p);";
+      "  if (pl > sl) return 0;";
+      "  return memcmp(s + sl - pl, p, pl) == 0;";
+      "}";
+      "";
+      (* Phase 36: str_repeat s n — concat n copies of s. *)
+      "static const char* __lang_str_repeat(const char* s, int n) {";
+      "  if (n <= 0) return \"\";";
+      "  size_t sl = strlen(s);";
+      "  size_t total = sl * (size_t)n;";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, total + 1);";
+      "  for (int i = 0; i < n; i++) memcpy(buf + i * sl, s, sl);";
+      "  buf[total] = '\\0';";
+      "  return buf;";
+      "}";
+      "";
+      (* Phase 36: str_rev — byte-level reverse. *)
+      "static const char* __lang_str_rev(const char* s) {";
+      "  size_t sl = strlen(s);";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  for (size_t i = 0; i < sl; i++) buf[i] = s[sl - 1 - i];";
+      "  buf[sl] = '\\0';";
+      "  return buf;";
+      "}";
+      "";
+      (* Phase 36: chr n — return pointer to char_table entry for byte n. *)
+      "static const char* __lang_char_at_chr(int n) {";
+      "  __lang_char_table_setup();";
+      "  return __lang_char_table[(unsigned char)n];";
       "}";
       "";
       (* Phase 36: str_replace — return s with all non-overlapping occurrences

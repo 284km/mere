@@ -1276,6 +1276,50 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr old_e;
     emit_expr new_e;
     emit_instr "call $__lang_str_replace"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_ends_with"; _ }, s_e); _ }, p_e) ->
+    emit_expr s_e;
+    emit_expr p_e;
+    emit_instr "call $__lang_str_ends_with"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_contains"; _ }, h_e); _ }, n_e) ->
+    (* Phase 36: str_contains h n — implement via str_index_of != -1 *)
+    emit_expr h_e;
+    emit_expr n_e;
+    emit_instr "call $__lang_str_index_of";
+    emit_instr "i32.const -1";
+    emit_instr "i32.ne"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
+    emit_expr s_e;
+    emit_expr n_e;
+    emit_instr "call $__lang_str_repeat"
+  | Ast.App ({ node = Ast.Var "str_rev"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_str_rev"
+  | Ast.App ({ node = Ast.Var "not"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.eqz"
+  | Ast.App ({ node = Ast.Var "abs"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_abs"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "min"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_min"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "max"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_max"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e); _ }, x_e) ->
+    emit_expr lo_e;
+    emit_expr hi_e;
+    emit_expr x_e;
+    emit_instr "call $__lang_clamp"
+  | Ast.App ({ node = Ast.Var "chr"; _ }, arg) ->
+    char_table_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_char_at_chr"
+  | Ast.App ({ node = Ast.Var "ord"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.load8_u"
   (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
      str_unescape — LLVM Phase 25.1 / 25.4 の Wasm 版。 *)
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
@@ -2771,6 +2815,99 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (local.get $r))
+  ;; Phase 36: str_ends_with — bool (i32 0/1)
+  (func $__lang_str_ends_with (param $s i32) (param $p i32) (result i32)
+    (local $sl i32) (local $pl i32) (local $i i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $pl (call $__lang_strlen (local.get $p)))
+    (if (i32.gt_s (local.get $pl) (local.get $sl)) (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (loop $lp
+      (if (i32.eq (local.get $i) (local.get $pl)) (then (return (i32.const 1))))
+      (if (i32.ne
+            (i32.load8_u (i32.add (i32.add (local.get $s)
+                                           (i32.sub (local.get $sl) (local.get $pl)))
+                                  (local.get $i)))
+            (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+        (then (return (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))
+    (unreachable))
+  ;; Phase 36: str_repeat s n
+  (func $__lang_str_repeat (param $s i32) (param $n i32) (result i32)
+    (local $sl i32) (local $r i32) (local $i i32) (local $j i32)
+    (if (i32.le_s (local.get $n) (i32.const 0))
+      (then
+        (local.set $r (global.get $__lang_bump))
+        (i32.store8 (local.get $r) (i32.const 0))
+        (global.set $__lang_bump (i32.add (local.get $r) (i32.const 1)))
+        (return (local.get $r))))
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end_outer
+      (loop $lp_outer
+        (br_if $end_outer (i32.eq (local.get $i) (local.get $n)))
+        (local.set $j (i32.const 0))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.eq (local.get $j) (local.get $sl)))
+            (i32.store8 (i32.add (local.get $r)
+                                 (i32.add (i32.mul (local.get $i) (local.get $sl))
+                                          (local.get $j)))
+                        (i32.load8_u (i32.add (local.get $s) (local.get $j))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_outer)))
+    (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $sl)))
+                (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $sl)))
+               (i32.const 1)))
+    (local.get $r))
+  ;; Phase 36: str_rev
+  (func $__lang_str_rev (param $s i32) (result i32)
+    (local $sl i32) (local $r i32) (local $i i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $sl)))
+        (i32.store8 (i32.add (local.get $r) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $s)
+                                          (i32.sub (i32.sub (local.get $sl) (local.get $i))
+                                                   (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (local.get $r))
+  ;; Phase 36: chr n — return char_table entry pointer for byte n
+  (func $__lang_char_at_chr (param $n i32) (result i32)
+    (call $__lang_char_at_setup)
+    (i32.add (global.get $__lang_char_table) (i32.mul (local.get $n) (i32.const 2))))
+  ;; Phase 36: abs / min / max / clamp
+  (func $__lang_abs (param $n i32) (result i32)
+    (if (i32.lt_s (local.get $n) (i32.const 0))
+      (then (return (i32.sub (i32.const 0) (local.get $n)))))
+    (local.get $n))
+  (func $__lang_min (param $a i32) (param $b i32) (result i32)
+    (if (i32.lt_s (local.get $a) (local.get $b))
+      (then (return (local.get $a))))
+    (local.get $b))
+  (func $__lang_max (param $a i32) (param $b i32) (result i32)
+    (if (i32.gt_s (local.get $a) (local.get $b))
+      (then (return (local.get $a))))
+    (local.get $b))
+  (func $__lang_clamp (param $lo i32) (param $hi i32) (param $x i32) (result i32)
+    (if (i32.lt_s (local.get $x) (local.get $lo))
+      (then (return (local.get $lo))))
+    (if (i32.gt_s (local.get $x) (local.get $hi))
+      (then (return (local.get $hi))))
+    (local.get $x))
   ;; Phase 36: str_replace s old new — replace all non-overlapping occurrences
   (func $__lang_str_replace (param $s i32) (param $old i32) (param $new i32) (result i32)
     (local $slen i32) (local $olen i32) (local $nlen i32)

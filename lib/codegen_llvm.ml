@@ -2554,6 +2554,90 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_replace(ptr %s, ptr %s, ptr %s)" r sv ov nv);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_ends_with"; _ }, s_e); _ }, p_e) ->
+    (* Phase 36: str_ends_with s p — bool *)
+    let sv = emit_expr env s_e in
+    let pv = emit_expr env p_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_ends_with(ptr %s, ptr %s)" r sv pv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_contains"; _ }, h_e); _ }, n_e) ->
+    (* Phase 36: str_contains h n — bool via strstr *)
+    let hv = emit_expr env h_e in
+    let nv = emit_expr env n_e in
+    let pr = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @strstr(ptr %s, ptr %s)" pr hv nv);
+    emit_instr (Printf.sprintf "  %s = icmp ne ptr %s, null" r pr);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
+    let sv = emit_expr env s_e in
+    let nv = emit_expr env n_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_repeat(ptr %s, i32 %s)" r sv nv);
+    r
+  | Ast.App ({ node = Ast.Var "str_rev"; _ }, s_e) ->
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_rev(ptr %s)" r sv);
+    r
+  | Ast.App ({ node = Ast.Var "not"; _ }, b_e) ->
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = xor i1 %s, true" r bv);
+    r
+  | Ast.App ({ node = Ast.Var "abs"; _ }, n_e) ->
+    let nv = emit_expr env n_e in
+    let neg = fresh_reg () in
+    let cmp = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = sub i32 0, %s" neg nv);
+    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, 0" cmp nv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp neg nv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "min"; _ }, a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let cmp = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, %s" cmp av bv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "max"; _ }, a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let cmp = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, %s" cmp av bv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e); _ }, x_e) ->
+    let lov = emit_expr env lo_e in
+    let hiv = emit_expr env hi_e in
+    let xv = emit_expr env x_e in
+    let lt_lo = fresh_reg () in
+    let lo_or_x = fresh_reg () in
+    let gt_hi = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, %s" lt_lo xv lov);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" lo_or_x lt_lo lov xv);
+    emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, %s" gt_hi lo_or_x hiv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r gt_hi hiv lo_or_x);
+    r
+  | Ast.App ({ node = Ast.Var "chr"; _ }, n_e) ->
+    (* Phase 36: chr n — via char_table *)
+    let nv = emit_expr env n_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at_chr(i32 %s)" r nv);
+    r
+  | Ast.App ({ node = Ast.Var "ord"; _ }, s_e) ->
+    (* Phase 36: ord s — load first byte, zext to i32 *)
+    let sv = emit_expr env s_e in
+    let bv = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i8, ptr %s" bv sv);
+    emit_instr (Printf.sprintf "  %s = zext i8 %s to i32" r bv);
+    r
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 25.9: read_file path — returns str (region-allocated buffer). *)
     file_io_used_llvm := true;
@@ -4297,6 +4381,7 @@ let runtime_decls =
       "declare i32 @strncmp(ptr, ptr, i64)";
       "declare ptr @strstr(ptr, ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
+      "declare i32 @memcmp(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
       "declare i32 @fprintf(ptr, ptr, ...)";
@@ -5773,6 +5858,91 @@ let str_concat_helper =
       "  %term = getelementptr i8, ptr %buf, i64 %final_l";
       "  store i8 0, ptr %term";
       "  ret ptr %buf";
+      "}";
+      "";
+      (* Phase 36: str_ends_with — bool *)
+      "define i1 @__lang_str_ends_with(ptr %s, ptr %p) {";
+      "entry:";
+      "  %sl = call i64 @strlen(ptr %s)";
+      "  %pl = call i64 @strlen(ptr %p)";
+      "  %ok = icmp uge i64 %sl, %pl";
+      "  br i1 %ok, label %do_cmp, label %ret_false";
+      "ret_false:";
+      "  ret i1 0";
+      "do_cmp:";
+      "  %off = sub i64 %sl, %pl";
+      "  %tail = getelementptr i8, ptr %s, i64 %off";
+      "  %r = call i32 @memcmp(ptr %tail, ptr %p, i64 %pl)";
+      "  %eq = icmp eq i32 %r, 0";
+      "  ret i1 %eq";
+      "}";
+      "";
+      (* Phase 36: str_repeat *)
+      "define ptr @__lang_str_repeat(ptr %s, i32 %n) {";
+      "entry:";
+      "  %neg = icmp sle i32 %n, 0";
+      "  br i1 %neg, label %ret_empty, label %dowork";
+      "ret_empty:";
+      "  %empty = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 1)";
+      "  store i8 0, ptr %empty";
+      "  ret ptr %empty";
+      "dowork:";
+      "  %sl  = call i64 @strlen(ptr %s)";
+      "  %n64 = sext i32 %n to i64";
+      "  %tot = mul i64 %sl, %n64";
+      "  %cap = add i64 %tot, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i32 [ 0, %dowork ], [ %inext, %body ]";
+      "  %done = icmp sge i32 %i, %n";
+      "  br i1 %done, label %finish, label %body";
+      "body:";
+      "  %i64 = sext i32 %i to i64";
+      "  %off = mul i64 %i64, %sl";
+      "  %bp  = getelementptr i8, ptr %buf, i64 %off";
+      "  call ptr @memcpy(ptr %bp, ptr %s, i64 %sl)";
+      "  %inext = add i32 %i, 1";
+      "  br label %loop";
+      "finish:";
+      "  %tp = getelementptr i8, ptr %buf, i64 %tot";
+      "  store i8 0, ptr %tp";
+      "  ret ptr %buf";
+      "}";
+      "";
+      (* Phase 36: str_rev *)
+      "define ptr @__lang_str_rev(ptr %s) {";
+      "entry:";
+      "  %sl  = call i64 @strlen(ptr %s)";
+      "  %cap = add i64 %sl, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
+      "  %done = icmp uge i64 %i, %sl";
+      "  br i1 %done, label %finish, label %body";
+      "body:";
+      "  %src_off = sub i64 %sl, %i";
+      "  %src_off1 = sub i64 %src_off, 1";
+      "  %sp = getelementptr i8, ptr %s, i64 %src_off1";
+      "  %ch = load i8, ptr %sp";
+      "  %dp = getelementptr i8, ptr %buf, i64 %i";
+      "  store i8 %ch, ptr %dp";
+      "  %inext = add i64 %i, 1";
+      "  br label %loop";
+      "finish:";
+      "  %tp = getelementptr i8, ptr %buf, i64 %sl";
+      "  store i8 0, ptr %tp";
+      "  ret ptr %buf";
+      "}";
+      "";
+      (* Phase 36: chr — return ptr to char_table entry for byte n. *)
+      "define ptr @__lang_char_at_chr(i32 %n) {";
+      "entry:";
+      "  call void @__lang_char_table_setup()";
+      "  %n64 = sext i32 %n to i64";
+      "  %p = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %n64";
+      "  ret ptr %p";
       "}";
       "";
       (* Phase 36: str_replace — replace all non-overlapping occurrences of
