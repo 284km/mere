@@ -1,0 +1,76 @@
+// eight_queens: N-Queens 問題の解を列挙 (Phase 36)
+//
+// 目的: backtracking algorithm の典型例。各 row に置いたクイーンの列番号
+//   を int list で管理し、再帰で全探索。N=6 で 4 つの解、N=8 で 92 解。
+//   配置数を数えるだけで、最初の数解だけを print する。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// queens: 既に配置されたクイーンの列 list (新しいクイーンを先頭に push する形)
+// safe?: クイーン c を新しい row に置く際、既存の queens と衝突しないか
+let rec safe = fn (c: int) -> fn (queens: int list) -> fn (dist: int) ->
+  match queens with
+  | Nil -> true
+  | Cons (q, rest) ->
+    if q == c then false                 // 同じ列
+    else if (q - c == dist) || (c - q == dist) then false   // 対角
+    else safe c rest (dist + 1);
+
+let rec range = fn (i: int) -> fn (n: int) ->
+  if i >= n then Nil
+  else Cons (i, range (i + 1) n);
+
+// 解の数を共有する単一セル Map (mutable cell の代わり)
+let counter = map_new ();
+let display_limit = 3;
+
+let format_queens = fn (qs: int list) ->
+  let b = strbuf_new () in
+  let rec loop = fn (xs: int list) -> fn (first: bool) ->
+    match xs with
+    | Nil -> ()
+    | Cons (q, rest) ->
+      let _ = strbuf_push b (if first then "" else " ") in
+      let _ = strbuf_push b (show q) in
+      loop rest false in
+  let _ = loop qs true in
+  strbuf_to_str b;
+
+let rec try_col = fn (n: int) -> fn (c: int) -> fn (queens: int list) ->
+  if c >= n then ()
+  else if safe c queens 1 then
+    let new_queens = Cons (c, queens) in
+    let _ = solve n new_queens in
+    try_col n (c + 1) queens
+  else
+    try_col n (c + 1) queens
+and solve = fn (n: int) -> fn (queens: int list) ->
+  if list_len queens == n then
+    let cur = map_get counter "c" in
+    let _ = map_set counter "c" (cur + 1) in
+    if cur < display_limit then
+      let _ = print ("  solution #" ++ show (cur + 1) ++ ": " ++ format_queens queens) in
+      ()
+    else ()
+  else
+    try_col n 0 queens;
+
+let count_solutions = fn (n: int) ->
+  let _ = map_set counter "c" 0 in
+  let _ = solve n Nil in
+  map_get counter "c";
+
+let _ = print "=== eight_queens (Phase 36) ===";
+
+let report = fn (n: int) ->
+  let _ = print ("N = " ++ show n ++ ":") in
+  let total = count_solutions n in
+  print ("  total = " ++ show total);
+
+let _ = report 4;   // 2
+let _ = report 5;   // 10
+let _ = report 6;   // 4
+let _ = report 7;   // 40
+let _ = report 8;   // 92
+
+0

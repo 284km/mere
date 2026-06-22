@@ -1,0 +1,70 @@
+// scoreboard: プレイヤースコア集計 + 降順ランキング (Phase 36)
+//
+// 目的: Map[str, int] でスコア集計 → (name, score) list に変換 → 降順
+//   selection sort で並べる典型処理。`map_iter` + OwnedVec の往復が
+//   実用的な dogfood。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 試合結果: (player, points) の list
+let matches =
+  [("alice", 10),  ("bob",   5),   ("alice", 15),
+   ("carol", 20),  ("bob",  25),   ("alice", 5),
+   ("dave",  30),  ("carol", 5),   ("bob",   10)];
+
+let scores = map_new ();
+
+let add_score = fn (name: str) -> fn (pts: int) ->
+  let prev = if map_has scores name then map_get scores name else 0 in
+  let _ = map_set scores name (prev + pts) in
+  ();
+
+let rec absorb = fn (xs: (str * int) list) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((n, p), rest) ->
+    let _ = add_score n p in
+    absorb rest;
+
+let _ = absorb matches;
+
+// Map[str, int] → 2 つの OwnedVec (names, points) に変換
+let names = owned_vec_new ();
+let points = owned_vec_new ();
+let _ = map_iter scores (fn (n: str) -> fn (p: int) ->
+  let _ = owned_vec_push names n in
+  let _ = owned_vec_push points p in
+  ());
+
+// 注: `let n = owned_vec_len names;` を top-level に置くと Phase 30.2
+// global 化のせいで names がまだ空のときに 0 で固定される (initialization
+// 順序問題)。fn 内で都度 owned_vec_len を呼ぶ形にする。
+let printed = map_new ();
+
+let rec rank_loop = fn (rank: int) ->
+  let n = owned_vec_len names in
+  if rank > n then ()
+  else
+    let rec find_best = fn (i: int) -> fn (bi: int) -> fn (bv: int) ->
+      if i >= n then bi
+      else
+        let nm = owned_vec_get names i in
+        if map_has printed nm then find_best (i + 1) bi bv
+        else
+          let v = owned_vec_get points i in
+          if v > bv then find_best (i + 1) i v
+          else find_best (i + 1) bi bv in
+    let best_i = find_best 0 (-1) (-1) in
+    if best_i < 0 then ()
+    else
+      let nm = owned_vec_get names best_i in
+      let v = owned_vec_get points best_i in
+      let _ = print (show rank ++ ". " ++ nm ++ ": " ++ show v) in
+      let _ = map_set printed nm 1 in
+      rank_loop (rank + 1);
+
+let _ = print "=== scoreboard (Phase 36) ===";
+let _ = print "--- ranking (descending by points) ---";
+let _ = rank_loop 1;
+
+0

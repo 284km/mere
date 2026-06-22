@@ -1,0 +1,73 @@
+// rps_game: じゃんけんゲームの勝敗判定 (Phase 36)
+//
+// 目的: variant + nested match の dispatch 例。3x3 = 9 通りの組み合わせを
+//   1 関数で網羅、シンプルな adt demo。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type hand = Rock | Paper | Scissors;
+type outcome = WinA | WinB | Tie;
+
+let label_hand = fn (h: hand) ->
+  match h with
+  | Rock     -> "Rock"
+  | Paper    -> "Paper"
+  | Scissors -> "Scissors";
+
+let label_outcome = fn (o: outcome) ->
+  match o with
+  | WinA -> "A wins"
+  | WinB -> "B wins"
+  | Tie  -> "Tie";
+
+let judge = fn (a: hand) -> fn (b: hand) ->
+  match a with
+  | Rock ->
+    (match b with
+     | Rock     -> Tie
+     | Paper    -> WinB
+     | Scissors -> WinA)
+  | Paper ->
+    (match b with
+     | Rock     -> WinA
+     | Paper    -> Tie
+     | Scissors -> WinB)
+  | Scissors ->
+    (match b with
+     | Rock     -> WinB
+     | Paper    -> WinA
+     | Scissors -> Tie);
+
+let play = fn (a: hand) -> fn (b: hand) ->
+  print (label_hand a ++ " vs " ++ label_hand b
+         ++ " -> " ++ label_outcome (judge a b));
+
+let _ = print "=== rps_game (Phase 36) ===";
+let _ = play Rock Scissors;
+let _ = play Paper Rock;
+let _ = play Scissors Paper;
+let _ = play Rock Paper;
+let _ = play Paper Scissors;
+let _ = play Scissors Rock;
+let _ = play Rock Rock;
+let _ = play Paper Paper;
+let _ = play Scissors Scissors;
+
+// ベスト・オブ・5 サンプル: hand list を畳んで勝敗数を集計
+let rec tally = fn (rounds: (hand * hand) list) -> fn (a_score: int) -> fn (b_score: int) ->
+  match rounds with
+  | Nil -> (a_score, b_score)
+  | Cons ((ah, bh), rest) ->
+    match judge ah bh with
+    | WinA -> tally rest (a_score + 1) b_score
+    | WinB -> tally rest a_score (b_score + 1)
+    | Tie  -> tally rest a_score b_score;
+
+let _ = print "--- best-of-5 ---";
+let rounds =
+  [(Rock, Scissors), (Paper, Paper), (Scissors, Rock),
+   (Rock, Paper), (Paper, Rock)];
+let scores = tally rounds 0 0;
+let _ = print ("A: " ++ show (fst scores) ++ ", B: " ++ show (snd scores));
+
+0

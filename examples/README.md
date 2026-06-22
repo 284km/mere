@@ -127,6 +127,9 @@ backend いずれかへ codegen。
 | [palindrome.mere](palindrome.mere) ⭐ | 回文判定。大文字小文字 / 記号 / スペースを無視、`str_rev` (Phase 36) + `to_lower` + `is_alpha` の組合せ |
 | [anagram.mere](anagram.mere) ⭐ | 2 文字列がアナグラム関係か判定。Map[str, int] で文字頻度を集計、`map_iter` で両 freq を線形 scan |
 | [base_conv.mere](base_conv.mere) ⭐ | int を 2/8/16 進文字列に変換 + 逆変換 (round-trip 確認)。`chr` / `ord` / `str_rev` / `char_at` の数値処理 dogfood、負数 prefix `-` 対応 |
+| [rps_game.mere](rps_game.mere) ⭐ | じゃんけんの勝敗判定 + best-of-5 集計。variant + nested match の 3x3 dispatch demo |
+| [scoreboard.mere](scoreboard.mere) ⭐ | Map[str, int] スコア集計 → 降順ランキング (selection scan)。Phase 36 dogfood で Phase 30.2 top-level global の初期化順 bug を発掘 (DEFERRED §1.18) |
+| [eight_queens.mere](eight_queens.mere) ⭐ | N-Queens (N=4..8) の全解列挙 + backtracking。`safe` 関数 + mutually recursive `try_col` / `solve`、最初の 3 解を print。N=8 で 92 解 |
 
 ### Q-010 collection 基本
 
