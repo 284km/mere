@@ -5877,6 +5877,50 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 38.C-2: 2-arg curried collection builtins への展開
+     (owned_vec_get / vec_push / vec_get / strbuf_push / map_get / map_has) *)
+  check "Phase 38.C-2: owned_vec_get partial app (interp)"
+    (Pipeline.process
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 10 in
+        let _ = owned_vec_push v 20 in
+        let get_v = owned_vec_get v in
+        get_v 0 + get_v 1")
+    "30";
+  check "Phase 38.C-2: vec_push partial app (interp)"
+    (Pipeline.process
+       "let v = vec_new () in
+        let _ = vec_push v 1 in
+        let push_v = vec_push v in
+        let _ = push_v 2 in
+        let _ = push_v 3 in
+        vec_len v")
+    "3";
+  check "Phase 38.C-2: strbuf_push partial app emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let b = strbuf_new () in
+        let app = strbuf_push b in
+        let _ = app \"hello\" in
+        strbuf_len b") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-2: map_get + map_has partial app (interp)"
+    (Pipeline.process
+       "let m = map_new () in
+        let _ = map_set m \"x\" 7 in
+        let lookup = map_get m in
+        let has = map_has m in
+        lookup \"x\" + (if has \"y\" then 100 else 0)")
+    "7";
+  check "Phase 38.C-2: map_get partial app emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let m = map_new () in
+        let _ = map_set m \"a\" 5 in
+        let lookup = map_get m in
+        lookup \"a\"") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)

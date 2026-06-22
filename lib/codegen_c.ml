@@ -779,12 +779,17 @@ let rec emit_expr (e : Ast.expr) : string =
       || name = "map_set" || name = "map_get"
       || name = "map_has" || name = "map_len" || name = "map_iter"
     in
-    (* Phase 38.C-1 (DEFERRED §1.2 A2): try eta-expansion before rejecting.
+    (* Phase 38.C (DEFERRED §1.2 A2): try eta-expansion before rejecting.
        If e.ty is a concrete arrow chain, synthesize the curried Fun chain
        and recurse — the resulting AST goes through the existing anonymous
-       Fun adapter + direct-call fast paths. spike では owned_vec_push に
-       絞って試運転、 動作確認後に他 builtin へ展開。 *)
-    let is_phase38c_target = name = "owned_vec_push" in
+       Fun adapter + direct-call fast paths. 38.C-1 で owned_vec_push の
+       spike を確認後、 38.C-2 で 2-arg curried collection accessor 群へ展開。 *)
+    let is_phase38c_target =
+      name = "owned_vec_push" || name = "owned_vec_get"
+      || name = "vec_push" || name = "vec_get"
+      || name = "strbuf_push"
+      || name = "map_get" || name = "map_has"
+    in
     let try_eta () =
       match e.Ast.ty with
       | Some t when ty_is_concrete (Ast.walk t) ->
