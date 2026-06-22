@@ -2,18 +2,25 @@ let usage () =
   Printf.printf "mere v%s\n" Mere.Version.v;
   print_endline "";
   print_endline "Usage:";
-  print_endline "  mere <file.mere>     evaluate a Mere source file";
-  print_endline "  mere -e <expr>       evaluate an inline expression";
-  print_endline "  mere -t <file.mere>  print the inferred type";
-  print_endline "  mere -te <expr>      print the inferred type of an inline expression";
-  print_endline "  mere -c <file.mere>  emit C source for the program (Phase 4 prep, int subset)";
-  print_endline "  mere -ce <expr>      emit C source for an inline expression";
-  print_endline "  mere -ll <file.mere> emit LLVM IR for the program (Phase 5 prep, int subset)";
-  print_endline "  mere -lle <expr>     emit LLVM IR for an inline expression";
-  print_endline "  mere -w <file.mere>  emit Wasm (WAT) for the program (Phase 6 prep, int subset)";
-  print_endline "  mere -we <expr>      emit Wasm (WAT) for an inline expression";
-  print_endline "  mere -r              start interactive REPL";
-  print_endline "  mere -h | --help     show this help"
+  print_endline "  mere <file.mere>      evaluate a Mere source file";
+  print_endline "  mere -e <expr>        evaluate an inline expression";
+  print_endline "  mere -t <file.mere>   print the inferred type";
+  print_endline "  mere -te <expr>       print the inferred type of an inline expression";
+  print_endline "  mere -c <file.mere>   emit C source (compile with clang)";
+  print_endline "  mere -ce <expr>       emit C source for an inline expression";
+  print_endline "  mere -ll <file.mere>  emit LLVM IR (compile with clang)";
+  print_endline "  mere -lle <expr>      emit LLVM IR for an inline expression";
+  print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
+  print_endline "  mere -we <expr>       emit Wasm (WAT) for an inline expression";
+  print_endline "  mere -r               start interactive REPL";
+  print_endline "  mere -v | --version   print version";
+  print_endline "  mere -h | --help      show this help";
+  print_endline "";
+  print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
+  print_endline "Examples: examples/ (118 .mere files、 examples/README.md でカテゴリ別索引)"
+
+let version () =
+  Printf.printf "mere v%s\n" Mere.Version.v
 
 let read_file path =
   In_channel.with_open_text path In_channel.input_all
@@ -121,6 +128,7 @@ let () =
   match Array.to_list Sys.argv with
   | [_] -> usage ()
   | [_; "-h"] | [_; "--help"] -> usage ()
+  | [_; "-v"] | [_; "--version"] -> version ()
   | [_; "-r"] -> Mere.Repl.run ()
   | [_; "-e"; expr] ->
     run_action Mere.Pipeline.process "<inline>" expr
@@ -144,6 +152,10 @@ let () =
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source
+  | [_; path] when String.length path > 0 && path.[0] = '-' ->
+    Printf.eprintf "error: unknown flag `%s`\n\n" path;
+    usage ();
+    exit 1
   | [_; path] ->
     let source = read_file path in
     (* Phase 9.5: importer-relative path resolution — pre-set Parser's
