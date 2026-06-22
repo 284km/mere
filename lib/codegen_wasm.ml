@@ -1685,6 +1685,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     List.iter (fun cap ->
       match List.assoc_opt cap !locals with
       | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
+      | None when Hashtbl.mem top_globals_wasm cap ->
+        (* Phase 36 (DEFERRED §1.14 fix): captured free var が
+           top-level global の場合は global.get で値を取り出す。 *)
+        emit_instr (Printf.sprintf "global.get $%s" cap)
       | None -> unsupported e.Ast.loc
           (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
     ) li.captures;

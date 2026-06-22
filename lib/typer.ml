@@ -228,6 +228,45 @@ let generalize env t =
   let qs = List.filter (fun id -> not (List.mem id env_free)) t_free in
   { quantified = qs; body = t }
 
+(* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
+   `let x = e in ...` should only generalize x's type if e is syntactically
+   a value OR x's inferred type doesn't involve a **mutable container**
+   (Map / Vec / OwnedVec / StrBuf).
+
+   The motivating bug: `let m = map_new ()` generalizes m to
+   `forall 'k 'v. Map[..., 'k, 'v]`, each use site instantiates fresh tyvars,
+   and `map_set m "k" 1` doesn't propagate V=int to `map_get m "k"` — the
+   latter gets a fresh 'v that leaks to codegen.
+
+   We use a narrow rule (vs OCaml's strict value restriction) because Mere
+   has many higher-order combinators like `const 7` where the user expects
+   `always7 "x" + always7 1` to work polymorphically. Restricting only
+   container types fixes the unsoundness without breaking these idioms. *)
+let rec is_value (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit -> true
+  | Ast.Var _ -> true
+  | Ast.Fun _ -> true
+  | Ast.Tuple es -> List.for_all is_value es
+  | Ast.Constr (_, None) -> true
+  | Ast.Constr (_, Some inner) -> is_value inner
+  | Ast.Record_lit (_, fields) ->
+    List.for_all (fun (_, v) -> is_value v) fields
+  | Ast.Annot (inner, _) -> is_value inner
+  | Ast.Ref (_, _, inner) -> is_value inner
+  | _ -> false
+
+let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+  | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
+  | Ast.TyArrow (p, r) ->
+    ty_mentions_mutable_container p || ty_mentions_mutable_container r
+  | Ast.TyTuple ts -> List.exists ty_mentions_mutable_container ts
+  | Ast.TyRef (_, _, inner) -> ty_mentions_mutable_container inner
+  | _ -> false
+
 let instantiate sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
@@ -1169,10 +1208,19 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Let (pat, value, body) ->
     let tv = infer env value in
     let bindings = check_pattern pat tv in
-    (* Generalize each binding against the OUTER env so polymorphism is preserved
-       for `let (f, g) = (fn x -> x, fn x -> x + 1) in ...` style. *)
+    (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
+       If value is syntactically a value (Fun, literal, Var, etc), generalize.
+       If value is an App but the inferred type doesn't involve a mutable
+       container (Map / Vec / OwnedVec / StrBuf), also generalize — this
+       keeps higher-order idioms like `let always7 = const 7 in ...` working.
+       Otherwise, treat as monomorphic so use-site constraints propagate. *)
     let env' = List.fold_left (fun acc (n, t) ->
-      let sch = generalize env t in
+      let can_generalize =
+        is_value value || not (ty_mentions_mutable_container t)
+      in
+      let sch =
+        if can_generalize then generalize env t else mono t
+      in
       (n, sch) :: acc
     ) env bindings in
     infer env' body

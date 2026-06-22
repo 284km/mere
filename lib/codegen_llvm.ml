@@ -3153,6 +3153,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         let cv =
           match List.assoc_opt cn env with
           | Some v -> v
+          | None when Hashtbl.mem top_globals_llvm cn ->
+            (* Phase 36 (DEFERRED §1.14 fix): captured free var が
+               top-level global の場合は load してから渡す。
+               `ptr %cn` (register) ではなく `ptr @cn` の load 値。 *)
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
+                          r (llvm_ty_of cty) cn);
+            r
           | None -> "%" ^ cn  (* fallback *)
         in
         Printf.sprintf "%s %s" (llvm_ty_of cty) cv

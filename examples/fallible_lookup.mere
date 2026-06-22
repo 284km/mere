@@ -11,7 +11,7 @@ type 'a opt = None | Some of 'a;
 // Map[str, str] から値を `(str, str) result` で取り出す helper
 let lookup = fn m -> fn (k: str) -> fn (err_msg: str) ->
   if map_has m k then
-    Ok ((map_get m k : str))
+    Ok (map_get m k)
   else
     Err err_msg;
 

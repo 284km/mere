@@ -80,7 +80,7 @@ let _ = list_iter lines absorb;
 // lookup demo
 let show_key = fn (k: str) ->
   if map_has config k then
-    print (k ++ " = " ++ (map_get config k : str))
+    print (k ++ " = " ++ map_get config k)
   else
     print (k ++ " = <unset>");
 

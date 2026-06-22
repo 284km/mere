@@ -78,13 +78,9 @@ let _ = map_iter hist (fn (b: int) -> fn (n: int) ->
   else
     ());
 
-// 摩擦点: `let mb = map_get max_state "bucket"` のように top-level
-// let の値が `map_get` の戻り値だけだと let-poly で `'a` に generalize
-// され、C/LLVM/Wasm codegen が "unsupported type element: 'a" で落ちる。
-// 値式に `(... : int)` 注釈を付けると monomorphize される。
 let _ =
-  let mb = (map_get max_state "bucket" : int) in
-  let mn = (map_get max_state "count" : int) in
+  let mb = map_get max_state "bucket" in
+  let mn = map_get max_state "count" in
   print ("most common: " ++ show mb ++ "-" ++ show (mb + 9)
          ++ " (" ++ show mn ++ " obs)");
 

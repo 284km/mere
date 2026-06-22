@@ -103,7 +103,7 @@ backend いずれかへ codegen。
 | **Phase 35 (2026-06-22) 追加 — first-class builtin (DEFERRED §1.2 A1)** | |
 | [factory_value.mere](factory_value.mere) ⭐ | nullary factory builtin (vec_new / owned_vec_new / strbuf_new / map_new) を first-class value として HOF に渡す。Phase 35 eta-wrap で 4 backend 対応 (MVP は HOF 引数注釈で ret_ty を固定する必要あり) |
 | **Phase 36 (2026-06-22) 追加 — example batch** | |
-| [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket カウンタ + 最頻 bucket 検出。10 単位 bucket に 20 件の観測値を accumulate、map_iter で線形 scan して mode を求める。**新摩擦 (DEFERRED §1.13)**: top-level `let v = map_get m k` が let-poly で 'a 化 → `(... : int)` 注釈で workaround |
+| [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket カウンタ + 最頻 bucket 検出。10 単位 bucket に 20 件の観測値を accumulate、map_iter で線形 scan して mode を求める。Phase 36 で発掘した DEFERRED §1.13 (let-poly 'a 化) は **narrow value restriction を typer に入れて解消**、`(... : int)` 注釈不要に |
 | [traffic_light.mere](traffic_light.mere) ⭐ | 最小 enum (`Red \| Yellow \| Green`) + `next` / `cycle` recursion。ADT 入門教材として最も単純な variant demo (C2) |
 | [event_counter.mere](event_counter.mere) ⭐ | Map[event, int] — variant を Map key にする dogfood (Phase 15.15/15.16 機能の使用例)。Login / Click / Purchase / Logout の集計 (A2) |
 | [html_builder.mere](html_builder.mere) ⭐ | StrBuf + tag 関数 helper で nested HTML 構築。region 内 StrBuf に `<ul><li>...</li></ul>` を畳み込む (B3) |
@@ -114,7 +114,7 @@ backend いずれかへ codegen。
 | [calendar_lite.mere](calendar_lite.mere) ⭐ | 年月から日曜始まりの月カレンダーを ASCII で出力。閏年判定 + Zeller の合同式 + StrBuf で 7 列 grid 組み立て (G3) |
 | [matrix_2d.mere](matrix_2d.mere) ⭐ | 2D matrix を 1D OwnedVec[int] + `r * cols + c` index で表現。matrix add / transpose / pretty print。nested Vec[Vec[int]] は region escape が解けず本例では避けた (H2) |
 | [borrow_chain.mere](borrow_chain.mere) | 同じ `&shared write R Logger` 借用を 3 つの helper を呼ぶ pipeline で再利用 (Phase 17.1 borrow tracking の demo)。**interp only** (`&shared write R` の codegen 未対応、borrow_modes.mere と同様、F3) |
-| [cache_sim.mere](cache_sim.mere) ⭐ | capacity=3 の FIFO cache 擬似実装。`map_remove` / `owned_vec_set` を持たない制約下で、`alive` Vec + `evicted` Map を分けて FIFO eviction を表現。**新摩擦 (DEFERRED §1.14)**: inner let-rec が global を参照すると LLVM が落ちるバグを発掘、引数渡しで workaround (A4) |
+| [cache_sim.mere](cache_sim.mere) ⭐ | capacity=3 の FIFO cache 擬似実装。`map_remove` / `owned_vec_set` を持たない制約下で、`alive` Vec + `evicted` Map を分けて FIFO eviction を表現。Phase 36 で発掘した DEFERRED §1.14 (lifted closure が global capture できない LLVM/Wasm bug) は **両 backend に load / global.get 経路を追加して解消**、自然なコードに戻った (A4) |
 | [simple_query.mere](simple_query.mere) ⭐ | SELECT * FROM users WHERE col op value の最小実装 (tokenize / parse / execute、~150 LoC)。toy_sql.mere の 1165 LoC から大幅に削った教材版 (I3) |
 
 ### Q-010 collection 基本

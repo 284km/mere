@@ -44,7 +44,7 @@ let _ = list_iter events (fn (e: event) -> bump e);
 // 各 event の集計を順に表示 (insertion order に依存しない deterministic 順)
 let show_event = fn (e: event) ->
   if map_has counts e then
-    let n = (map_get counts e : int) in
+    let n = map_get counts e in
     print (label e ++ ": " ++ show n)
   else
     print (label e ++ ": 0");
