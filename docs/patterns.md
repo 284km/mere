@@ -448,11 +448,11 @@ fn (p: Point) -> { p | x = 0 }          // 注釈で OK
 ```
 row polymorphism がないので、関数引数の record は注釈必須。
 
-### 5. top-level fn 名が libc / libm のシンボルと衝突する (C codegen)
+### 5. top-level fn 名が libc / libm / C キーワードと衝突する (C codegen)
 
 C codegen は top-level fn を C 関数として直接 emit するため、 macOS / Linux
-の libc / libm にすでに存在する名前と被ると compile error になる。 衝突した
-例 (Phase 32 〜 38 で実際にぶつかったもの):
+の libc / libm にすでに存在する名前 + C 言語の予約語と被ると compile error
+になる。 Phase 32 〜 38 で実際にぶつかった例:
 
 | Mere の名前 | 衝突先 |
 |---|---|
@@ -462,10 +462,15 @@ C codegen は top-level fn を C 関数として直接 emit するため、 macO
 | `system` / `getenv` / `setenv` / `rand` / `srand` | `stdlib.h` |
 | `time` / `clock` | `time.h` |
 | `read` / `write` / `open` / `close` | POSIX I/O |
+| `short` / `long` / `int` / `char` / `float` / `double` | C キーワード (`__auto_type short = ...` が syntax error) |
+| `signed` / `unsigned` / `register` / `static` / `auto` | C 記憶クラス・修飾子 |
+| `goto` / `return` / `break` / `continue` | C 制御フロー keyword |
 
-**回避策**: 1-2 文字短くする (`mergesort` → `msort`、 `div` → `divi`)、 動詞句に
-する (`sort_list` / `power_int`)、 接頭辞 (`mere_sort`) など。 interpreter は
-影響を受けないので動作確認はできるが、 codegen を試した時に発覚する。
+**回避策**: 1-2 文字短くする (`mergesort` → `msort`、 `div` → `divi`、
+`short` → `small_doc`)、 動詞句にする (`sort_list` / `power_int`)、 接頭辞
+(`mere_sort`) など。 interpreter は影響を受けないので動作確認はできるが、
+codegen を試した時に発覚する。 公開前にこの list を `linter` 的に検査する
+script を入れると user の摩擦が一段下がる。
 
 ### 6. 空 list literal `[]` は polymorphic `'a list` で codegen NG
 
@@ -506,6 +511,100 @@ let f = fn m -> map_get m "k";
 ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必須なので
 3 引数。 公開時に user の最初の躓きどころなので、 patterns / tutorial に
 明記しておく。
+
+### 8. inner-lifted fn の closure capture が anonymous Fun 経由で漏れる
+
+関数の中で `let rec foo = fn ...` を定義し、 そこから outer scope の変数を
+参照しつつ、 `list_iter ... (fn v -> foo v)` のような anonymous closure
+経由で呼ぶと、 C codegen が `foo` 内の closure capture を anonymous closure
+の env に持ち越せず、 `error: use of undeclared identifier 'x'` で fail。
+
+```mere
+// NG (C codegen で fail)
+let dfs = fn graph ->
+  let visited = map_new () in
+  let rec visit = fn u ->
+    let _ = map_set visited (show u) 1 in        // visited は outer scope
+    list_iter (neighbors graph u) (fn v -> visit v) in   // anonymous Fun が visit を call
+  visit 0;
+```
+
+**回避策 (3 つ)**:
+
+1. **iterative + explicit stack/queue** (Map で管理) に書き直す。 dfs_bfs.mere /
+   topological_sort.mere の実装パターン
+2. **explicit recursion で list を消化**: `list_iter (fn v -> visit v)` の代わりに
+   `visit_list` のような mutual recursive fn を書く
+3. **outer scope の state を引数として明示的に渡す**: closure capture を
+   完全に避け、 `visit visited graph u` の形にする
+
+`list_iter (neighbors xs u) visit` のように **closure を作らず builtin に
+直接 fn 値を渡す** ことができれば一番きれい。 が、 inner-lifted fn を
+value 位置で使うのは現状 unsupported (DEFERRED §1.2 関連)、 partial app
+synthesizer (Phase 38.C) は builtin に限定されている。
+
+### 9. `substring s start end` は `end` が exclusive 位置、 length ではない
+
+直感的に `substring s 4 (str_len s - 4)` と書きがちだが、 第 3 引数は
+**位置** (exclusive)、 length ではない。 範囲が逆転すると runtime error。
+
+```mere
+// NG
+substring "### Subsection" 4 (str_len "### Subsection" - 4)
+// → substring 4 10 → eval error: range [4, 10) on "### Subsection" の意図と違う
+//   実は 4 から 10 までを取りたいなら正しいが、 "Subsection" を取りたい
+//   (= 4 から 14 まで) なら間違い
+
+// 正しい
+substring "### Subsection" 4 (str_len "### Subsection")
+// → "Subsection" (4 から最後まで)
+```
+
+シグネチャ: `substring : str -> int -> int -> str` で `(s, start, end)`。
+end は exclusive、 つまり `s[start..end)`。 Python 流 slicing と同じ。
+
+### 10. 単引数 builtin (`int_of_str` 等) を value 位置で使うと C codegen unbound
+
+```mere
+list_map (str_split s ",") int_of_str
+// codegen error: use of undeclared identifier 'int_of_str'
+```
+
+Phase 38.C で `vec_push` / `map_set` 等の curried collection builtin は
+value 位置で使えるよう synthesize されるが、 **`int_of_str` / `str_len` /
+`ord` / `show` 等の単引数 builtin は対象外** (1-arg なので Phase 35 nullary
+factory eta-wrap とも違うルート)。 そのまま C 関数として未定義。
+
+**回避**:
+
+```mere
+list_map (str_split s ",") (fn x -> int_of_str x)
+```
+
+`fn x -> ...` で wrap すれば、 既存の anonymous Fun adapter machinery が
+closure 化を担当して正しく動く。 1 文字増えるだけの軽い workaround。
+
+将来的には Phase 38.C の synthesize_curried_eta を 1-arg builtin にも拡張
+すれば不要になる (low-priority、 issue 駆動)。
+
+### 11. 3-tuple 以上の destructure は `fst`/`snd` でなく `let (a, b, c) = ...`
+
+`fst` / `snd` は 2-tuple 専用。 3-tuple 以上のアクセスはパターンで
+destructure する:
+
+```mere
+let r = ext_gcd 30 18;     // r: int * int * int
+// NG (型エラー)
+let g = fst r in
+let x = fst (snd r) in     // snd : (int * int * int) -> ? — 通らない
+
+// OK
+let (g, x, y) = ext_gcd 30 18 in ...
+```
+
+3-tuple は内部的に `(a, b, c)` として一つの tuple (`int * int * int`) で、
+`(a, (b, c))` という入れ子 pair ではない。 fst/snd は OCaml 流に 2-tuple
+専用の builtin として定義されている。
 
 ---
 
