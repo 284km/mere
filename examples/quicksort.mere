@@ -1,0 +1,50 @@
+// quicksort: 古典的 quicksort を `'a list` の上で実装
+//
+// アルゴリズム: pivot として head を選び、 tail を `< pivot` と `>= pivot` に
+// 分割、 両方を再帰的に sort して結合。 immutable list version。
+//
+// Phase 36 sugar (list comprehension / range) と Phase 38 helpers (list_filter)
+// を活用してコンパクトに。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let rec quicksort = fn (xs: int list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (pivot, rest) ->
+    let smaller = list_filter rest (fn x -> x < pivot) in
+    let larger = list_filter rest (fn x -> x >= pivot) in
+    list_append (quicksort smaller) (Cons (pivot, quicksort larger));
+
+let show_list = fn (xs: int list) ->
+  let rec go = fn (xs: int list) -> fn first ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) ->
+      let prefix = if first then "" else ", " in
+      prefix ++ show h ++ go t false in
+  "[" ++ go xs true ++ "]";
+
+let _ = print "=== quicksort showcase ===";
+
+let xs1 = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+let _ = print ("input:  " ++ show_list xs1);
+let _ = print ("sorted: " ++ show_list (quicksort xs1));
+
+let xs2 = [9, 8, 7, 6, 5, 4, 3, 2, 1];
+let _ = print ("reversed: " ++ show_list xs2);
+let _ = print ("sorted:   " ++ show_list (quicksort xs2));
+
+let xs3 = [42];
+let _ = print ("singleton: " ++ show_list xs3);
+let _ = print ("sorted:    " ++ show_list (quicksort xs3));
+
+let xs4 = (Nil: int list);
+let _ = print ("empty:  " ++ show_list xs4);
+let _ = print ("sorted: " ++ show_list (quicksort xs4));
+
+let xs5 = [-3, 7, -1, 0, 5, -8, 2];
+let _ = print ("with negatives: " ++ show_list xs5);
+let _ = print ("sorted:         " ++ show_list (quicksort xs5));
+
+0

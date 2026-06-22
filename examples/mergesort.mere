@@ -1,0 +1,73 @@
+// msort: 安定 merge sort を `int list` の上で実装
+//
+// アルゴリズム: list を半分に split → 各 half を再帰的に sort → merge。
+// 比較が要らない位置の要素もそのままなので **stable** (同じキーの相対順序を保つ)。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// merge: 2 つの sorted list を 1 つの sorted list に merge
+let rec merge = fn (xs: int list) -> fn (ys: int list) ->
+  match xs with
+  | Nil -> ys
+  | Cons (x, xs_rest) ->
+    match ys with
+    | Nil -> xs
+    | Cons (y, ys_rest) ->
+      if x <= y then Cons (x, merge xs_rest ys)
+      else Cons (y, merge xs ys_rest);
+
+// split: list を 2 つにほぼ半分に分割
+let rec split = fn (xs: int list) ->
+  match xs with
+  | Nil -> (Nil: int list, Nil: int list)
+  | Cons (a, rest) ->
+    match rest with
+    | Nil -> (Cons (a, Nil), Nil: int list)
+    | Cons (b, rest2) ->
+      let pair = split rest2 in
+      (Cons (a, fst pair), Cons (b, snd pair));
+
+let rec msort = fn (xs: int list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (_, Nil) -> xs
+  | _ ->
+    let halves = split xs in
+    merge (msort (fst halves)) (msort (snd halves));
+
+let show_list = fn (xs: int list) ->
+  let rec go = fn (xs: int list) -> fn first ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) ->
+      let prefix = if first then "" else ", " in
+      prefix ++ show h ++ go t false in
+  "[" ++ go xs true ++ "]";
+
+// Note: top-level fn 名は `msort` を使う — `mergesort` は macOS libc の
+// 既存シンボルで C codegen 時に collision するため (Phase 32 FFI と同じ理由)。
+let _ = print "=== mergesort showcase ===";
+
+let xs1 = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9];
+let _ = print ("input:  " ++ show_list xs1);
+let _ = print ("sorted: " ++ show_list (msort xs1));
+
+let xs2 = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+let _ = print ("reversed: " ++ show_list xs2);
+let _ = print ("sorted:   " ++ show_list (msort xs2));
+
+let xs3 = (Nil: int list);
+let _ = print ("empty:  " ++ show_list xs3);
+let _ = print ("sorted: " ++ show_list (msort xs3));
+
+let xs4 = [100, 50, 75, 25, 200, 150];
+let _ = print ("input:  " ++ show_list xs4);
+let _ = print ("sorted: " ++ show_list (msort xs4));
+
+// merge 部分だけテスト
+let _ = print "=== merge sub-routine ===";
+let _ = print ("merge [1,3,5] [2,4,6] = " ++ show_list (merge [1, 3, 5] [2, 4, 6]));
+let _ = print ("merge [1,2,3] []      = " ++ show_list (merge [1, 2, 3] (Nil: int list)));
+let _ = print ("merge []      [4,5,6] = " ++ show_list (merge (Nil: int list) [4, 5, 6]));
+
+0

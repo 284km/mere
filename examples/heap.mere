@@ -1,0 +1,122 @@
+// heap: 配列ベースの min-heap (Map[str, int] を配列代わりに使用)
+//
+// OwnedVec は append-only で要素更新が無いため、 swap が必要な sift-up /
+// sift-down は Map[str, int] を疑似配列として使う。 key "0", "1", "2", ... が
+// インデックス、 "size" が現在のサイズ。
+//
+// 操作: heap_push (O(log n)) / heap_pop_min (O(log n)) / heap_peek (O(1))
+// 応用: heap_sort
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let heap_new = fn () ->
+  let h = map_new () in
+  let _ = map_set h "size" 0 in
+  h;
+
+let heap_size = fn h -> map_get h "size";
+let heap_get = fn h -> fn i -> map_get h (show i);
+let heap_set = fn h -> fn i -> fn v -> map_set h (show i) v;
+
+// sift_up: 子ノード i から親方向に min-heap 性質を回復
+let rec sift_up = fn h -> fn i ->
+  if i == 0 then ()
+  else
+    let p = (i - 1) / 2 in
+    let vi = heap_get h i in
+    let vp = heap_get h p in
+    if vp > vi then
+      let _ = heap_set h p vi in
+      let _ = heap_set h i vp in
+      sift_up h p
+    else ();
+
+// sift_down: 根 i から子方向に min-heap 性質を回復
+let rec sift_down = fn h -> fn i ->
+  let n = heap_size h in
+  let l = 2 * i + 1 in
+  let r = 2 * i + 2 in
+  let smallest_lr =
+    if l >= n then i
+    else if r >= n then
+      if heap_get h l < heap_get h i then l else i
+    else
+      let vl = heap_get h l in
+      let vr = heap_get h r in
+      let vi = heap_get h i in
+      if vl <= vr && vl < vi then l
+      else if vr < vi then r
+      else i in
+  if smallest_lr == i then ()
+  else
+    let vi = heap_get h i in
+    let vs = heap_get h smallest_lr in
+    let _ = heap_set h i vs in
+    let _ = heap_set h smallest_lr vi in
+    sift_down h smallest_lr;
+
+let heap_push = fn h -> fn x ->
+  let n = heap_size h in
+  let _ = heap_set h n x in
+  let _ = map_set h "size" (n + 1) in
+  sift_up h n;
+
+let heap_peek = fn h -> heap_get h 0;
+
+let heap_pop_min = fn h ->
+  let n = heap_size h in
+  let top = heap_get h 0 in
+  let last = heap_get h (n - 1) in
+  let _ = heap_set h 0 last in
+  let _ = map_set h "size" (n - 1) in
+  let _ = if n > 1 then sift_down h 0 else () in
+  top;
+
+// heap_sort: list → heap に全部 push → 順に pop して新 list 構築
+let heap_sort = fn (xs: int list) ->
+  let h = heap_new () in
+  let _ = list_iter xs (fn x -> heap_push h x) in
+  let rec drain = fn acc ->
+    if heap_size h == 0 then acc
+    else
+      let v = heap_pop_min h in
+      drain (Cons (v, acc)) in
+  // drain gives reversed-order, so reverse to get ascending
+  let rec rev_acc = fn (xs: int list) -> fn (acc: int list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (a, b) -> rev_acc b (Cons (a, acc)) in
+  rev_acc (drain Nil) Nil;
+
+let show_list = fn (xs: int list) ->
+  let rec go = fn (xs: int list) -> fn first ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) ->
+      let prefix = if first then "" else ", " in
+      prefix ++ show h ++ go t false in
+  "[" ++ go xs true ++ "]";
+
+let _ = print "=== heap_push / heap_peek / heap_pop_min ===";
+let h = heap_new ();
+let _ = list_iter [5, 3, 8, 1, 9, 2, 7] (fn x -> heap_push h x);
+let _ = print ("size = " ++ show (heap_size h));
+let _ = print ("peek (min) = " ++ show (heap_peek h));
+let _ = print ("pop = " ++ show (heap_pop_min h));
+let _ = print ("pop = " ++ show (heap_pop_min h));
+let _ = print ("peek (min) = " ++ show (heap_peek h) ++ ", size = " ++ show (heap_size h));
+
+let _ = print "=== heap_sort ===";
+let xs1 = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+let _ = print ("input:  " ++ show_list xs1);
+let _ = print ("sorted: " ++ show_list (heap_sort xs1));
+
+let xs2 = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+let _ = print ("reversed: " ++ show_list xs2);
+let _ = print ("sorted:   " ++ show_list (heap_sort xs2));
+
+let xs3 = (Nil: int list);
+let _ = print ("empty: " ++ show_list xs3);
+let _ = print ("sorted: " ++ show_list (heap_sort xs3));
+
+0

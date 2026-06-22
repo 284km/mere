@@ -1,0 +1,93 @@
+// bst: 二分探索木 (Binary Search Tree)
+//
+// `type btree = BNil | BNode of int * btree * btree` の variant で再帰的に
+// 表現。 insert / lookup / inorder traversal / count / depth を実装。
+// immutable: insert は新しい tree を返す (path copy)。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type btree = BNil | BNode of int * btree * btree;
+
+// 新規 BST の空木
+let empty_bst = BNil;
+
+// insert: BST 順序を保って x を挿入。 既存と等しければそのまま (重複なし)
+let rec insert = fn (t: btree) -> fn (x: int) ->
+  match t with
+  | BNil -> BNode (x, BNil, BNil)
+  | BNode (v, l, r) ->
+    if x < v then BNode (v, insert l x, r)
+    else if x > v then BNode (v, l, insert r x)
+    else t;
+
+// lookup: x が tree にあるか
+let rec lookup = fn (t: btree) -> fn (x: int) ->
+  match t with
+  | BNil -> false
+  | BNode (v, l, r) ->
+    if x == v then true
+    else if x < v then lookup l x
+    else lookup r x;
+
+// inorder: 中順走査で sorted list を得る (BST の性質で必ず sorted)
+let rec inorder = fn (t: btree) ->
+  match t with
+  | BNil -> Nil
+  | BNode (v, l, r) ->
+    list_append (inorder l) (Cons (v, inorder r));
+
+// count: ノード数
+let rec count = fn (t: btree) ->
+  match t with
+  | BNil -> 0
+  | BNode (_, l, r) -> 1 + count l + count r;
+
+// depth: 最大深さ
+let rec depth = fn (t: btree) ->
+  match t with
+  | BNil -> 0
+  | BNode (_, l, r) ->
+    let dl = depth l in
+    let dr = depth r in
+    1 + (if dl > dr then dl else dr);
+
+// 複数の値を順に insert していくヘルパー
+let rec insert_all = fn (t: btree) -> fn (xs: int list) ->
+  match xs with
+  | Nil -> t
+  | Cons (h, rest) -> insert_all (insert t h) rest;
+
+let show_list = fn (xs: int list) ->
+  let rec go = fn (xs: int list) -> fn first ->
+    match xs with
+    | Nil -> ""
+    | Cons (h, t) ->
+      let prefix = if first then "" else ", " in
+      prefix ++ show h ++ go t false in
+  "[" ++ go xs true ++ "]";
+
+let _ = print "=== BST showcase ===";
+
+let xs = [5, 3, 8, 1, 4, 7, 9, 2, 6];
+let _ = print ("inserting: " ++ show_list xs);
+
+let t1 = insert_all empty_bst xs;
+let _ = print ("count = " ++ show (count t1));
+let _ = print ("depth = " ++ show (depth t1));
+let _ = print ("inorder (sorted) = " ++ show_list (inorder t1));
+
+let _ = print "=== lookup ===";
+let _ = print ("lookup 4 = " ++ (if lookup t1 4 then "true" else "false"));
+let _ = print ("lookup 7 = " ++ (if lookup t1 7 then "true" else "false"));
+let _ = print ("lookup 10 = " ++ (if lookup t1 10 then "true" else "false"));
+let _ = print ("lookup 0 = " ++ (if lookup t1 0 then "true" else "false"));
+
+let _ = print "=== duplicate insert (no-op) ===";
+let t2 = insert t1 5;
+let _ = print ("count after re-insert 5 = " ++ show (count t2) ++ " (unchanged)");
+
+let _ = print "=== degenerate: insert in sorted order = linked-list depth ===";
+let t3 = insert_all empty_bst [1, 2, 3, 4, 5];
+let _ = print ("depth = " ++ show (depth t3) ++ " (= count " ++ show (count t3) ++ ")");
+
+0
