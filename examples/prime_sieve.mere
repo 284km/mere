@@ -1,0 +1,73 @@
+// prime_sieve: エラトステネスのふるい (Phase 33.2)
+//
+// 目的: examples roadmap H1。Vec[R, bool] を使った素数ふるいの demo。
+//   region 内 alloc、bool 要素型 Vec、in-place mutation (vec_set)、
+//   `let rec` 内で side-effect loop を組む典型イディオムを 1 file で実証。
+//
+// アルゴリズム (Sieve of Eratosthenes):
+//   1. 長さ N の bool 配列 (`sieve[i]` = "i は素数候補") を全て true で初期化
+//   2. 0, 1 は非素数 → false
+//   3. p = 2 から √N まで:
+//        sieve[p] が true なら、p*p, p*p + p, p*p + 2p, ... を false に
+//   4. 残った true の index が素数
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/prime_sieve.mere
+
+// ふるいの上限 (含まない)
+let n = 50;
+
+// 配列を作って初期化 (true で埋める)
+let sieve = vec_new ();
+let rec fill = fn (i: int) ->
+  if i >= n then ()
+  else
+    let _ = vec_push sieve true in
+    fill (i + 1);
+let _ = fill 0;
+
+// 0 と 1 は素数でない
+let _ = vec_set sieve 0 false;
+let _ = vec_set sieve 1 false;
+
+// p*p から始めて p の倍数をマーク
+let rec mark_multiples = fn (p: int) -> fn (k: int) ->
+  if k >= n then ()
+  else
+    let _ = vec_set sieve k false in
+    mark_multiples p (k + p);
+
+// p = 2 から √n まで scan、true なら multiples を false にマーク
+let rec sieve_loop = fn (p: int) ->
+  if p * p >= n then ()
+  else
+    let _ =
+      if vec_get sieve p
+      then mark_multiples p (p * p)
+      else ()
+    in
+    sieve_loop (p + 1);
+let _ = sieve_loop 2;
+
+// 結果: i = 0..n-1 で sieve[i] = true な i を space 区切りで出力
+let rec collect_primes = fn (i: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else if vec_get sieve i then
+    let sep = if acc == "" then "" else " " in
+    collect_primes (i + 1) (acc ++ sep ++ show i)
+  else collect_primes (i + 1) acc;
+
+let primes = collect_primes 0 "";
+let _ = print ("primes under " ++ show n ++ ": " ++ primes);
+
+// 件数も表示 (Phase 27 Map 等の dogfood ではないが、純粋計算 demo として)
+let rec count_primes = fn (i: int) -> fn (acc: int) ->
+  if i >= n then acc
+  else if vec_get sieve i then count_primes (i + 1) (acc + 1)
+  else count_primes (i + 1) acc;
+
+let _ = print ("count: " ++ show (count_primes 0 0));
+
+0
