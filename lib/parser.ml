@@ -342,12 +342,25 @@ let rec parse_program_internal tokens =
       (match rest with
        | (_, T_eq) :: rest ->
          let value, rest = expr rest in
+         (* Phase 36: `let x = e? in body` desugars to
+            `match e with | None -> None | Some x -> body`.
+            The enclosing function must return `'b opt`. *)
          (match rest with
+          | (_, T_question) :: (_, T_in) :: rest2 ->
+            let body, rest = expr rest2 in
+            let none_arm =
+              (mkp pos (Ast.P_constr ("None", None)), None,
+               mk pos (Ast.Constr ("None", None)))
+            in
+            let some_arm =
+              (mkp pos (Ast.P_constr ("Some", Some pat)), None, body)
+            in
+            mk pos (Ast.Match (value, [none_arm; some_arm])), rest
           | (_, T_in) :: rest ->
             let body, rest = expr rest in
             mk pos (Ast.Let (pat, value, body)), rest
           | _ ->
-            raise (Parse_error (pos_of rest, "expected 'in' after let binding")))
+            raise (Parse_error (pos_of rest, "expected 'in' or '?' in let binding")))
        | _ ->
          raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
     | (pos, T_with) :: (_, T_ident name) :: (_, T_eq) :: rest ->

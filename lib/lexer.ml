@@ -41,6 +41,7 @@ type token =
   | T_lt_pipe         (* <| — reverse function application (Phase 36) *)
   | T_backslash       (* \  — lambda shorthand `\x -> body` (Phase 36) *)
   | T_at_at           (* @@ — low-precedence application (Phase 36) *)
+  | T_question        (* ?  — Option early-return (`let x = e? in body`) (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -128,6 +129,8 @@ let rec tokenize s =
       (* Phase 36: `@@` low-precedence application (OCaml-style, alias of `<|`). *)
       | '@' when i + 1 < len && s.[i + 1] = '@' ->
         advance 2; aux (i + 2) ((pos, T_at_at) :: acc)
+      (* Phase 36: `?` for Option early-return (`let x = expr? in body`). *)
+      | '?' -> advance 1; aux (i + 1) ((pos, T_question) :: acc)
       | '.' -> advance 1; aux (i + 1) ((pos, T_dot) :: acc)
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)
@@ -241,7 +244,9 @@ let rec tokenize s =
                 else if s.[k] = '}' then
                   if depth = 0 then k else find_end (k + 1) (depth - 1)
                 else if s.[k] = '"' then
-                  raise (Lex_error (pos, "string ends inside `{...}`"))
+                  raise (Lex_error (pos,
+                    "nested string literal inside `{...}` not supported \
+                     (Phase 36 MVP) — bind the value to a let first"))
                 else find_end (k + 1) depth
               in
               let end_brace = find_end (j + 1) 0 in
