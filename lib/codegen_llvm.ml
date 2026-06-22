@@ -437,6 +437,48 @@ let extern_fn_decls_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    + `@<name>_<tag>_as_value = constant ...` で emit。 *)
 let eta_adapters_llvm : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
+   使われた時の syntactic eta-expansion (codegen_c.ml の同名 helper と同一
+   ロジック)。 anonymous Fun adapter + 各 builtin の direct-call fast path
+   (line 3104 / 3147 等) に乗せる。 *)
+let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
+    : Ast.expr =
+  let mk node ty = Ast.{ node; ty = Some ty; loc } in
+  let rec uncurry t =
+    match Ast.walk t with
+    | Ast.TyArrow (a, b) ->
+      let args, ret = uncurry b in (a :: args, ret)
+    | other -> ([], other)
+  in
+  let arg_tys, ret_ty = uncurry arrow_ty in
+  let n = List.length arg_tys in
+  if n = 0 then
+    raise (Codegen_error (loc, name ^ ": cannot eta-expand non-arrow type"));
+  let rec build_app i acc acc_ty =
+    if i >= n then acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let arg_node = mk (Ast.Var (Printf.sprintf "__arg%d" i)) arg_ty in
+      let new_ty =
+        match Ast.walk acc_ty with
+        | Ast.TyArrow (_, b) -> b
+        | _ -> ret_ty
+      in
+      build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
+  in
+  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  let rec wrap i body_acc body_ty =
+    if i < 0 then body_acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let fn_ty = Ast.TyArrow (arg_ty, body_ty) in
+      let fn_node =
+        mk (Ast.Fun (Printf.sprintf "__arg%d" i, Some arg_ty, body_acc)) fn_ty
+      in
+      wrap (i - 1) fn_node fn_ty
+  in
+  wrap (n - 1) inner_apps ret_ty
+
 (* Phase 25.5: per-instantiation specialization (LLVM port of Phase 23.3).
    If a poly fn is called at 2+ distinct concrete arrow types, it's emitted
    once per instantiation with a mangled name (`base__T1__T2__...`).
@@ -2047,22 +2089,43 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         | None -> None
       else None
     in
-    if not is_shadowed && (
-       (* vec_push / vec_get / ... の curried 多引数は依然 first-class 不可 *)
-       name = "vec_push"
-       || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
-       || name = "vec_map" || name = "vec_filter"
-       || name = "vec_to_owned" || name = "owned_vec_to_vec"
-       || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len"
-       || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" || name = "map_iter") then
+    let is_curried_collection_builtin =
+      name = "vec_push"
+      || name = "vec_get" || name = "vec_len"
+      || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+      || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
+      || name = "vec_map" || name = "vec_filter"
+      || name = "vec_to_owned" || name = "owned_vec_to_vec"
+      || name = "owned_vec_push"
+      || name = "owned_vec_get" || name = "owned_vec_len"
+      || name = "strbuf_push"
+      || name = "strbuf_to_str" || name = "strbuf_len"
+      || name = "map_set" || name = "map_get"
+      || name = "map_has" || name = "map_len" || name = "map_iter"
+    in
+    let is_phase38c_target =
+      name = "owned_vec_push" || name = "owned_vec_get"
+      || name = "vec_push" || name = "vec_get"
+      || name = "strbuf_push"
+      || name = "map_get" || name = "map_has"
+      || name = "map_set" || name = "vec_set"
+    in
+    let try_eta_llvm () =
+      match e.Ast.ty with
+      | Some t when ty_is_concrete (Ast.walk t) ->
+        (match Ast.walk t with
+         | Ast.TyArrow _ as arrow ->
+           Some (emit_expr env (synthesize_curried_eta_llvm name arrow e.Ast.loc))
+         | _ -> None)
+      | _ -> None
+    in
+    let eta38c_opt =
+      if not is_shadowed && is_curried_collection_builtin && is_phase38c_target
+      then try_eta_llvm () else None
+    in
+    if not is_shadowed && is_curried_collection_builtin && eta38c_opt = None then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.10: curried 多引数 builtin は直接 application のみ対応)");
+        (name ^ " as a value (Phase 15.3〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)");
     if not is_shadowed && is_nullary_factory && eta_value_str_opt = None then
       unsupported e.Ast.loc
         (name ^ " as a value: return type is polymorphic, can't monomorphize \
@@ -2070,6 +2133,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+    (match eta38c_opt with
+     | Some v -> v
+     | None ->
     (match eta_value_str_opt with
      | Some v -> v
      | None ->
@@ -2111,7 +2177,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
        r
-     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
+     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
     let v = emit_expr env inner in

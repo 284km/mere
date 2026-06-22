@@ -5957,6 +5957,43 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 38.C-4/5: LLVM / Wasm に port *)
+  check "Phase 38.C-4: owned_vec_push partial emits LLVM IR"
+    (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 0 in
+        let push_v = owned_vec_push v in
+        let _ = push_v 1 in
+        owned_vec_len v") in
+     if String.length ll_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-4: map_set 1-arg partial emits LLVM IR"
+    (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let m = map_new () in
+        let set_in_m = map_set m in
+        let _ = set_in_m \"k\" 1 in
+        map_len m") in
+     if String.length ll_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-5: owned_vec_push partial emits Wasm WAT"
+    (let wat_src = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 0 in
+        let push_v = owned_vec_push v in
+        let _ = push_v 1 in
+        owned_vec_len v") in
+     if String.length wat_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-5: vec_set 3-arg partial emits Wasm WAT"
+    (let wat_src = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = vec_new () in
+        let _ = vec_push v 0 in
+        let set_in_v = vec_set v in
+        let _ = set_in_v 0 7 in
+        vec_get v 0") in
+     if String.length wat_src > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)

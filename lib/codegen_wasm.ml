@@ -237,6 +237,48 @@ let fn_closure_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
 (* Phase 35.3: eta-wrapped nullary factory adapters (vec_new / owned_vec_new
    / strbuf_new / map_new_<k_tag>) used as first-class values. Key = adapter
    slug, value = (builtin name, ret_ty, table_idx). *)
+(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
+   使われた時の syntactic eta-expansion (codegen_c / codegen_llvm の同名
+   helper と同一ロジック)。 anonymous Fun adapter + 各 builtin の direct-call
+   fast path (line 1653 等) に乗せる。 *)
+let synthesize_curried_eta_wasm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
+    : Ast.expr =
+  let mk node ty = Ast.{ node; ty = Some ty; loc } in
+  let rec uncurry t =
+    match Ast.walk t with
+    | Ast.TyArrow (a, b) ->
+      let args, ret = uncurry b in (a :: args, ret)
+    | other -> ([], other)
+  in
+  let arg_tys, ret_ty = uncurry arrow_ty in
+  let n = List.length arg_tys in
+  if n = 0 then
+    raise (Codegen_error (loc, name ^ ": cannot eta-expand non-arrow type"));
+  let rec build_app i acc acc_ty =
+    if i >= n then acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let arg_node = mk (Ast.Var (Printf.sprintf "__arg%d" i)) arg_ty in
+      let new_ty =
+        match Ast.walk acc_ty with
+        | Ast.TyArrow (_, b) -> b
+        | _ -> ret_ty
+      in
+      build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
+  in
+  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  let rec wrap i body_acc body_ty =
+    if i < 0 then body_acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let fn_ty = Ast.TyArrow (arg_ty, body_ty) in
+      let fn_node =
+        mk (Ast.Fun (Printf.sprintf "__arg%d" i, Some arg_ty, body_acc)) fn_ty
+      in
+      wrap (i - 1) fn_node fn_ty
+  in
+  wrap (n - 1) inner_apps ret_ty
+
 let eta_adapters_wasm : (string, string * Ast.ty * int) Hashtbl.t =
   Hashtbl.create 4
 
@@ -1035,22 +1077,42 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     (* Phase 15.4: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数
        builtin は依然 first-class 不可 (eta は nullary factory のみ)。 *)
-    if not is_shadowed && (
-       name = "vec_push"
-       || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
-       || name = "vec_map" || name = "vec_filter"
-       || name = "vec_to_owned" || name = "owned_vec_to_vec"
-       || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len"
-       || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_set" || name = "map_get" || name = "map_iter"
-       || name = "map_has" || name = "map_len") then
+    let is_curried_collection_builtin =
+      name = "vec_push"
+      || name = "vec_get" || name = "vec_len"
+      || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+      || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
+      || name = "vec_map" || name = "vec_filter"
+      || name = "vec_to_owned" || name = "owned_vec_to_vec"
+      || name = "owned_vec_push"
+      || name = "owned_vec_get" || name = "owned_vec_len"
+      || name = "strbuf_push"
+      || name = "strbuf_to_str" || name = "strbuf_len"
+      || name = "map_set" || name = "map_get" || name = "map_iter"
+      || name = "map_has" || name = "map_len"
+    in
+    let is_phase38c_target =
+      name = "owned_vec_push" || name = "owned_vec_get"
+      || name = "vec_push" || name = "vec_get"
+      || name = "strbuf_push"
+      || name = "map_get" || name = "map_has"
+      || name = "map_set" || name = "vec_set"
+    in
+    let phase38c_emittable =
+      if not is_shadowed && is_curried_collection_builtin && is_phase38c_target
+      then
+        match e.Ast.ty with
+        | Some t when ty_is_concrete (Ast.walk t) ->
+          (match Ast.walk t with
+           | Ast.TyArrow _ -> true
+           | _ -> false)
+        | _ -> false
+      else false
+    in
+    if not is_shadowed && is_curried_collection_builtin && not phase38c_emittable then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.10: curried 多引数 builtin は直接 application のみ対応)"));
+        ^ " as a value (Phase 15.4〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)"));
     if not is_shadowed && is_nullary_factory && eta_table_idx_opt = None then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
@@ -1060,6 +1122,17 @@ let rec emit_expr (e : Ast.expr) : unit =
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)"));
+    if phase38c_emittable then begin
+      (* Phase 38.C-5: emit the synthesized eta-expanded Fun chain.
+         Inner App nodes hit the existing direct-call fast paths
+         (line 1653+). *)
+      let arrow =
+        match e.Ast.ty with
+        | Some t -> Ast.walk t
+        | None -> assert false
+      in
+      emit_expr (synthesize_curried_eta_wasm name arrow e.Ast.loc)
+    end else
     (match eta_table_idx_opt with
      | Some idx ->
        (* Allocate a closure value `{ env = 0, fn_idx = idx }` on the
