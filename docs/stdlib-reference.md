@@ -7,6 +7,32 @@
 - ★ = 多相 (let-poly に乗らない、builtin-level 多相)
 - 🌐 = 4 backend (interp + C + LLVM + Wasm) で動作 (Phase 22-31 で順次対応)
 
+## Phase 36 (2026-06-22) で追加した sugar / prelude
+
+**syntactic sugar (13)**: 構文糖。lexer / parser だけの変更で 4 backend
+互換性を持つ:
+- `a..b` — range literal (`range a b` への desugar、両端 inclusive)
+- `(+ N)` / `(* N)` 等 — operator section (11 operator 対応、`-` は除外)
+- `h :: t` — cons (`Cons (h, t)` の sugar、right-associative)
+- `f <| x` — reverse pipe (`f x` で右辺に `fn` / `let` も書ける)
+- `f @@ x` — OCaml-style alias of `<|`
+- `\x -> body` / `\a b c -> body` — lambda shorthand (型注釈不可)
+- `"hello {expr}"` — string interpolation (`++ (expr) ++` への desugar、
+  `\{` で literal brace を escape)
+- `let x = e? in body` — Option early-return
+- `let x = e?! in body` — Result early-return
+- `[expr | x <- xs, cond, y <- ys, ...]` — list comprehension
+  (multi-generator + filter 任意順)
+- `if let pat = e then ... else ...` — conditional destructure
+- `for x in xs do body` — `list_iter` の sugar
+- `while cond do body` — recursive helper への desugar
+  (codegen は fn body 内のみ)
+
+**prelude 追加 (34 entries 中 Phase 36 で 16 個追加)**:
+- range / list_filter / list_take / list_drop / list_find / list_append
+- list_concat / list_flat_map / list_zip / list_for_all / list_any
+- list_member / list_sum / list_product / list_max / list_min
+
 ---
 
 ## I/O (10)
