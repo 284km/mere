@@ -461,6 +461,31 @@ let rec parse_program_internal tokens =
        | _ -> raise (Parse_error (pos_of after_caps, "expected '->' after parameter")))
     | (pos, T_fn) :: _ ->
       raise (Parse_error (pos, "expected 'ident -> expr' or '(params) -> expr' after 'fn'"))
+    (* Phase 36: lambda shorthand `\x -> body` and `\x y z -> body`
+       (Haskell-style). Multiple idents desugar to nested Fun. No type
+       annotations allowed in the shorthand. *)
+    | (pos, T_backslash) :: rest ->
+      let rec collect_params toks =
+        match toks with
+        | (_, T_ident name) :: more ->
+          let names, more' = collect_params more in
+          name :: names, more'
+        | _ -> [], toks
+      in
+      let names, after_params = collect_params rest in
+      if names = [] then
+        raise (Parse_error (pos, "expected at least one parameter after `\\`"))
+      else
+        (match after_params with
+         | (_, T_arrow) :: body_rest ->
+           let body, toks = expr body_rest in
+           let f = List.fold_right
+             (fun n acc -> mk pos (Ast.Fun (n, None, acc)))
+             names body
+           in
+           f, toks
+         | _ -> raise (Parse_error (pos_of after_params,
+                                    "expected '->' after lambda params")))
     | (pos, T_match) :: rest ->
       let scrut, toks = expr rest in
       (match toks with
@@ -496,6 +521,10 @@ let rec parse_program_internal tokens =
       | (pos, T_lt_pipe) :: rest ->
         (* right-associative: parse the rest as a full expr so `f <| fn x -> ...`
            and `f <| let y = ... in ...` work naturally *)
+        let rhs, toks = expr rest in
+        mk pos (Ast.App (lhs, rhs)), toks
+      | (pos, T_at_at) :: rest ->
+        (* Phase 36: `@@` is the OCaml-style alias for `<|`. *)
         let rhs, toks = expr rest in
         mk pos (Ast.App (lhs, rhs)), toks
       | _ -> lhs, toks

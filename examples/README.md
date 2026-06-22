@@ -136,6 +136,7 @@ backend いずれかへ codegen。
 | [range_demo.mere](range_demo.mere) ⭐ | Phase 36 で導入した **range literal `a..b`** の demo。`1..10` は `range 1 10` の syntactic sugar、int list を返す。factorial / sum_sq 等を fold で実装 |
 | [sections.mere](sections.mere) ⭐ | Phase 36 で導入した **operator section** の demo。`(+ 1)` は `fn x -> x + 1` の sugar。HOF と組合せて簡潔な map / filter が書ける。+ * / % == != < <= > >= ++ の 11 演算子に対応 |
 | [cons_pipe_demo.mere](cons_pipe_demo.mere) ⭐ | Phase 36 で導入した **`::` cons** + **`<|` reverse pipe** の demo。`h :: t` は `Cons (h, t)` の sugar、`f <| x` は `f x` の sugar (右側に fn/let/match も書ける) |
+| [sugar_demo.mere](sugar_demo.mere) ⭐ | Phase 36 で追加した **lambda shorthand `\x -> body`** / **`@@` low-precedence app** / **string interpolation `"hello {name}"`** の demo。`\{` で literal brace を escape |
 
 ### Q-010 collection 基本
 

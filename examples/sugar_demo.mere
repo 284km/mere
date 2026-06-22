@@ -1,0 +1,46 @@
+// sugar_demo: Phase 36 で追加した 3 種類の sugar の demo
+//
+// 新規構文:
+//   - lambda shorthand: `\x -> body`、`\x y z -> body` (Haskell 風)
+//   - `@@` low-precedence application: `f @@ x` = `f x` (OCaml 風、`<|` alias)
+//   - string interpolation: `"hello {name}"` / `"sum = {show n}"`
+//     `\{` で literal brace を escape
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== sugar_demo (Phase 36) ===";
+
+// --- lambda shorthand ---
+let _ = print "--- lambda \\x -> ... ---";
+let inc = \x -> x + 1;
+let dbl = \x -> x * 2;
+let _ = print "{show (inc 41)}";    // 42
+let _ = print "{show (dbl 21)}";    // 42
+
+// multi-arg
+let mul3 = \a b c -> a * b * c;
+let _ = print "{show (mul3 2 3 5)}";   // 30
+
+// HOF と組合せ
+let _ = print "--- with HOF ---";
+let _ = list_iter (list_map (1..5) (\x -> x * x)) (\v -> print (show v));
+
+// --- @@ low-precedence application ---
+let _ = print "--- @@ ---";
+let _ = print @@ "computed: {show (mul3 4 5 6)}";   // 120
+let _ = print @@ show @@ inc @@ 99;   // 100
+
+// --- string interpolation ---
+let _ = print "--- interpolation ---";
+let name = "Mere";
+let version = 36;
+let _ = print "lang = {name}, phase = {show version}";
+
+// 式を埋め込む
+let _ = print "1+2*3 = {show (1 + 2 * 3)}";
+let _ = print "5! = {show (list_fold (1..5) 1 (\a x -> a * x))}";
+
+// escape `\{`
+let _ = print "literal brace: \{ then closing }";
+
+0

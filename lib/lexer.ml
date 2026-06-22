@@ -39,6 +39,8 @@ type token =
   | T_dotdot          (* .. — range literal (Phase 36) *)
   | T_colon_colon     (* :: — list cons (Phase 36) *)
   | T_lt_pipe         (* <| — reverse function application (Phase 36) *)
+  | T_backslash       (* \  — lambda shorthand `\x -> body` (Phase 36) *)
+  | T_at_at           (* @@ — low-precedence application (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -75,7 +77,7 @@ let is_digit c = c >= '0' && c <= '9'
 let is_alpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_'
 let is_ident_cont c = is_alpha c || is_digit c
 
-let tokenize s =
+let rec tokenize s =
   let len = String.length s in
   let line = ref 1 in
   let col = ref 1 in
@@ -121,6 +123,11 @@ let tokenize s =
       | '}' -> advance 1; aux (i + 1) ((pos, T_rbrace) :: acc)
       | '[' -> advance 1; aux (i + 1) ((pos, T_lbracket) :: acc)
       | ']' -> advance 1; aux (i + 1) ((pos, T_rbracket) :: acc)
+      (* Phase 36: lambda shorthand `\x -> body` (Haskell-style). *)
+      | '\\' -> advance 1; aux (i + 1) ((pos, T_backslash) :: acc)
+      (* Phase 36: `@@` low-precedence application (OCaml-style, alias of `<|`). *)
+      | '@' when i + 1 < len && s.[i + 1] = '@' ->
+        advance 2; aux (i + 2) ((pos, T_at_at) :: acc)
       | '.' -> advance 1; aux (i + 1) ((pos, T_dot) :: acc)
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)
@@ -189,7 +196,19 @@ let tokenize s =
         else
           raise (Lex_error (pos, "unexpected '"))
       | '"' ->
+        (* Phase 36: string interpolation. `{expr}` inside a string literal
+           splits it into multiple tokens forming a `prefix ++ (expr) ++ suffix`
+           chain. Nested braces inside the expr are tracked by a depth
+           counter. `\{` escapes the literal brace. *)
         let buf = Buffer.create 16 in
+        let parts = ref [] in
+        (* parts は逆順: 最後に T_string で push されるか、interp で T_plus_plus
+           で挟まれる。 *)
+        let flush_lit () =
+          let s_part = Buffer.contents buf in
+          Buffer.clear buf;
+          parts := `Lit s_part :: !parts
+        in
         let rec read j =
           if j >= len then
             raise (Lex_error (pos, "unterminated string literal"))
@@ -204,12 +223,31 @@ let tokenize s =
                 | 't' -> '\t'
                 | '\\' -> '\\'
                 | '"' -> '"'
+                | '{' -> '{'        (* escape interpolation *)
                 | _ ->
                   raise (Lex_error (pos,
                     Printf.sprintf "unknown escape: \\%c" esc))
               in
               Buffer.add_char buf actual;
               read (j + 2)
+            | '{' ->
+              (* start interpolation: flush prefix, then find matching `}`
+                 (skipping `{...}` nested groups). *)
+              flush_lit ();
+              let rec find_end k depth =
+                if k >= len then
+                  raise (Lex_error (pos, "unterminated `{...}` in string"))
+                else if s.[k] = '{' then find_end (k + 1) (depth + 1)
+                else if s.[k] = '}' then
+                  if depth = 0 then k else find_end (k + 1) (depth - 1)
+                else if s.[k] = '"' then
+                  raise (Lex_error (pos, "string ends inside `{...}`"))
+                else find_end (k + 1) depth
+              in
+              let end_brace = find_end (j + 1) 0 in
+              let expr_src = String.sub s (j + 1) (end_brace - j - 1) in
+              parts := `Expr expr_src :: !parts;
+              read (end_brace + 1)
             | '\n' ->
               raise (Lex_error (pos, "newline in string literal"))
             | c ->
@@ -217,10 +255,58 @@ let tokenize s =
               read (j + 1)
         in
         let j = read (i + 1) in
-        let str = Buffer.contents buf in
+        flush_lit ();
+        let part_list = List.rev !parts in
         let w = j - i in
         advance w;
-        aux j ((with_width pos w, T_string str) :: acc)
+        let has_interp = List.exists (function `Expr _ -> true | _ -> false) part_list in
+        if not has_interp then begin
+          (* fast path: ordinary string literal *)
+          let str = match part_list with [`Lit s] -> s | _ -> "" in
+          aux j ((with_width pos w, T_string str) :: acc)
+        end else begin
+          (* Emit alternating T_string / (T_plus_plus T_lparen <tokens> T_rparen)
+             chain. Skip empty leading/trailing lits. The whole chain becomes
+             one expression at parse time. *)
+          let lit_tokens s_lit = [(with_width pos w, T_string s_lit)] in
+          let plus_plus_tok = (with_width pos w, T_plus_plus) in
+          let lparen_tok = (with_width pos w, T_lparen) in
+          let rparen_tok = (with_width pos w, T_rparen) in
+          let strip_eof toks =
+            (* tokenize 末尾の T_eof は外側 stream で邪魔なので落とす。 *)
+            List.filter (fun (_, t) -> t <> T_eof) toks
+          in
+          let rec emit = function
+            | [] -> []
+            | [last] ->
+              (match last with
+               | `Lit s -> lit_tokens s
+               | `Expr src ->
+                 let inner = strip_eof (tokenize src) in
+                 lparen_tok :: inner @ [rparen_tok])
+            | first :: more ->
+              let first_toks = match first with
+                | `Lit s -> lit_tokens s
+                | `Expr src ->
+                  let inner = strip_eof (tokenize src) in
+                  lparen_tok :: inner @ [rparen_tok]
+              in
+              first_toks @ (plus_plus_tok :: emit more)
+          in
+          (* Ensure we always start with a string literal so the chain is
+             well-formed at the parser level (prefix can be ""). *)
+          let part_list =
+            match part_list with
+            | `Expr _ :: _ -> `Lit "" :: part_list
+            | _ -> part_list
+          in
+          let all_toks = emit part_list in
+          (* Wrap whole interp result in parens so e.g. `"x" ++ "y"` doesn't
+             eat into our concat chain. *)
+          let wrapped = lparen_tok :: all_toks @ [rparen_tok] in
+          let acc' = List.rev_append wrapped acc in
+          aux j acc'
+        end
       | c when is_digit c ->
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j
