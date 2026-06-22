@@ -300,6 +300,36 @@ let rec parse_program_internal tokens =
     | _ -> inner, toks
   and base_expr toks =
     match toks with
+    (* Phase 36: `while cond do body` desugars to a tail-recursive helper:
+         let rec __loop = fn () ->
+           if cond then let _ = body in __loop ()
+           else ()
+         in __loop ()
+       Mere は immutable なので `while` の典型用途は Map/OwnedVec の
+       mutable container を更新するパターン。 *)
+    | (pos, T_while) :: rest ->
+      let cond, after_cond = expr rest in
+      (match after_cond with
+       | (_, T_do) :: after_do ->
+         let body, toks = expr after_do in
+         let loop_name = "__while_" ^ fresh_compose_var () in
+         let unit_pat = mkp pos Ast.P_unit in
+         let loop_var = mk pos (Ast.Var loop_name) in
+         let unit_lit = mk pos Ast.Unit_lit in
+         (* recursive call: __loop () *)
+         let recur_call = mk pos (Ast.App (loop_var, unit_lit)) in
+         (* body; __loop () *)
+         let then_branch =
+           mk pos (Ast.Let (mkp pos Ast.P_wild, body, recur_call))
+         in
+         let if_expr =
+           mk pos (Ast.If (cond, then_branch, unit_lit))
+         in
+         let fn_value = mk pos (Ast.Fun ("__unit", Some Ast.TyUnit, if_expr)) in
+         let _ = unit_pat in
+         let initial_call = mk pos (Ast.App (loop_var, unit_lit)) in
+         mk pos (Ast.Let_rec ([(loop_name, fn_value)], initial_call)), toks
+       | _ -> raise (Parse_error (pos_of after_cond, "expected 'do' after `while cond`")))
     (* Phase 36: `for x in xs do body` desugars to
          list_iter xs (\x -> body) *)
     | (pos, T_for) :: (_, T_ident name) :: (_, T_in) :: rest ->

@@ -143,6 +143,7 @@ backend いずれかへ codegen。
 | [statistics.mere](statistics.mere) ⭐ | int list の基本統計量を Phase 36 で追加した **prelude helper を combined で dogfood**。count / sum / mean / min / max / variance / stddev (newton sqrt) / median (sort) / mode (Map) / outliers (filter)。`list_zip` / `list_for_all` / `list_any` / `list_member` も使う |
 | [if_let_demo.mere](if_let_demo.mere) ⭐ | Phase 36 で導入した **`if let pat = e then ... else ...`** の demo。Option / Result の条件分岐 + variant destructure (Circle / Square / Rect) で簡潔に書ける |
 | [for_loop_demo.mere](for_loop_demo.mere) ⭐ | Phase 36 で導入した **`for x in xs do body`** の demo。range / 文字列 list / list comprehension の結果 / nested for / Map 累積を procedural-style に。`list_iter xs (\x -> body)` の sugar |
+| [while_loop_demo.mere](while_loop_demo.mere) ⭐ | Phase 36 で導入した **`while cond do body`** の demo。Map[str, int] を mutable cell として使い、count up / powers of 2 / Collatz step counter を procedural-style に。**注: codegen は fn body 内のみ対応** (top-level main では inner let-rec lift が効かない) |
 
 ### Q-010 collection 基本
 

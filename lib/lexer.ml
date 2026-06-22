@@ -46,6 +46,7 @@ type token =
   | T_lt_minus        (* <- — list comprehension generator `[e | x <- xs]` (Phase 36) *)
   | T_for             (* for — `for x in xs do body` (Phase 36) *)
   | T_do              (* do  — same *)
+  | T_while           (* while — `while cond do body` (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -355,6 +356,7 @@ let rec tokenize s =
           | "else" -> T_else
           | "for" -> T_for       (* Phase 36: `for x in xs do body` *)
           | "do" -> T_do
+          | "while" -> T_while   (* Phase 36: `while cond do body` *)
           | "true" -> T_true
           | "false" -> T_false
           | "fn" -> T_fn

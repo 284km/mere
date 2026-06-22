@@ -1,0 +1,64 @@
+// while_loop_demo: Phase 36 で導入した `while cond do body` の demo
+//
+// 構文: `while cond do body` は次の再帰 helper に desugar される:
+//   let rec __while = fn () ->
+//     if cond then let _ = body in __while ()
+//     else ()
+//   in __while ()
+//
+// 注: codegen の制約で、`while` は **fn body の中**で使う必要がある
+//   (top-level main では `let rec` の inner lift が効かないため)。
+//   interp では top-level でも動く。
+//
+// 典型用途: Mere は immutable なので Map / OwnedVec を mutable cell として
+//   使い、`while` で side-effect ループを回す。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== while_loop_demo (Phase 36) ===";
+
+// --- 5 回カウントアップ ---
+let count_up = \n ->
+  let cell = map_new () in
+  let _ = map_set cell "i" 0 in
+  let _ = while map_get cell "i" < n do
+    let i = map_get cell "i" in
+    let _ = print "i = {show i}" in
+    let _ = map_set cell "i" (i + 1) in
+    () in
+  ();
+
+let _ = print "--- count up 5 ---";
+let _ = count_up 5;
+
+// --- べき乗チェーン (1, 2, 4, ..., 32) ---
+let _ = print "--- powers of 2 <= 32 ---";
+let powers = \limit ->
+  let cell = map_new () in
+  let _ = map_set cell "n" 1 in
+  let _ = while map_get cell "n" <= limit do
+    let n = map_get cell "n" in
+    let _ = print (show n) in
+    let _ = map_set cell "n" (n * 2) in
+    () in
+  ();
+let _ = powers 32;
+
+// --- Collatz sequence までの step 数 (count via while) ---
+let _ = print "--- Collatz of 27 (step count) ---";
+let collatz_steps = \start ->
+  let cell = map_new () in
+  let _ = map_set cell "n" start in
+  let _ = map_set cell "steps" 0 in
+  let _ = while map_get cell "n" > 1 do
+    let n = map_get cell "n" in
+    let next = if n % 2 == 0 then n / 2 else 3 * n + 1 in
+    let _ = map_set cell "n" next in
+    let _ = map_set cell "steps" (map_get cell "steps" + 1) in
+    () in
+  map_get cell "steps";
+
+let _ = print "27 -> 1 in {show (collatz_steps 27)} steps";   // 111
+let _ = print "100 -> 1 in {show (collatz_steps 100)} steps"; // 25
+
+0
