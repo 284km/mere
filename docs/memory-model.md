@@ -97,7 +97,28 @@ with db = Database.connect(...) in
 
 ---
 
-## 4. mere での現状 (2026-06-16)
+## 4. mere での現状 (2026-06-22、Phase 36 時点)
+
+下の "Phase 2" 節は最初の実装スライス (region/view 構文層) の記録。
+**Phase 11 〜 31 で借用注釈 4 mode (`&R T` / `&mut R T` / `&shared write R T` /
+`&exclusive R T`) + borrow checker + `with` Drop 統合 + Q-010 collection
+4 種 (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4 backend codegen (interp +
+C / LLVM / Wasm) parity** まで進行済。詳細は
+[language-reference.md §3 region/view/with](language-reference.md) /
+[codegen.md §4](codegen.md) を参照。
+
+**Phase 36 (2026-06-22) で追加**: narrow value restriction を typer に導入。
+`let v = map_get m k in ...` のような **mutable container を介した値の
+let-bind** は generalize しない (`'a` のまま leak しない)。詳細:
+- `is_value e` で expr が value form (リテラル / fn / Var / Tuple of values 等) かを判定
+- `ty_mentions_mutable_container t` で `OwnedVec[T]` / `Map[R, K, V]` /
+  `StrBuf[R]` を含む型かを判定
+- どちらでもないとき (= 非 value で mutable container を含む型) のみ
+  generalize を抑制
+
+これは ML の標準的な value restriction を狭めた版 (mutable container を
+含む型に限定) — 通常の `let inc = fn x -> x + 1` のような関数 let は
+依然多相化される。
 
 ### 動くこと (Phase 2: 構文 + 値式 + escape check + view 宣言 + 構築の region 強制 + field access の region 伝播)
 - `region R { body }` 式 — R を region 名としてスコープに導入

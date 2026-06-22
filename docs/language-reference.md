@@ -1,6 +1,10 @@
 # Language reference (mere)
 
-現在実装されている Mere の構文と意味論。将来予定の機能 (`&T` 参照 / `region` / `view` / effect 等) は含まない。
+現在実装されている Mere の構文と意味論 (2026-06-22 / Phase 36 時点)。
+`&T` 参照 / `region` / `view` / effect / FFI / 4 backend codegen はすべて
+実装済。Phase 36 で 13 種の syntactic sugar (range / op section / `::` /
+`<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` /
+`for-in-do` / `while-do`) が入り、ML 系として書きやすさが大きく向上。
 
 ---
 
@@ -31,7 +35,8 @@
 ### キーワード
 ```
 let rec and in if then else true false fn type signature
-match with when of as _
+match with when of as _ for do while
+module open import extern using region view drop
 ```
 
 ### 演算子・記号
@@ -41,12 +46,31 @@ match with when of as _
 && ||                    論理 (短絡)
 ++                       文字列結合
 |> << >>                 パイプ・関数合成
+<|                       逆パイプ (Phase 36): f <| x = f x
+@@                       低優先度 apply (Phase 36): f @@ x = f x
+::                       cons 演算子 (Phase 36): h :: t = Cons (h, t)
+..                       range literal (Phase 36): a..b = [a, ..., b-1]
+?                        Option 早期 return (Phase 36)
+?!                       Result 早期 return (Phase 36)
+<-                       list comprehension generator (Phase 36)
+\                        lambda shorthand (Phase 36): \x -> e
 ->                       関数型・arm 区切り
 =                        束縛
 : ; , .                  注釈・終端・区切り・field
 ( ) { } [ ]              グルーピング
 ...                      signature spread / list tail
-|                        match 区切り・variant 区切り・record update
+|                        match 区切り・variant 区切り・record update・list comp
+```
+
+### 文字列補間 (Phase 36)
+
+文字列リテラル中 `{expr}` は補間: lexer が再帰的にトークン化し、parser
+では `"a {x} b"` を `"a " ++ show_or_str x ++ " b"` 相当に展開 (実際は
+`expr` の型に応じて `++` chain)。リテラル中の `\{` で escape、ネストした
+文字列リテラルは禁止 (一度 let で束縛して回避)。
+```
+let n = 42 in print "answer = {show n}"        // "answer = 42"
+print "escape: \{not interpolated\}"            // "escape: {not interpolated}"
 ```
 
 ---
@@ -91,6 +115,51 @@ x    (変数参照)
 true && false            false     (短絡: 左 false なら右 評価しない)
 false || true            true
 not true                 false     (builtin)
+```
+
+### Phase 36 syntactic sugar 概要
+
+すべて parser または lexer で desugar されるため、AST 以降は影響なし。
+各形式の優先度は §6 参照。
+
+```
+0..5                     // range: [0, 1, 2, 3, 4] (= list_iota だが parser 直接生成)
+1 :: 2 :: []             // cons: Cons (1, Cons (2, Nil))
+(+ 1)                    // op section: fn x -> x + 1
+(* 2)                    // (- 1) は単項 - と曖昧なので括弧優先
+(< 10)                   // 比較系の section も OK
+\x -> x + 1              // lambda shorthand: = fn x -> x + 1
+\(a, b) -> a + b         // tuple destructure 可
+f <| x                   // 逆 pipe: = f x
+f @@ x                   // 低優先度 apply: = f x、改行跨ぎで読みやすい
+"x = {show n}"           // 文字列補間 (lexer level、§1 参照)
+
+[expr | x <- xs, p x]                       // list comprehension (single gen + filter)
+[expr | x <- xs, y <- ys, p x y]            // multi-generator (cartesian)
+                                            // desugar: list_map / list_flat_map
+
+if let pat = e then yes_branch else no_branch
+  // = match e with | pat -> yes_branch | _ -> no_branch
+  // (else は省略不可、両 branch 同型)
+
+for x in xs do body                         // = list_iter xs (\x -> body)
+                                            // body は unit 型必須
+while cond do body                          // = let rec __while_N = fn () ->
+                                            //     if cond then (body; __while_N ()) else () in
+                                            //   __while_N ()
+                                            // 注: 現状 fn body 内のみ動作 (top-level は codegen 非対応)
+```
+
+### Option / Result 早期 return (`?` / `?!`、Phase 36)
+
+`let pat = e? in body` 形式で:
+- `e?` (Option): `e` が `Some v` なら `pat` に `v` を束縛して `body`、`None` なら enclosing fn から `None` を即 return
+- `e?!` (Result): `e` が `Ok v` なら束縛、`Err e` なら enclosing fn から `Err e` を即 return
+
+両者は parser が Match に展開する:
+```
+let v = parse_int s ? in body
+  ≈ match parse_int s with | Some v -> body | None -> None
 ```
 
 ### let バインディング
@@ -401,17 +470,21 @@ signature ctx = (db: int, log: int);
 
 | 優先度 | 演算子 | 結合性 |
 |---|---|---|
-| 1 (低) | `let`, `if`, `fn`, `match`, `with` | - |
-| 2 | `|>` | 左 |
-| 3 | `<<`, `>>` | 右 |
-| 4 | `||` | 左 |
-| 5 | `&&` | 左 |
-| 6 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 非結合 |
-| 7 | `+`, `-`, `++` | 左 |
-| 8 | `*`, `/`, `%` | 左 |
-| 9 | unary `-` | - |
-| 10 | function application | 左 |
-| 11 (高) | atom / `(...)` / `[...]` / `{...}` / `.field` | - |
+| 1 (低) | `let`, `if`, `fn`, `match`, `with`, `for`, `while` | - |
+| 2 | `@@` (低優先度 apply、Phase 36) | 右 |
+| 3 | `|>` / `<|` (Phase 36) | 左 / 右 |
+| 4 | `<<`, `>>` | 右 |
+| 5 | `||` | 左 |
+| 6 | `&&` | 左 |
+| 7 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 非結合 |
+| 8 | `::` (cons、Phase 36) | 右 |
+| 9 | `..` (range、Phase 36) | 非結合 |
+| 10 | `+`, `-`, `++` | 左 |
+| 11 | `*`, `/`, `%` | 左 |
+| 12 | unary `-` | - |
+| 13 | `?` / `?!` (postfix、Phase 36) | postfix |
+| 14 | function application | 左 |
+| 15 (高) | atom / `(...)` / `[...]` / `{...}` / `.field` / op section `(+ N)` / `\x -> e` / `"...{expr}..."` | - |
 
 `expr : type` (annotation) は最外で 1 回適用される。
 
@@ -426,15 +499,27 @@ signature ctx = (db: int, log: int);
 
 ---
 
-## 8. 既知の制約
+## 8. 既知の制約 (2026-06-22)
 
-- float / 任意ビット幅整数なし
-- 文字列 escape は `\n \t \\ \"` のみ
-- 網羅性検査は **Phase 1** (bool + variant types) — 非網羅は **warning** を stderr に出力、評価は継続 (case 漏れは runtime fallthrough エラー)
-- int/str/float/tuple/record の網羅性は wildcard arm が必要 (より精密な検査は将来)
-- ネイティブ codegen なし (全てインタプリタ)
-- メモリモデル / region / view / effect は未実装 (設計は `internal design notes` で進行)
-- REPL は単一行入力のみ
+旧版で「未実装」だった項目は Phase 14-36 で順次実装され、現状は以下のみ残る:
+
+- **網羅性検査は Phase 1** (bool + variant types のみ): 非網羅は **warning** を stderr に出力、評価は継続 (case 漏れは runtime fallthrough エラー)
+- **int / str / float / tuple / record の網羅性**は wildcard arm が必要 (精密な検査は将来)
+- **文字列 escape** は `\n \t \\ \"` + Phase 36 で `\{` (補間の中括弧 escape) のみ。Unicode escape (`\uXXXX`) なし
+- **整数は固定幅**: int は OCaml の `int` (host 依存、通常 63 bit)、任意精度なし。LLVM/Wasm では i64 / i32
+- **float は MVP**: IEEE 754 倍精度、`f_add` 系の関数 prefix。`+.` のような中置版は未実装
+- **文字列補間でネスト文字列リテラル禁止**: `"x = {show \"abc\"}"` は lexer エラー (let 経由で回避)
+- **`while` は fn body 内のみ**: top-level main で `while` を直接書くと codegen 非対応 (top-level Let_rec 制約)
+- **REPL の `:type EXPR` は値式のみ**: top-level decl の型表示は `:show NAME` で可能
+- **FFI 型範囲は MVP**: `int / bool / str / unit` のみ (float / tuple / record / variant / callback は defer、Phase 32)
+- **ポリモーフィズム**: HM 推論 + let-polymorphism + 多相 user let-rec の per-instantiation 特殊化 (Phase 23.3 / 25.5 / 26.4)。Phase 36 で **narrow value restriction** 導入 (mutable container を含む型は let-bind 時に generalize しない)
+
+## 9. ステータス概要
+
+- **1488 tests passing** (test/test_basic.ml)
+- **4 backend feature parity**: interpreter + C / LLVM IR / Wasm runtime
+- 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) で **diff = 0 PERFECT 一致**
+- 詳細は [Changelog](changelog.md) / [Codegen](codegen.md) を参照
 
 ---
 

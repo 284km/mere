@@ -81,11 +81,12 @@ interpreter 方式だと「Mere は OCaml の上で動く」状態。codegen で
 
 ---
 
-## 4. mere での現状 (2026-06-22、Phase 4〜31 完了段階)
+## 4. mere での現状 (2026-06-22、Phase 4〜36 完了段階)
 
 interpreter で書ける Mere プログラムの**主要構文ほぼ全て** + **Q-010
-collection (Vec / OwnedVec / StrBuf / Map)** が 3 backend (C / LLVM IR /
-Wasm) で native compile + 実行可能。テスト **1480 件 passing**、E2E では
+collection (Vec / OwnedVec / StrBuf / Map)** + **FFI (`extern fn`)** +
+**float (3 backend)** + **Phase 36 の 13 syntactic sugar** が 3 backend
+(C / LLVM IR / Wasm) で native compile + 実行可能。テスト **1488 件 passing**、E2E では
 factorial / fibonacci / 連結リスト sum / make_adder closure / 多相
 variant + record / pattern match (nested / guard / or) に加えて、Phase 15
 で Vec[R, T] の全要素型 / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K =
@@ -103,6 +104,25 @@ read_file / write_file imports) を追加、Wasm が実 runtime で実行検証
 (DEFERRED §1.10 record field × nested lambda capture / §1.11 env_subst
 shadow / §1.12 builtin shadow) → 全部 fix (3 backend で揃えた)。Phase 31.0
 で str_compare を 3 backend に移植 (sign-normalize -1/0/1)。
+
+### Phase 32-36 で追加された codegen capability (2026-06-22)
+
+| 機能 | Phase | backend 状況 |
+|---|---|---|
+| `extern fn <name>: <ty>;` (FFI、curried multi-arg) | 32.0-32.6 | 4 backend |
+| float MVP (Float_lit / `f_add` etc / `f_neg` / `__lang_str_of_float`) | 34.1 (C) / 34.2 (LLVM) / 34.3 (Wasm) | 4 backend |
+| libm dispatch (sqrt/sin/cos/tan/f_pow/atan2) | 34.4-34.5 | 4 backend |
+| nullary factory builtin の first-class value 化 (eta-wrap) | 35.1 (C) / 35.2 (LLVM) / 35.3 (Wasm) | 4 backend (DEFERRED §1.2 A1) |
+| Phase 36 sugars (range / op section / `::` / `<|` / `@@` / `\` / interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) | 36 | 4 backend (parser/lexer level desugar) |
+| narrow value restriction (mutable container を含む型を let-bind 時に generalize しない) | 36 (typer) | 全 backend |
+| C codegen deep list literal の O(2^N) fix (Constr emit 内 `emit_expr arg` 1 回キャッシュ) | 36 (DEFERRED §1.15) | C |
+| `strbuf_to_str` の region escape 時 dangling pointer fix (`__lang_default_region` alloc に切替) | 36 (DEFERRED §1.16) | C / LLVM |
+| `type result` user shadow が `List.combine` で落ちる fix | 36 (DEFERRED §1.17) | C |
+| Phase 30.2 top-level global の初期化順 fix (source-order inline init) | 36 (DEFERRED §1.18) | 3 backend |
+| nested lambda が top-level fn 参照で unbound (closure_wrapper_forward_decls + fn_closure_table_idx pre-populate) | 36 (DEFERRED §1.19) | C / LLVM / Wasm |
+| polymorphic variant 内 user record の forward decl (unified topo sort) | 36 (DEFERRED §1.20) | C |
+| Wasm memory 16 → 64 pages (4MB) | 36 | Wasm |
+| 16 new prelude entries (range / list_filter / list_take / list_drop / list_find / list_append / list_concat / list_flat_map / list_zip / list_for_all / list_any / list_member / list_sum / list_product / list_max / list_min) | 36 (prelude) | 4 backend |
 
 ### Phase 22-31 で追加された codegen capability
 
@@ -153,21 +173,22 @@ shadow / §1.12 builtin shadow) → 全部 fix (3 backend で揃えた)。Phase 
 
 ### 動かないこと (今のところ Codegen_error で reject)
 
-- **builtin の first-class value 用法** (`let f = vec_new in ...`) — vec_*
-  / strbuf_* / map_* を直接 application 以外で使うのは未対応 (DEFERRED
-  §1.2)。interpreter のみで動く
+- **Phase 35 で nullary factory builtin (vec_new / map_new / strbuf_new
+  等) の first-class value 化は 4 backend で解消** (eta-wrap)。但し
+  **multi-arg curried builtin の partial application**
+  (`let push_to_v = vec_push v in ...`) は依然 future work
 - **OwnedVec の自動 scope-bound Drop** — `with v = ...` 明示なら scope 末
   で free、明示しなければ main 末で一括 free (Phase 15.8 / 15.13、
   DEFERRED §1.3)
 - inner-lifted fn (`let h = fn ...`) を VALUE として使う (現状は直接呼出のみ。anonymous Fun として書き直せば動く)
 - closure capture の非プリミティブ型 (tuple/record の capture。closure 値 capture は OK)
-- float (`f_add` 等の float builtin と `Float_lit` / `f_neg` 全般)
 - nested or-pattern (or 内に constructor / tuple / record)
-- 一部の stdlib builtin (`read_lines` / `args` / `env_var` / `file_exists` の
-  4 件と、`sin` / `cos` / `tan` / `atan2` / `random_int` / `random_float`
-  等の float 系) は **interpreter のみ**。それ以外の I/O / 文字列 / 数値 /
-  show / collection / Logger / Metrics 周りは 3 backend (C/LLVM/Wasm) で
-  揃っている (Phase 22-31)
+- **top-level main 直下に `while cond do body` を直接置く** — top-level Let_rec
+  制約のため fn body 内なら OK
+- **文字列補間でネストした文字列リテラル** (`"x = {show \"abc\"}"`) — let 経由で回避
+- 一部の stdlib builtin (`read_lines` / `args` / `env_var` / `file_exists` 等)
+  は **interpreter のみ**。Phase 34 で float / libm (sqrt / sin / cos /
+  tan / f_pow / atan2) は 3 backend に揃った
 - 文字列・closure env・variant node の GC (現状 region arena 一括解放、
   短時間実行向け)
 - LLVM / Wasm の Map K の payload-mixed variant (uniform payload のみ)

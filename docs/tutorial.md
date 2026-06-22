@@ -725,6 +725,110 @@ node -e 'WebAssembly.instantiate(require("fs").readFileSync("v.wasm"),
 
 動く実例: [`examples/vec_basics.mere`](../examples/vec_basics.mere)。
 
+## 10.7. Phase 36 syntactic sugar
+
+Phase 36 で 13 種の構文糖が入り、ML 系として書きやすさが大きく向上した。
+全て **interpreter + C + LLVM + Wasm の 4 backend で動く**。
+
+### 範囲・コレクション
+
+```mere
+0..5                  // [0, 1, 2, 3, 4]
+1..10                 // [1, 2, ..., 9]
+
+1 :: 2 :: 3 :: []     // cons 演算子 (= Cons (1, Cons (2, ...)))
+
+// list comprehension (multi-generator + filter)
+[x * 2 | x <- 1..5, x % 2 == 0]            // [4, 8]
+[(r, c) | r <- 0..3, c <- 0..3, r != c]    // 9 ペア
+
+// for / while ループ (副作用用)
+for x in 1..5 do print (show x);
+while !done do step ();
+```
+
+### Operator section / lambda
+
+```mere
+(+ 1)                 // = fn x -> x + 1
+(* 2)                 // = fn x -> x * 2
+list_map xs (+ 1)     // = list_map xs (fn x -> x + 1)
+
+\x -> x + 1           // = fn x -> x + 1
+\(a, b) -> a + b      // tuple destructure 可
+```
+
+### Pipe variants
+
+```mere
+5 |> (+ 1)            // 順方向 (既存)
+(+ 1) <| 5            // 逆方向: f <| x = f x
+print @@ show 42      // 低優先度 apply: print (show 42)
+```
+
+### 文字列補間
+
+```mere
+let n = 42 in
+print "answer = {show n}, double = {show (n * 2)}";
+// → "answer = 42, double = 84"
+
+"escape: \{not interpolated\}"   // \{ で literal 中括弧
+```
+
+### 早期 return (`?` / `?!`)
+
+`?` は Option chain、`?!` は Result chain。失敗時に enclosing fn を
+即 None / Err で抜ける:
+
+```mere
+let safe_div = fn a -> fn b ->
+  if b == 0 then None else Some (a / b);
+
+let compute = fn x -> fn y -> fn z ->
+  let a = safe_div x y ? in     // Some _ なら束縛、None なら return None
+  let b = safe_div a z ? in
+  Some (a + b);
+
+// Result 版
+let parse_and_eval = fn s ->
+  let toks = tokenize s in
+  let v = parse_expr toks ?! in  // Ok _ なら束縛、Err _ なら return Err
+  Ok v;
+```
+
+### `if let`
+
+```mere
+if let Some n = map_get m "key" then
+  print "found {show n}"
+else
+  print "missing";
+```
+
+### 全部入り例
+
+```mere
+let stats = fn xs ->
+  let positives = [x | x <- xs, x > 0] in
+  let sum = list_sum positives in
+  let max = if list_len positives == 0 then 0 else list_max positives in
+  "sum = {show sum}, max = {show max}";
+```
+
+dogfood example: [`examples/sugar_showcase.mere`](../examples/sugar_showcase.mere) /
+[`examples/calc.mere`](../examples/calc.mere) (138 行の arithmetic parser、`?!` chain) /
+[`examples/maze_solver.mere`](../examples/maze_solver.mere) (BFS) /
+[`examples/comprehension.mere`](../examples/comprehension.mere)。
+
+### Phase 36 prelude (16 entry 追加)
+
+`range` / `list_filter` / `list_take` / `list_drop` / `list_find` /
+`list_append` / `list_concat` / `list_flat_map` / `list_zip` /
+`list_for_all` / `list_any` / `list_member` / `list_sum` /
+`list_product` / `list_max` / `list_min` (累計 34 entry)。詳細は
+[stdlib-reference.md](stdlib-reference.md) 冒頭の Phase 36 節を参照。
+
 ## 11. ブロック式 (副作用シーケンス)
 
 ```

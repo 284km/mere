@@ -59,7 +59,9 @@ let rec map = fn (f, xs) -> match xs with
 map (fn x -> x * x) [1, 2, 3, 4]    // [1, 4, 9, 16]
 ```
 
-注: stdlib に汎用 `map`/`filter`/`fold` は未提供 (list 型が user-defined のため)。
+注: Phase 36 で `list_filter` / `list_map` / `list_fold` / `list_sum` / `list_max`
+等の汎用 list helper が prelude に入った (累計 34 entry)。詳細は
+[stdlib-reference.md](stdlib-reference.md) を参照。
 
 ---
 
@@ -294,6 +296,106 @@ echo 3 "hello"
 ```
 
 `{ e1; e2; ...; eN }` は `let _ = e1 in let _ = e2 in ... in eN` の構文糖。最後の式が値。
+
+---
+
+## 14.5. Phase 36 sugar の慣用句
+
+### `?` / `?!` で nested match を flat に
+
+```mere
+// 旧: nested match で None / Err を伝播
+let safe = fn x ->
+  match parse x with
+  | None -> None
+  | Some a ->
+    match step1 a with
+    | None -> None
+    | Some b ->
+      match step2 b with
+      | None -> None
+      | Some c -> Some (a + b + c);
+
+// 新: ? で early-return
+let safe = fn x ->
+  let a = parse x ? in
+  let b = step1 a ? in
+  let c = step2 b ? in
+  Some (a + b + c);
+```
+
+Result 版は `?!` で同じパターン。`examples/calc.mere` の parser が
+良い実例 (138 行 / `?!` chain 5 箇所)。
+
+### list comprehension で filter + map をまとめる
+
+```mere
+// 旧: 二段
+let xs = list_map (1..100) (fn x -> x * x) in
+let ys = list_filter xs (fn x -> x % 2 == 0);
+
+// 新: 一発で
+let ys = [x * x | x <- 1..100, (x * x) % 2 == 0];
+
+// multi-gen で cartesian
+let pairs = [(a, b) | a <- 1..5, b <- 1..5, a + b == 6];
+```
+
+### `for-in-do` で副作用ループ、`while-do` で fn body 内の loop
+
+```mere
+// 出力だけしたい
+for x in 1..10 do print (show x);
+
+// 累積ループは map_set / owned_vec_push 等で
+for x in xs do
+  let _ = owned_vec_push buf (transform x) in ();
+
+// while: fn body 内なら使える
+let consume_stream = fn stream ->
+  while !(stream_eof stream) do
+    let x = stream_next stream in
+    let _ = process x in ();
+```
+
+注: `while` は現状 fn body 内のみ codegen 対応 (top-level main で
+直接書くと unsupported)。
+
+### `if let` で `Option` の単発取り出し
+
+```mere
+if let Some n = map_get config "timeout" then
+  use_timeout n
+else
+  use_default ();
+```
+
+### 文字列補間でログ出力をシンプルに
+
+```mere
+// 旧: ++ chain
+print ("user=" ++ name ++ ", age=" ++ show age ++ ", role=" ++ role);
+
+// 新: 補間
+print "user={name}, age={show age}, role={role}";
+```
+
+注意点:
+- ネストした文字列リテラルは禁止 (`"x = {show \"abc\"}"` → エラー)。
+  一度 let に逃がせば OK
+- `\{` で literal 中括弧を escape
+- `{}` の中身は任意の expr (関数適用 / 演算 / match も OK)
+
+### 範囲 + ::, <|, @@ で式を読みやすく
+
+```mere
+// range + list_map
+list_map (1..10) (* 2)                       // op section
+0 :: 1 :: 2 :: 3 :: []                       // explicit list construction
+print <| "result: " ++ show answer           // 逆 pipe
+print @@ "lengthy message that goes way " ++
+  "over one line — @@ avoids needing parens"
+```
 
 ---
 
