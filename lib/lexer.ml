@@ -37,6 +37,8 @@ type token =
   | T_underscore
   | T_ellipsis        (* ... — for spreading signature params *)
   | T_dotdot          (* .. — range literal (Phase 36) *)
+  | T_colon_colon     (* :: — list cons (Phase 36) *)
+  | T_lt_pipe         (* <| — reverse function application (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -129,12 +131,18 @@ let tokenize s =
         advance 2; aux (i + 2) ((pos, T_lt_eq) :: acc)
       | '<' when i + 1 < len && s.[i + 1] = '<' ->
         advance 2; aux (i + 2) ((pos, T_lt_lt) :: acc)
+      | '<' when i + 1 < len && s.[i + 1] = '|' ->
+        (* Phase 36: `<|` reverse function application. *)
+        advance 2; aux (i + 2) ((pos, T_lt_pipe) :: acc)
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | '>' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_gt_eq) :: acc)
       | '>' when i + 1 < len && s.[i + 1] = '>' ->
         advance 2; aux (i + 2) ((pos, T_gt_gt) :: acc)
       | '>' -> advance 1; aux (i + 1) ((pos, T_gt) :: acc)
+      | ':' when i + 1 < len && s.[i + 1] = ':' ->
+        (* Phase 36: `::` cons operator for list construction. *)
+        advance 2; aux (i + 2) ((pos, T_colon_colon) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
       | ',' -> advance 1; aux (i + 1) ((pos, T_comma) :: acc)

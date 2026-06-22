@@ -483,14 +483,21 @@ let rec parse_program_internal tokens =
       raise (Parse_error (pos, "expected 'NAME { body }' after 'region'"))
     | _ -> pipe toks
   and pipe toks =
-    (* Lowest-precedence operator below let/if/fn/match.
-       `a |> f` desugars to `f a`. Left-associative: `a |> b |> c` = `c (b a)`. *)
+    (* Lowest-precedence operators below let/if/fn/match.
+       `a |> f` desugars to `f a`. Left-associative.
+       `f <| x` desugars to `f x` (Phase 36). Right-associative so
+       `f <| g <| x` = `f (g x)`. *)
     let lhs, toks = compose toks in
     let rec loop lhs toks =
       match toks with
       | (pos, T_pipe_gt) :: rest ->
         let rhs, toks = compose rest in
         loop (mk pos (Ast.App (rhs, lhs))) toks
+      | (pos, T_lt_pipe) :: rest ->
+        (* right-associative: parse the rest as a full expr so `f <| fn x -> ...`
+           and `f <| let y = ... in ...` work naturally *)
+        let rhs, toks = expr rest in
+        mk pos (Ast.App (lhs, rhs)), toks
       | _ -> lhs, toks
     in
     loop lhs toks
@@ -738,7 +745,9 @@ let rec parse_program_internal tokens =
        | None -> lhs, toks)
     | _ -> lhs, toks
   (* Phase 36: range literal `e1 .. e2` desugars to `range e1 e2`
-     (returns `int list`). Below cmp so `1..10` works as one expr. *)
+     (returns `int list`). Below cmp so `1..10` works as one expr.
+     Same layer: `::` cons. Right-associative, `h :: t` desugars to
+     `Cons (h, t)`. `1 :: 2 :: xs` parses as `1 :: (2 :: xs)`. *)
   and range_expr toks =
     let lhs, toks = sum toks in
     match toks with
@@ -747,6 +756,10 @@ let rec parse_program_internal tokens =
       let range_var = mk pos (Ast.Var "range") in
       let app1 = mk pos (Ast.App (range_var, lhs)) in
       mk pos (Ast.App (app1, rhs)), toks
+    | (pos, T_colon_colon) :: rest ->
+      let rhs, toks = range_expr rest in
+      let tup = mk pos (Ast.Tuple [lhs; rhs]) in
+      mk pos (Ast.Constr ("Cons", Some tup)), toks
     | _ -> lhs, toks
   and sum toks =
     let lhs, toks = term toks in

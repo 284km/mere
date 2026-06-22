@@ -135,6 +135,7 @@ backend いずれかへ codegen。
 | [knapsack.mere](knapsack.mere) ⭐ | 0/1 ナップサック問題を memoize DP で解く。Map[str, int] で `(i, w) → max_value` をキャッシュ、選択アイテムの復元 (`reconstruct`) も実装 |
 | [range_demo.mere](range_demo.mere) ⭐ | Phase 36 で導入した **range literal `a..b`** の demo。`1..10` は `range 1 10` の syntactic sugar、int list を返す。factorial / sum_sq 等を fold で実装 |
 | [sections.mere](sections.mere) ⭐ | Phase 36 で導入した **operator section** の demo。`(+ 1)` は `fn x -> x + 1` の sugar。HOF と組合せて簡潔な map / filter が書ける。+ * / % == != < <= > >= ++ の 11 演算子に対応 |
+| [cons_pipe_demo.mere](cons_pipe_demo.mere) ⭐ | Phase 36 で導入した **`::` cons** + **`<|` reverse pipe** の demo。`h :: t` は `Cons (h, t)` の sugar、`f <| x` は `f x` の sugar (右側に fn/let/match も書ける) |
 
 ### Q-010 collection 基本
 
