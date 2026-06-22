@@ -4,6 +4,71 @@
 
 ---
 
+## 2026-06-22 (続き — Phase 36 syntactic sugar + dogfood examples)
+
+Phase 32 (FFI) 完了後、Phase 33 (dogfood example バッチ + did-you-mean
+expansion)、Phase 34 (float 3 backend + libm dispatch)、Phase 35 (DEFERRED
+§1.2 A1: nullary factory builtin first-class value)、Phase 36 (13 syntactic
+sugar + 16 prelude entry + 47 example + 8 DEFERRED fix) を連続走破。
+**1486 → 1488 tests**、example 61 → 118 本 (47 本追加)、syntactic surface が
+ML 系として実用域に到達。
+
+- **Phase 36 sugars (13 種)**: range `a..b` / operator section `(+ 1)` /
+  cons `1 :: xs` / reverse pipe `f <| x` / apply `f @@ x` / lambda shorthand
+  `\x -> ...` / string interpolation `"x = {show n}"` (lexer で再帰的に
+  tokenize、`\{` で escape、ネスト string 拒否) / `?` (Option early-return) /
+  `?!` (Result early-return) / list comprehension multi-gen
+  `[f x | x <- xs, p x]` / `if let pat = e then ... else ...` /
+  `for x in xs do body` (→ `list_iter`) / `while cond do body`
+  (→ `let rec __while_N = fn () -> if cond then body; __while_N () in
+  __while_N ()`)
+- **Phase 36 prelude (16 entry)**: `range` / `list_filter` / `list_take` /
+  `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` /
+  `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` /
+  `list_product` / `list_max` / `list_min` (累計 34 entry)。`sum`/`product`/
+  `max`/`min` は `let rec` で定義 (test helper の `codegen_with_decls` が
+  `Top_let_rec` を skip するため一見複雑)
+- **Phase 36 DEFERRED fix (8 件)**: §1.13 narrow value restriction
+  (mutable container を含む型を let-bind した時は generalize しない) /
+  §1.14 lifted closure capture が global を `load`/`global.get` 経由 /
+  §1.15 C codegen の深い list literal で O(2^N) 遅い (Constr 内
+  `emit_expr arg` 二重呼び出し → 単回キャッシュ) / §1.16 region 内
+  `strbuf_to_str` が region escape 時に dangling pointer (C/LLVM で
+  `__lang_default_region` alloc に切替) / §1.17 C codegen の `type result`
+  shadow が `List.combine` で落ちる (polymorphic_variants から remove +
+  variant_decls dedupe last-wins) / §1.18 Phase 30.2 top-level global の
+  初期化順 (source-order inline init) / §1.19 nested lambda が top-level
+  fn 参照で unbound (C/LLVM/Wasm に `closure_wrapper_forward_decls` 追加、
+  Wasm は `fn_closure_table_idx` を `emit_fn_def` 前に populate) /
+  §1.20 C codegen の polymorphic variant 内 user record forward decl
+  (unified topo sort に mono variant/record bodies を含める)
+- **Phase 36 examples (47 本)**: 基本 dogfood (histogram / traffic_light /
+  event_counter / html_builder / fallible_lookup / config_loader /
+  csv_writer / markdown_to_text / calendar_lite / matrix_2d / borrow_chain /
+  cache_sim / simple_query / caesar_cipher / fraction / roman_numerals /
+  password_strength / brackets_balance / morse_code / luhn_check /
+  tic_tac_toe / palindrome / anagram / base_conv / rps_game / scoreboard /
+  eight_queens / collatz / bin_tree_traversal / knapsack / factory_value) +
+  sugar showcase (range_demo / sections / cons_pipe_demo / sugar_demo /
+  question_demo / sugar_showcase / comprehension / statistics / if_let_demo /
+  for_loop_demo / while_loop_demo) + 大物 4 本 (csv_summary / game_of_life /
+  sudoku_check / calc 138 行 / maze_solver BFS)
+- **Phase 35**: DEFERRED §1.2 A1 (first-class factory builtin eta-wrap) を
+  3 backend に展開。`let mk = map_new` のような unapplied builtin が
+  value として正しく動くように eta_adapters を C/LLVM/Wasm に追加。
+- **Phase 34**: float MVP を 3 backend に展開。Phase 34.1 = C、Phase 34.2 =
+  LLVM (`fadd`/`fsub`/`fcmp` + `@llvm.fabs.f64` + `__lang_str_of_float`)、
+  Phase 34.3 = Wasm (i32 ptr to heap-alloc f64 slot + host import で format)、
+  Phase 34.4/34.5 = libm dispatch (sqrt/sin/cos/tan/f_pow/atan2) を 3 backend
+  + math_demo example
+- **Phase 33**: dogfood example バッチ + did-you-mean expansion。Phase 33.0
+  did-you-mean を multi-candidate top-3 listing に拡張 (DEFERRED §5.1 部分
+  解消)、Phase 33.1-33.7 で D3 option_pipeline / H1 prime_sieve / G5
+  rate_limiter / C4 stack_calc / G6 markdown_toc / G4 bank_account / H3
+  graph_bfs を 4 backend で diff = 0
+
+---
+
 ## 2026-06-22 (続き — Phase 32 C1 FFI)
 
 Phase 31 直後、Outlook §C1 (FFI = 外部 C 関数呼出) を 5 slice + 1 polish で
