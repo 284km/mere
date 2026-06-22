@@ -140,6 +140,7 @@ backend いずれかへ codegen。
 | [question_demo.mere](question_demo.mere) ⭐ | Phase 36 で導入した **`?` Option early-return** + **`?!` Result early-return** の demo。Rust の `?` 風に Option / Result chain が書ける |
 | [sugar_showcase.mere](sugar_showcase.mere) ⭐ | Phase 36 で追加した **全 9 sugar** (range / op section / `::` / `<|` / `@@` / `\` / string interp / `?` / `?!`) を combined で使ったショーケース。prime sieve / inventory lookup / Result chain / 1 行 fold |
 | [comprehension.mere](comprehension.mere) ⭐ | Phase 36 で導入した **list comprehension** `[expr \| x <- xs, cond, y <- ys, ...]` の demo。Haskell 風の **multi-generator** + filter を任意順で組み合わせ、Pythagorean triples (3 gen + filter) まで書ける |
+| [statistics.mere](statistics.mere) ⭐ | int list の基本統計量を Phase 36 で追加した **prelude helper を combined で dogfood**。count / sum / mean / min / max / variance / stddev (newton sqrt) / median (sort) / mode (Map) / outliers (filter)。`list_zip` / `list_for_all` / `list_any` / `list_member` も使う |
 
 ### Q-010 collection 基本
 

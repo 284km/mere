@@ -1,0 +1,111 @@
+// statistics: int list の基本統計量 (Phase 36)
+//
+// 目的: Phase 36 で prelude に追加した list_sum / list_product /
+//   list_max / list_min / list_fold / list_filter / list_zip / list_any /
+//   list_for_all / list_member を組合せて dogfood する。
+//
+// 計算項目: count / sum / mean / min / max / range / variance / stddev /
+//   median / mode / outlier 数。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let sample = [3, 7, 7, 2, 9, 5, 5, 5, 11, 7, 4, 6, 8, 5, 7];
+
+let n = list_len sample;
+let total = list_sum sample;
+// 平均は int 除算 (浮動を避けて backend 一致を優先)
+let mean = total / n;
+
+let lo = list_min sample;
+let hi = list_max sample;
+
+// 偏差の二乗和 (int)。平均は int 近似値を使用。
+let sq = \x -> x * x;
+let dev_sq = list_map sample (\x -> sq (x - mean));
+let var = list_sum dev_sq / n;
+
+// stddev は int sqrt を自作 (newton)
+let rec isqrt = \n guess ->
+  let next = (guess + n / guess) / 2 in
+  if next >= guess then guess else isqrt n next;
+let stddev = if var <= 0 then 0 else isqrt var var;
+
+// median: list を sort して中央値 (selection sort、勉強用に簡潔に)
+let rec remove_first = \xs v ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) -> if h == v then t else Cons (h, remove_first t v);
+
+let rec sort = \xs ->
+  match xs with
+  | Nil -> Nil
+  | Cons _ ->
+    let m = list_min xs in
+    Cons (m, sort (remove_first xs m));
+
+let sorted = sort sample;
+
+// 中央値: n が奇数なら中央要素、偶数なら 2 つの平均
+let rec nth = \xs i ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> if i == 0 then h else nth t (i - 1);
+
+let median =
+  if n % 2 == 1 then nth sorted (n / 2)
+  else (nth sorted (n / 2 - 1) + nth sorted (n / 2)) / 2;
+
+// mode: 最も多い値。各値の出現回数を Map で集計。
+let counts = map_new ();
+let _ = list_iter sample (\x ->
+  let cur = if map_has counts (show x) then map_get counts (show x) else 0 in
+  let _ = map_set counts (show x) (cur + 1) in
+  ());
+
+// counts の中で max value を持つ key を線形 scan
+let mode_cell = map_new ();
+let _ = map_set mode_cell "value" 0;
+let _ = map_set mode_cell "count" 0;
+let _ = map_iter counts (\k -> \v ->
+  if v > map_get mode_cell "count" then
+    let _ = map_set mode_cell "value" (int_of_str k) in
+    let _ = map_set mode_cell "count" v in
+    ()
+  else ());
+
+let mode_value = map_get mode_cell "value";
+let mode_count = map_get mode_cell "count";
+
+// outliers: 平均から stddev の 2 倍以上離れている値
+let outliers = list_filter sample (\x ->
+  let d = if x > mean then x - mean else mean - x in
+  d > 2 * stddev);
+
+// レポート
+let _ = print "=== statistics (Phase 36) ===";
+let _ = print "sample: {show sample}";
+let _ = print "count   = {show n}";
+let _ = print "sum     = {show total}";
+let _ = print "mean    = {show mean}";
+let _ = print "min     = {show lo}";
+let _ = print "max     = {show hi}";
+let _ = print "range   = {show (hi - lo)}";
+let _ = print "var     = {show var}";
+let _ = print "stddev  = {show stddev}";
+let _ = print "median  = {show median}";
+let _ = print "mode    = {show mode_value} ({show mode_count} times)";
+let _ = print "outliers (|d| > 2*stddev): {show outliers}";
+
+// sanity check: zip + check
+let pairs = list_zip sample (1..(list_len sample));
+let _ = print "--- sample with 1-based index ---";
+let _ = list_iter pairs (\p -> print "  [{show (snd p)}] = {show (fst p)}");
+
+// universal & existential
+let _ = print "--- predicate checks ---";
+let _ = print "all > 0?  {show (list_for_all sample (\x -> x > 0))}";
+let _ = print "any > 10? {show (list_any sample (\x -> x > 10))}";
+let _ = print "has 5?    {show (list_member sample 5)}";
+let _ = print "has 100?  {show (list_member sample 100)}";
+
+0
