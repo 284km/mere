@@ -2552,12 +2552,15 @@ let emit_closure_wrapper (f : fn_decl) : string =
   let cret = c_type_of f.return_ty in
   let carg = c_type_of f.param_ty in
   let safe = c_safe_name f.name in
+  (* Phase 36 (DEFERRED §1.19 fix): `_as_value` is declared `const` (no
+     `static`) so the forward decl in `closure_wrapper_forward_decls` can
+     link to it. The closure_fn helper stays `static`. *)
   Printf.sprintf
     "static %s %s_closure_fn(void* __env, %s %s) {\n  \
        (void)__env;\n  \
        return %s(%s);\n\
      }\n\
-     static const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
+     const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
     cret safe carg f.param
     safe f.param
     cstruct safe safe
@@ -4756,10 +4759,22 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_show_fn tag t :: acc) show_types []
   in
+  (* Phase 36 (DEFERRED §1.19 fix, C side): forward declare each fn's
+     `<name>_as_value` closure constant so fn bodies that reference a
+     top-level fn as a first-class value (e.g. `list_filter xs is_prime`)
+     can link properly. The full definition is in closure_wrappers, which
+     is emitted after fn_defs_main. *)
+  let closure_wrapper_forward_decls =
+    List.map (fun (f : fn_decl) ->
+      let cstruct = closure_struct_name f.param_ty f.return_ty in
+      Printf.sprintf "extern const %s %s_as_value;" cstruct (c_safe_name f.name))
+      fns
+  in
   let forward_decls =
     List.map emit_fn_forward_decl fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
     @ closure_adapter_forward_decls
+    @ closure_wrapper_forward_decls
     @ show_fn_forward_decls
   in
   let fn_defs =

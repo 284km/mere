@@ -2715,7 +2715,7 @@ let () =
   assert_contains "codegen: top-level fn gets _as_value constant"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "static const closure_int_int inc_as_value =";
+    "const closure_int_int inc_as_value =";   (* Phase 36: dropped `static` *)
   assert_contains "codegen: HOF takes closure param"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")

@@ -33,10 +33,7 @@ let rec list_filter = \xs p ->
   | Nil -> Nil
   | Cons (h, t) -> if p h then h :: list_filter t p else list_filter t p;
 
-// 注: `list_filter (2..n) is_prime` のように top-level fn を closure 経由で
-// 渡すと Wasm codegen が落ちる (Phase 36 で発掘した小バグ)。回避策として
-// inline lambda で呼ぶ。
-let primes_under = \n -> list_filter (2..n) (\x -> is_prime x);
+let primes_under = \n -> list_filter (2..n) is_prime;
 let _ = list_iter (primes_under 30) <| \p -> print "{show p}";
 
 // Map + ?  +  string interp

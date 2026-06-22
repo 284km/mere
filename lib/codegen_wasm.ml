@@ -4581,10 +4581,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let toplevel_names = mangled_names @ multi_base_names in
   lift_inner_fns_wasm toplevel_names fns;
-  let fn_defs = List.map emit_fn_def fns in
-  let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm in
-  (* Register top-level closure adapters in the table and remember
-     their indices so `Var name` (value position) can find them. *)
+  (* Phase 36 (DEFERRED §1.19 fix): register top-level closure adapter
+     table indices BEFORE emit_fn_def so that fn bodies (and nested
+     lambdas) can resolve `Var <top_fn>` as a closure value via
+     fn_closure_table_idx. The actual adapter WAT is still emitted after
+     the fn_defs (top_adapters / lifted_defs), but the index registry must
+     be populated up front. *)
   let top_adapters =
     List.map (fun f ->
       let idx = register_in_table (f.name ^ "_closure") in
@@ -4592,6 +4594,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       emit_top_adapter f
     ) fns
   in
+  let fn_defs = List.map emit_fn_def fns in
+  let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm in
   (* Emit one specialized `show_<tag>` function per registered type. *)
   let show_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
