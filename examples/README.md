@@ -108,9 +108,9 @@ backend いずれかへ codegen。
 | [event_counter.mere](event_counter.mere) ⭐ | Map[event, int] — variant を Map key にする dogfood (Phase 15.15/15.16 機能の使用例)。Login / Click / Purchase / Logout の集計 (A2) |
 | [html_builder.mere](html_builder.mere) ⭐ | StrBuf + tag 関数 helper で nested HTML 構築。region 内 StrBuf に `<ul><li>...</li></ul>` を畳み込む (B3) |
 | [fallible_lookup.mere](fallible_lookup.mere) ⭐ | Map[str, str] 2 段を `result_and_then` で chain。user→email→role の連鎖 lookup と `result_default` の fallback パターン (D4) |
-| [config_loader.mere](config_loader.mere) ⭐ | `key = value` 形式の text を Map[str, str] に load。コメント / 空行 / 前後 trim 対応 (str_trim / str_starts_with が C/LLVM/Wasm codegen 未対応のため char_at で自前 helper) (A3) |
-| [csv_writer.mere](csv_writer.mere) ⭐ | record list → CSV string via StrBuf。`,` `"` を含む field は `"..."` quote + 内部 `"` を `""` doubling (str_replace 未対応のため char_at で自前 escape) (B2) |
-| [markdown_to_text.mere](markdown_to_text.mere) ⭐ | char_at 1 文字単位 scan + StrBuf で markdown 装飾 (`#` heading / `*` `_` 強調 / `` ` `` code / `>` quote) を剥がす (B5) |
+| [config_loader.mere](config_loader.mere) ⭐ | `key = value` 形式の text を Map[str, str] に load。コメント / 空行 / 前後 trim 対応。Phase 36 で `str_trim` / `str_starts_with` を 3 backend に追加したので、prelude の builtin を直接使う自然なコードに (A3) |
+| [csv_writer.mere](csv_writer.mere) ⭐ | record list → CSV string via StrBuf。`,` `"` を含む field は `"..."` quote + 内部 `"` を `""` doubling。Phase 36 の `str_replace` 投入で 1 行に短縮 (B2) |
+| [markdown_to_text.mere](markdown_to_text.mere) ⭐ | char_at 1 文字単位 scan + StrBuf で markdown 装飾 (`#` heading / `*` `_` 強調 / `` ` `` code / `>` quote) を剥がす。Phase 36 後は `str_starts_with` で `> ` 検出が短く書ける (B5) |
 | [calendar_lite.mere](calendar_lite.mere) ⭐ | 年月から日曜始まりの月カレンダーを ASCII で出力。閏年判定 + Zeller の合同式 + StrBuf で 7 列 grid 組み立て (G3) |
 | [matrix_2d.mere](matrix_2d.mere) ⭐ | 2D matrix を 1D OwnedVec[int] + `r * cols + c` index で表現。matrix add / transpose / pretty print。nested Vec[Vec[int]] は region escape が解けず本例では避けた (H2) |
 | [borrow_chain.mere](borrow_chain.mere) | 同じ `&shared write R Logger` 借用を 3 つの helper を呼ぶ pipeline で再利用 (Phase 17.1 borrow tracking の demo)。**interp only** (`&shared write R` の codegen 未対応、borrow_modes.mere と同様、F3) |

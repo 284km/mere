@@ -110,9 +110,10 @@ str_index_of "hello" "xyz"                     // -1
 ```
 
 **★ codegen 状況**: `str_index_of` / `str_split` / `str_join` / `str_count` /
-`str_compare` はすべて **4 backend 全部で動く** (Phase 19.1.1 で str_index_of、
-Phase 22 で str_split / str_join、Phase 26.5 で Wasm 全 str ops、Phase 31.0
-で str_compare 移植 sign-normalize 完了)。
+`str_compare` / `str_trim` / `str_starts_with` / `str_replace` はすべて
+**4 backend 全部で動く** (Phase 19.1.1 で str_index_of、Phase 22 で
+str_split / str_join、Phase 26.5 で Wasm 全 str ops、Phase 31.0 で
+str_compare、Phase 36 で str_trim / str_starts_with / str_replace 追加)。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"

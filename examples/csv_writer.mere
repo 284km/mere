@@ -13,20 +13,12 @@
 
 type Person = { name: str, age: int, city: str };
 
-// str_replace は C/LLVM/Wasm codegen 未対応なので char_at で自前 doubling
-let rec double_quotes = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
-  if i >= str_len s then acc
-  else
-    let c = char_at s i in
-    if c == "\"" then double_quotes s (i + 1) (acc ++ "\"\"")
-    else double_quotes s (i + 1) (acc ++ c);
-
 let needs_quote = fn (s: str) ->
   str_index_of s "," >= 0 || str_index_of s "\"" >= 0;
 
 let escape_field = fn (s: str) ->
   if needs_quote s then
-    "\"" ++ double_quotes s 0 "" ++ "\""
+    "\"" ++ str_replace s "\"" "\"\"" ++ "\""
   else
     s;
 

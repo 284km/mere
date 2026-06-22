@@ -1133,6 +1133,17 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.Var "str_count"; _ }, s_e) ->
        Printf.sprintf "__lang_str_count(%s, %s)"
          (emit_expr s_e) (emit_expr arg)
+     | Ast.Var "str_trim" ->
+       (* Phase 36: str_trim s — strip leading + trailing whitespace *)
+       Printf.sprintf "__lang_str_trim(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_starts_with"; _ }, s_e) ->
+       (* Phase 36: str_starts_with s p — curried 2-arg *)
+       Printf.sprintf "__lang_str_starts_with(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e) ->
+       (* Phase 36: str_replace s old new — curried 3-arg *)
+       Printf.sprintf "__lang_str_replace(%s, %s, %s)"
+         (emit_expr s_e) (emit_expr old_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
        (* Phase 24.4: write_file path content — curried. *)
        Printf.sprintf "__lang_write_file(%s, %s)"
@@ -2781,6 +2792,51 @@ let str_concat_helper =
       "    else i++;";
       "  }";
       "  return acc;";
+      "}";
+      "";
+      (* Phase 36: str_trim — strip leading + trailing ASCII whitespace
+         (OCaml String.trim semantics: space / tab / newline / cr / form-feed). *)
+      "static const char* __lang_str_trim(const char* s) {";
+      "  while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r' || *s == '\\x0c') s++;";
+      "  size_t len = strlen(s);";
+      "  while (len > 0) {";
+      "    char c = s[len - 1];";
+      "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') len--;";
+      "    else break;";
+      "  }";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, len + 1);";
+      "  if (len > 0) memcpy(buf, s, len);";
+      "  buf[len] = '\\0';";
+      "  return buf;";
+      "}";
+      "";
+      (* Phase 36: str_starts_with — bool. *)
+      "static int __lang_str_starts_with(const char* s, const char* p) {";
+      "  size_t pl = strlen(p);";
+      "  return strncmp(s, p, pl) == 0;";
+      "}";
+      "";
+      (* Phase 36: str_replace — return s with all non-overlapping occurrences
+         of old replaced by new_str. Empty old returns s unchanged. *)
+      "static const char* __lang_str_replace(const char* s, const char* old, const char* new_str) {";
+      "  if (old[0] == '\\0') return s;";
+      "  size_t slen = strlen(s);";
+      "  size_t olen = strlen(old);";
+      "  size_t nlen = strlen(new_str);";
+      "  /* Worst-case size: every char becomes new_str-length. */";
+      "  size_t cap = slen + 1;";
+      "  if (nlen > olen) cap += (slen / (olen > 0 ? olen : 1)) * (nlen - olen) + nlen;";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, cap);";
+      "  size_t bi = 0;";
+      "  for (size_t i = 0; i < slen; ) {";
+      "    if (i + olen <= slen && memcmp(s + i, old, olen) == 0) {";
+      "      memcpy(buf + bi, new_str, nlen); bi += nlen; i += olen;";
+      "    } else {";
+      "      buf[bi++] = s[i++];";
+      "    }";
+      "  }";
+      "  buf[bi] = '\\0';";
+      "  return buf;";
       "}";
       "";
       (* Phase 24.4: read_file / write_file — stdio wrapping with region

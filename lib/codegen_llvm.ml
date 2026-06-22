@@ -2533,6 +2533,27 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" r sv nv);
     r
+  | Ast.App ({ node = Ast.Var "str_trim"; _ }, s_e) ->
+    (* Phase 36: str_trim — leading + trailing whitespace strip *)
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_trim(ptr %s)" r sv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_starts_with"; _ }, s_e); _ }, p_e) ->
+    (* Phase 36: str_starts_with s p — bool (Mere's bool == LLVM i1) *)
+    let sv = emit_expr env s_e in
+    let pv = emit_expr env p_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_starts_with(ptr %s, ptr %s)" r sv pv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e); _ }, new_e) ->
+    (* Phase 36: str_replace s old new — 3-arg curried *)
+    let sv = emit_expr env s_e in
+    let ov = emit_expr env old_e in
+    let nv = emit_expr env new_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_replace(ptr %s, ptr %s, ptr %s)" r sv ov nv);
+    r
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 25.9: read_file path — returns str (region-allocated buffer). *)
     file_io_used_llvm := true;
@@ -5687,6 +5708,129 @@ let str_concat_helper =
       "  %off = sub i64 %diff, %base";
       "  %r = trunc i64 %off to i32";
       "  ret i32 %r";
+      "}";
+      "";
+      (* Phase 36: str_starts_with — bool *)
+      "define i1 @__lang_str_starts_with(ptr %s, ptr %p) {";
+      "entry:";
+      "  %pl = call i64 @strlen(ptr %p)";
+      "  %r = call i32 @strncmp(ptr %s, ptr %p, i64 %pl)";
+      "  %ok = icmp eq i32 %r, 0";
+      "  ret i1 %ok";
+      "}";
+      "";
+      (* Phase 36: __lang_is_ws — ASCII whitespace test (space/tab/lf/cr/ff) *)
+      "define i1 @__lang_is_ws(i8 %c) {";
+      "entry:";
+      "  %e1 = icmp eq i8 %c, 32";
+      "  %e2 = icmp eq i8 %c, 9";
+      "  %e3 = icmp eq i8 %c, 10";
+      "  %e4 = icmp eq i8 %c, 13";
+      "  %e5 = icmp eq i8 %c, 12";
+      "  %o1 = or i1 %e1, %e2";
+      "  %o2 = or i1 %o1, %e3";
+      "  %o3 = or i1 %o2, %e4";
+      "  %o4 = or i1 %o3, %e5";
+      "  ret i1 %o4";
+      "}";
+      "";
+      (* Phase 36: str_trim — leading + trailing whitespace strip *)
+      "define ptr @__lang_str_trim(ptr %s) {";
+      "entry:";
+      "  br label %lead";
+      "lead:";
+      "  %p = phi ptr [ %s, %entry ], [ %p1, %lead_body ]";
+      "  %c = load i8, ptr %p";
+      "  %iz = icmp eq i8 %c, 0";
+      "  br i1 %iz, label %trail_start, label %check";
+      "check:";
+      "  %iws = call i1 @__lang_is_ws(i8 %c)";
+      "  br i1 %iws, label %lead_body, label %trail_start";
+      "lead_body:";
+      "  %p1 = getelementptr i8, ptr %p, i64 1";
+      "  br label %lead";
+      "trail_start:";
+      "  %lenL = call i64 @strlen(ptr %p)";
+      "  br label %trail";
+      "trail:";
+      "  %l = phi i64 [ %lenL, %trail_start ], [ %l1, %trail_body ]";
+      "  %zz = icmp eq i64 %l, 0";
+      "  br i1 %zz, label %alloc, label %trail_check";
+      "trail_check:";
+      "  %lm1 = sub i64 %l, 1";
+      "  %tp = getelementptr i8, ptr %p, i64 %lm1";
+      "  %tc = load i8, ptr %tp";
+      "  %tw = call i1 @__lang_is_ws(i8 %tc)";
+      "  br i1 %tw, label %trail_body, label %alloc";
+      "trail_body:";
+      "  %l1 = sub i64 %l, 1";
+      "  br label %trail";
+      "alloc:";
+      "  %final_l = phi i64 [ %l, %trail ], [ %l, %trail_check ]";
+      "  %cap = add i64 %final_l, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  call ptr @memcpy(ptr %buf, ptr %p, i64 %final_l)";
+      "  %term = getelementptr i8, ptr %buf, i64 %final_l";
+      "  store i8 0, ptr %term";
+      "  ret ptr %buf";
+      "}";
+      "";
+      (* Phase 36: str_replace — replace all non-overlapping occurrences of
+         `old` in `s` with `new_str`. Empty old returns s unchanged. *)
+      "define ptr @__lang_str_replace(ptr %s, ptr %old, ptr %new_str) {";
+      "entry:";
+      "  %ofirst = load i8, ptr %old";
+      "  %oempty = icmp eq i8 %ofirst, 0";
+      "  br i1 %oempty, label %ret_s, label %dowork";
+      "ret_s:";
+      "  ret ptr %s";
+      "dowork:";
+      "  %slen = call i64 @strlen(ptr %s)";
+      "  %olen = call i64 @strlen(ptr %old)";
+      "  %nlen = call i64 @strlen(ptr %new_str)";
+      (* Worst-case cap: slen + (slen/olen)*max(0, nlen-olen) + nlen + 1 *)
+      "  %quot = udiv i64 %slen, %olen";
+      "  %nbig = icmp ugt i64 %nlen, %olen";
+      "  %diff = sub i64 %nlen, %olen";
+      "  %sel  = select i1 %nbig, i64 %diff, i64 0";
+      "  %grow = mul i64 %quot, %sel";
+      "  %cap0 = add i64 %slen, %grow";
+      "  %cap1 = add i64 %cap0, %nlen";
+      "  %cap  = add i64 %cap1, 1";
+      "  %buf  = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i  = phi i64 [ 0, %dowork ], [ %i_next, %adv_match ], [ %i_next2, %adv_one ]";
+      "  %bi = phi i64 [ 0, %dowork ], [ %bi_next, %adv_match ], [ %bi_next2, %adv_one ]";
+      "  %done = icmp uge i64 %i, %slen";
+      "  br i1 %done, label %finish, label %try_match";
+      "try_match:";
+      "  %rem = sub i64 %slen, %i";
+      "  %fits = icmp uge i64 %rem, %olen";
+      "  br i1 %fits, label %check_match, label %adv_one";
+      "check_match:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %cmpr = call i32 @strncmp(ptr %sp, ptr %old, i64 %olen)";
+      "  %eq = icmp eq i32 %cmpr, 0";
+      "  br i1 %eq, label %adv_match, label %adv_one";
+      "adv_match:";
+      "  %bp = getelementptr i8, ptr %buf, i64 %bi";
+      "  call ptr @memcpy(ptr %bp, ptr %new_str, i64 %nlen)";
+      "  %i_next  = add i64 %i, %olen";
+      "  %bi_next = add i64 %bi, %nlen";
+      "  br label %loop";
+      "adv_one:";
+      "  %sp2 = getelementptr i8, ptr %s, i64 %i";
+      "  %ch  = load i8, ptr %sp2";
+      "  %bp2 = getelementptr i8, ptr %buf, i64 %bi";
+      "  store i8 %ch, ptr %bp2";
+      "  %i_next2  = add i64 %i, 1";
+      "  %bi_next2 = add i64 %bi, 1";
+      "  br label %loop";
+      "finish:";
+      "  %tp = getelementptr i8, ptr %buf, i64 %bi";
+      "  store i8 0, ptr %tp";
+      "  ret ptr %buf";
       "}";
       "";
       (* Phase 25.1 + 25.2: fail builtin. If try_or's jmpbuf is set,

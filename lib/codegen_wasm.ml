@@ -1262,6 +1262,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr h_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_index_of"
+  (* Phase 36: str_trim / str_starts_with / str_replace — runtime helpers
+     emitted unconditionally as part of the str runtime block. *)
+  | Ast.App ({ node = Ast.Var "str_trim"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_str_trim"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_starts_with"; _ }, s_e); _ }, p_e) ->
+    emit_expr s_e;
+    emit_expr p_e;
+    emit_instr "call $__lang_str_starts_with"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e); _ }, new_e) ->
+    emit_expr s_e;
+    emit_expr old_e;
+    emit_expr new_e;
+    emit_instr "call $__lang_str_replace"
   (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
      str_unescape — LLVM Phase 25.1 / 25.4 の Wasm 版。 *)
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
@@ -2699,6 +2713,115 @@ let runtime_helpers = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_outer)))
     (i32.const -1))
+  ;; Phase 36: __lang_is_ws — ASCII whitespace test (space/tab/lf/cr/ff)
+  (func $__lang_is_ws (param $c i32) (result i32)
+    (i32.or
+      (i32.or
+        (i32.or (i32.eq (local.get $c) (i32.const 32))
+                (i32.eq (local.get $c) (i32.const 9)))
+        (i32.or (i32.eq (local.get $c) (i32.const 10))
+                (i32.eq (local.get $c) (i32.const 13))))
+      (i32.eq (local.get $c) (i32.const 12))))
+  ;; Phase 36: str_starts_with — bool (i32 0/1)
+  (func $__lang_str_starts_with (param $s i32) (param $p i32) (result i32)
+    (local $i i32) (local $cs i32) (local $cp i32)
+    (local.set $i (i32.const 0))
+    (loop $lp
+      (local.set $cp (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+      (if (i32.eqz (local.get $cp)) (then (return (i32.const 1))))
+      (local.set $cs (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+      (if (i32.ne (local.get $cs) (local.get $cp)) (then (return (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))
+    (unreachable))
+  ;; Phase 36: str_trim — strip leading + trailing whitespace
+  (func $__lang_str_trim (param $s i32) (result i32)
+    (local $p i32) (local $len i32) (local $r i32) (local $i i32) (local $c i32)
+    (local.set $p (local.get $s))
+    ;; skip leading whitespace
+    (block $end_lead
+      (loop $lp_lead
+        (local.set $c (i32.load8_u (local.get $p)))
+        (br_if $end_lead (i32.eqz (local.get $c)))
+        (br_if $end_lead (i32.eqz (call $__lang_is_ws (local.get $c))))
+        (local.set $p (i32.add (local.get $p) (i32.const 1)))
+        (br $lp_lead)))
+    ;; compute remaining length
+    (local.set $len (call $__lang_strlen (local.get $p)))
+    ;; trim trailing
+    (block $end_trail
+      (loop $lp_trail
+        (br_if $end_trail (i32.eqz (local.get $len)))
+        (local.set $c (i32.load8_u (i32.add (local.get $p)
+                                            (i32.sub (local.get $len) (i32.const 1)))))
+        (br_if $end_trail (i32.eqz (call $__lang_is_ws (local.get $c))))
+        (local.set $len (i32.sub (local.get $len) (i32.const 1)))
+        (br $lp_trail)))
+    ;; copy [p, p+len) to bump
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end_copy
+      (loop $lp_copy
+        (br_if $end_copy (i32.eq (local.get $i) (local.get $len)))
+        (i32.store8 (i32.add (local.get $r) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_copy)))
+    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (local.get $r))
+  ;; Phase 36: str_replace s old new — replace all non-overlapping occurrences
+  (func $__lang_str_replace (param $s i32) (param $old i32) (param $new i32) (result i32)
+    (local $slen i32) (local $olen i32) (local $nlen i32)
+    (local $r i32) (local $bi i32) (local $i i32) (local $j i32) (local $match i32)
+    (local.set $olen (call $__lang_strlen (local.get $old)))
+    (if (i32.eqz (local.get $olen)) (then (return (local.get $s))))
+    (local.set $slen (call $__lang_strlen (local.get $s)))
+    (local.set $nlen (call $__lang_strlen (local.get $new)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $bi (i32.const 0))
+    (local.set $i (i32.const 0))
+    (block $end_outer
+      (loop $lp_outer
+        (br_if $end_outer (i32.ge_s (local.get $i) (local.get $slen)))
+        ;; check if remainder fits old
+        (if (i32.le_s (i32.add (local.get $i) (local.get $olen)) (local.get $slen))
+          (then
+            (local.set $j (i32.const 0))
+            (local.set $match (i32.const 1))
+            (block $end_inner
+              (loop $lp_inner
+                (br_if $end_inner (i32.eq (local.get $j) (local.get $olen)))
+                (if (i32.ne (i32.load8_u (i32.add (local.get $s)
+                                                  (i32.add (local.get $i) (local.get $j))))
+                            (i32.load8_u (i32.add (local.get $old) (local.get $j))))
+                  (then (local.set $match (i32.const 0)) (br $end_inner)))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $lp_inner)))
+            (if (local.get $match)
+              (then
+                ;; copy new
+                (local.set $j (i32.const 0))
+                (block $end_cn
+                  (loop $lp_cn
+                    (br_if $end_cn (i32.eq (local.get $j) (local.get $nlen)))
+                    (i32.store8 (i32.add (local.get $r) (i32.add (local.get $bi) (local.get $j)))
+                                (i32.load8_u (i32.add (local.get $new) (local.get $j))))
+                    (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                    (br $lp_cn)))
+                (local.set $bi (i32.add (local.get $bi) (local.get $nlen)))
+                (local.set $i (i32.add (local.get $i) (local.get $olen)))
+                (br $lp_outer)))))
+        ;; no match — copy one char
+        (i32.store8 (i32.add (local.get $r) (local.get $bi))
+                    (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $bi (i32.add (local.get $bi) (i32.const 1)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_outer)))
+    (i32.store8 (i32.add (local.get $r) (local.get $bi)) (i32.const 0))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $bi)) (i32.const 1)))
+    (local.get $r))
   ;; Phase 26.1/26.2: fail msg — if a try_or scope is active, set the
   ;; failure flag and return 0 (the caller's expected result type is i32
   ;; for everything in Wasm). Otherwise print + trap. The flag /

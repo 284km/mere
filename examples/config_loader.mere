@@ -13,45 +13,18 @@
 
 type line_kind = Empty | Comment | Pair of (str * str);
 
-// str_trim / str_starts_with は C/LLVM/Wasm codegen 未対応 (interpreter only)
-// なので、4 backend で動かすため char_at / substring で自前 helper を用意。
-
-let is_space = fn (c: str) ->
-  c == " " || c == "\t";
-
-// 先頭空白の数
-let rec lead_spaces = fn (s: str) -> fn (i: int) ->
-  if i >= str_len s then i
-  else if is_space (char_at s i) then lead_spaces s (i + 1)
-  else i;
-
-// 末尾空白の直前 index + 1 (= valid 範囲の終端 exclusive)
-let rec trail_end = fn (s: str) -> fn (j: int) ->
-  if j <= 0 then 0
-  else if is_space (char_at s (j - 1)) then trail_end s (j - 1)
-  else j;
-
-let my_trim = fn (s: str) ->
-  let i = lead_spaces s 0 in
-  let j = trail_end s (str_len s) in
-  if j <= i then "" else substring s i j;
-
-let starts_with_hash = fn (s: str) ->
-  if str_len s == 0 then false
-  else char_at s 0 == "#";
-
 let parse_line = fn (line: str) ->
-  let trimmed = my_trim line in
+  let trimmed = str_trim line in
   if str_len trimmed == 0 then Empty
-  else if starts_with_hash trimmed then Comment
+  else if str_starts_with trimmed "#" then Comment
   else
     let eq = str_index_of trimmed "=" in
     if eq < 0 then
       // `=` が無い場合は Comment 扱い (実用 INI parser なら error)
       Comment
     else
-      let key = my_trim (substring trimmed 0 eq) in
-      let value = my_trim (substring trimmed (eq + 1) (str_len trimmed)) in
+      let key = str_trim (substring trimmed 0 eq) in
+      let value = str_trim (substring trimmed (eq + 1) (str_len trimmed)) in
       Pair (key, value);
 
 let config = map_new ();

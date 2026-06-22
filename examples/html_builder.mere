@@ -10,13 +10,12 @@
 //
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
 
+// Phase 36 で str_replace を 3 backend に追加したので、本格的な escape
+// を実装できる。順序大事 (& を先に処理しないと自身が再 escape される)。
 let escape = fn (s: str) ->
-  // 4 backend で str_replace が無いので、char_iter 風に手書きで replace
-  // するのは煩雑。ここではテストデータが ASCII 句読点のみと前提し、
-  // 最低限の `<` / `>` / `&` を `_` に置換するだけ (実用版では str_replace
-  // が prelude に欲しい)。今回は escape 対象なしのデータを使うので、
-  // identity でも問題ないが API 形だけ残す。
-  s;
+  let s1 = str_replace s "&" "&amp;" in
+  let s2 = str_replace s1 "<" "&lt;" in
+  str_replace s2 ">" "&gt;";
 
 let tag = fn (name: str) -> fn (inner: str) ->
   "<" ++ name ++ ">" ++ inner ++ "</" ++ name ++ ">";
@@ -46,11 +45,11 @@ let render_page = fn (title: str) -> fn (heading: str) -> fn (items: str list) -
 
 let _ = print "=== html_builder (Phase 36) ===";
 
-let items = ["Apple", "Banana", "Cherry"];
+let items = ["Apple", "Banana <fresh>", "Cherry & Plum"];
 let html = render_page "My Page" "Fruit basket" items;
 let _ = print html;
 
 // 単体の tag helper も verify
-let _ = print (tag "p" (escape "hello, world"));
+let _ = print (tag "p" (escape "1 < 2 && 3 > 2"));
 
 0

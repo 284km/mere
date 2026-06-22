@@ -32,17 +32,14 @@ let rec strip_inline = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
     if c == "*" || c == "_" || c == "`" then strip_inline s (i + 1) acc
     else strip_inline s (i + 1) (acc ++ c);
 
-let starts_with2 = fn (s: str) -> fn (prefix: str) ->
-  str_len s >= str_len prefix && substring s 0 (str_len prefix) == prefix;
-
 let convert_line = fn (line: str) ->
   if str_len line == 0 then ""
-  else if char_at line 0 == "#" then
+  else if str_starts_with line "#" then
     // heading: # の連続をスキップ、空白もスキップしてから inline strip
     let h_end = skip_hashes line 0 in
     let body_start = skip_spaces line h_end in
     strip_inline line body_start ""
-  else if starts_with2 line "> " then
+  else if str_starts_with line "> " then
     "| " ++ strip_inline line 2 ""
   else
     // 通常行 (`-` のリストもそのまま)
