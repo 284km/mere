@@ -1119,6 +1119,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr i_e;
     emit_instr "call $__lang_char_at"
   (* Phase 30.0 (DEFERRED §1.12 fix): user-defined shadow を尊重 *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
+    (* Phase 31.0: str_compare a b — 3 backend で interp と一致する
+       sign-normalized -1/0/1 を返す。 *)
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_str_compare"
   | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
     when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     emit_expr arg;
@@ -2387,6 +2393,23 @@ let runtime_helpers = {|
         (local.set $b (i32.add (local.get $b) (i32.const 1)))
         (br $lp)))
     (i32.const 0))
+  ;; Phase 31.0: str_compare — returns -1 / 0 / 1 (sign-normalized, matches
+  ;; interp's `compare s t` from OCaml stdlib).
+  (func $__lang_str_compare (param $a i32) (param $b i32) (result i32)
+    (local $ba i32) (local $bb i32)
+    (loop $lp
+      (local.set $ba (i32.load8_u (local.get $a)))
+      (local.set $bb (i32.load8_u (local.get $b)))
+      (if (i32.lt_u (local.get $ba) (local.get $bb))
+        (then (return (i32.const -1))))
+      (if (i32.gt_u (local.get $ba) (local.get $bb))
+        (then (return (i32.const 1))))
+      (if (i32.eqz (local.get $ba))
+        (then (return (i32.const 0))))
+      (local.set $a (i32.add (local.get $a) (i32.const 1)))
+      (local.set $b (i32.add (local.get $b) (i32.const 1)))
+      (br $lp))
+    (unreachable))
   ;; Phase 19.1.1: str_index_of — returns position of needle in haystack,
   ;; -1 if not found. Empty needle returns 0.
   (func $__lang_str_index_of (param $h i32) (param $n i32) (result i32)

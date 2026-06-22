@@ -2243,6 +2243,24 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i32 @__lang_str_index_of(ptr %s, ptr %s)"
                   r hv nv);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
+    (* Phase 31.0: str_compare a b — strcmp の生値を sign-normalize (-1/0/1)。
+       interp の `compare s t` (OCaml) と一致させる。 *)
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @strcmp(ptr %s, ptr %s)"
+                  raw av bv);
+    let is_lt = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, 0" is_lt raw);
+    let is_gt = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, 0" is_gt raw);
+    let r1 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 1, i32 0" r1 is_gt);
+    let r2 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 -1, i32 %s" r2 is_lt r1);
+    r2
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     (* Phase 25.1: substring s start end_ — 3-arg curried. *)
     let sv = emit_expr env s_e in

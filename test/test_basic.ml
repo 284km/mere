@@ -6406,6 +6406,53 @@ let () =
      if has "@total = internal global" && has "store i32 " && has ", ptr @total" then "globalized"
      else "not-globalized")
     "globalized";
+  (* Phase 31.0: str_compare を 3 backend に移植 (interp のみだったのを揃える) *)
+  check "§31.0: interp str_compare returns -1/0/1"
+    (Pipeline.process "(str_compare \"a\" \"b\", str_compare \"a\" \"a\", str_compare \"b\" \"a\")")
+    "(-1, 0, 1)";
+  check "§31.0: C codegen emits __lang strcmp normalize"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "str_compare \"a\" \"b\"") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "strcmp(\"a\", \"b\")" && has "__r < 0 ? -1" then "ok" else "no")
+    "ok";
+  check "§31.0: LLVM codegen emits strcmp + select normalize"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "str_compare \"a\" \"b\"") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "call i32 @strcmp" && has "select i1" then "ok" else "no")
+    "ok";
+  check "§31.0: Wasm codegen emits $__lang_str_compare helper + call"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "str_compare \"a\" \"b\"") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(func $__lang_str_compare" && has "call $__lang_str_compare" then "ok" else "no")
+    "ok";
+
   check "§30.2: Wasm codegen — top-level let referenced in fn body becomes (global)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let total = 42;\n\

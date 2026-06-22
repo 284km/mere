@@ -960,6 +960,13 @@ let rec emit_expr (e : Ast.expr) : string =
           the needle. Emits a call to the runtime helper. *)
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e) ->
+       (* Phase 31.0: str_compare a b — interp の `compare s t` (OCaml) は
+          -1/0/1 を返す。strcmp の生値を sign-normalize して 3 backend で
+          挙動を揃える。 *)
+       Printf.sprintf
+         "({ int __r = strcmp(%s, %s); __r < 0 ? -1 : (__r > 0 ? 1 : 0); })"
+         (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->
        (* Phase 24.3: str_split s delim — curried. Returns list_str. *)
        str_split_used := true;
