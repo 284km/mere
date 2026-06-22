@@ -319,6 +319,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
          "unsupported in LLVM codegen subset: Map[<unresolved>]")))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
+  | Ast.TyFloat -> "double"  (* Phase 34.2: IEEE 754 double *)
   | Ast.TyStr -> "ptr"
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
@@ -2001,6 +2002,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+    (* Phase 34.2: float constants *)
+    if not is_shadowed && name = "pi" then "0x400921FB54442D18"
+    else if not is_shadowed && name = "e" then "0x4005BF0A8B145769"
+    else
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -2312,6 +2317,69 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r2 = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = select i1 %s, i32 -1, i32 %s" r2 is_lt r1);
     r2
+  (* Phase 34.2: float arithmetic + comparison + unary + conversions *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_add" || fname = "f_sub" || fname = "f_mul" || fname = "f_div" ->
+    let op = match fname with
+      | "f_add" -> "fadd" | "f_sub" -> "fsub"
+      | "f_mul" -> "fmul" | "f_div" -> "fdiv" | _ -> "fadd"
+    in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s double %s, %s" r op av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_lt" || fname = "f_le" || fname = "f_gt" || fname = "f_ge" ->
+    let cmp = match fname with
+      | "f_lt" -> "olt" | "f_le" -> "ole"
+      | "f_gt" -> "ogt" | "f_ge" -> "oge" | _ -> "olt"
+    in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fcmp %s double %s, %s" r cmp av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_min" || fname = "f_max" ->
+    let cmp = if fname = "f_min" then "olt" else "ogt" in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let cmp_r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fcmp %s double %s, %s" cmp_r cmp av bv);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" r cmp_r av bv);
+    r
+  | Ast.App ({ node = Ast.Var "f_neg"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fneg double %s" r av);
+    r
+  | Ast.App ({ node = Ast.Var "f_abs"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @llvm.fabs.f64(double %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "float_of_int"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = sitofp i32 %s to double" r av);
+    r
+  | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fptosi double %s to i32" r av);
+    r
+  | Ast.App ({ node = Ast.Var "str_of_float"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "float_of_str"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @atof(ptr %s)" r av);
+    r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     (* Phase 25.1: substring s start end_ — 3-arg curried. *)
     let sv = emit_expr env s_e in
@@ -3950,8 +4018,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_expr env body
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
-  | Ast.Float_lit _ ->
-    unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
+  | Ast.Float_lit f ->
+    (* Phase 34.2: LLVM IR の double リテラル。LLVM は hexadecimal float も
+       受理するが、十分な精度の decimal で OK (clang は roundtrip 保証)。
+       NaN / Infinity は LLVM 標準キーワード。 *)
+    if f <> f then "0x7FF8000000000000"  (* canonical NaN *)
+    else if f = infinity then "0x7FF0000000000000"
+    else if f = neg_infinity then "0xFFF0000000000000"
+    else Printf.sprintf "%.17g" f
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
    from `%env_self`, then evaluate the original Fun body with the
@@ -4094,6 +4168,7 @@ let main_format_of (t : Ast.ty) : (string * string) option =
   match Ast.walk t with
   | Ast.TyInt -> Some ("i32", "%d")
   | Ast.TyBool -> Some ("i32", "%d")  (* zext from i1 *)
+  | Ast.TyFloat -> Some ("double", "float")  (* Phase 34.2: use __lang_str_of_float + puts for interp parity *)
   | Ast.TyStr -> Some ("ptr", "%s")
   | Ast.TyUnit -> Some ("unit", "()")  (* Phase 25.11: print "()" for unit main *)
   | _ -> Some ("i32", "%d")
@@ -4116,6 +4191,8 @@ let runtime_decls =
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
       "declare i32 @atoi(ptr)";
+      "declare double @atof(ptr)";  (* Phase 34.2: float_of_str *)
+      "declare double @llvm.fabs.f64(double)";  (* Phase 34.2: f_abs *)
       "declare i32 @setjmp(ptr) returns_twice";
       "declare void @longjmp(ptr, i32) noreturn";
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
@@ -5432,6 +5509,48 @@ let metrics_runtime_llvm =
       "  ret %Metrics %r3";
       "}" ]
 
+(* Phase 34.2: float → string with interp parity (%.12g + trailing "." for
+   whole numbers). asprintf で format → strchr 風 loop で special chars 検出 →
+   無ければ "." 追加 asprintf。 *)
+let float_helpers_llvm =
+  String.concat "\n"
+    [ "@.fmt_12g = private constant [6 x i8] c\"%.12g\\00\"";
+      "@.fmt_dot = private constant [4 x i8] c\"%s.\\00\"";
+      "";
+      "define ptr @__lang_str_of_float(double %f) {";
+      "entry:";
+      "  %buf_ptr = alloca ptr";
+      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_12g, double %f)";
+      "  %buf = load ptr, ptr %buf_ptr";
+      "  br label %loop";
+      "loop:";
+      "  %p = phi ptr [ %buf, %entry ], [ %p_next, %loop_cont ]";
+      "  %c = load i8, ptr %p";
+      "  %is_null = icmp eq i8 %c, 0";
+      "  br i1 %is_null, label %no_dot, label %check_char";
+      "check_char:";
+      "  %c_dot = icmp eq i8 %c, 46";  (* '.' *)
+      "  %c_e   = icmp eq i8 %c, 101"; (* 'e' *)
+      "  %c_eu  = icmp eq i8 %c, 69";  (* 'E' *)
+      "  %c_n   = icmp eq i8 %c, 110"; (* 'n' (nan) *)
+      "  %c_i   = icmp eq i8 %c, 105"; (* 'i' (inf) *)
+      "  %t1 = or i1 %c_dot, %c_e";
+      "  %t2 = or i1 %t1, %c_eu";
+      "  %t3 = or i1 %t2, %c_n";
+      "  %is_special = or i1 %t3, %c_i";
+      "  br i1 %is_special, label %has_dot, label %loop_cont";
+      "loop_cont:";
+      "  %p_next = getelementptr i8, ptr %p, i32 1";
+      "  br label %loop";
+      "has_dot:";
+      "  ret ptr %buf";
+      "no_dot:";
+      "  %buf2_ptr = alloca ptr";
+      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf2_ptr, ptr @.fmt_dot, ptr %buf)";
+      "  %buf2 = load ptr, ptr %buf2_ptr";
+      "  ret ptr %buf2";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -6371,6 +6490,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (* Phase 25.11: print literal "()" for unit-typed main, matching
          interp's Eval.to_string V_unit. *)
       [ "  call i32 (ptr, ...) @printf(ptr @.fmt_unit)" ]
+    | Some ("double", _) ->
+      (* Phase 34.2: float main — interp の string_of_float (OCaml の
+         %.12g + 整数値なら末尾 ".") と format を合わせるため
+         __lang_str_of_float ヘルパを経由して puts。 *)
+      let str_r = fresh_reg () in
+      [ Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" str_r r;
+        Printf.sprintf "  call i32 @puts(ptr %s)" str_r ]
     | Some (ty, fmt) ->
       let widen =
         if ty = "i32" && (match Ast.walk main_ty with Ast.TyBool -> true | _ -> false) then
@@ -6537,6 +6663,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         region_runtime_helpers;
         "";
         str_concat_helper;
+        "";
+        float_helpers_llvm;
         "" ]
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if vec_reverse_concat_helpers = [] then []
