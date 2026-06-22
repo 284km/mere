@@ -60,6 +60,54 @@ let extern_fn_decls : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    emit_program で各 entry に static adapter 関数 + const 値を emit。 *)
 let eta_adapters : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
+   使われた時に、syntactic な fully eta-expanded Fun chain を synthesize して
+   返す。例えば `owned_vec_push : OwnedVec[int] -> int -> unit` を value 位置で
+   使うと、 `fn __arg0 -> fn __arg1 -> owned_vec_push __arg0 __arg1` を生成。
+   生成した AST は anonymous Fun adapter machinery (Phase 5.7-b) で closure 値
+   になり、 inner の nested App は direct-call fast path に乗る — per-builtin
+   の closure boilerplate を一切書かずに 1 つの synthesizer で全 multi-arg
+   curried builtin をサポートできる。 *)
+let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
+    : Ast.expr =
+  let mk node ty = Ast.{ node; ty = Some ty; loc } in
+  let rec uncurry t =
+    match Ast.walk t with
+    | Ast.TyArrow (a, b) ->
+      let args, ret = uncurry b in (a :: args, ret)
+    | other -> ([], other)
+  in
+  let arg_tys, ret_ty = uncurry arrow_ty in
+  let n = List.length arg_tys in
+  if n = 0 then
+    raise (Codegen_error (loc, name ^ ": cannot eta-expand non-arrow type"));
+  (* Build inner App: ((... ((Var name) arg0) arg1) ...) argN-1 *)
+  let rec build_app i acc acc_ty =
+    if i >= n then acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let arg_node = mk (Ast.Var (Printf.sprintf "__arg%d" i)) arg_ty in
+      let new_ty =
+        match Ast.walk acc_ty with
+        | Ast.TyArrow (_, b) -> b
+        | _ -> ret_ty
+      in
+      build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
+  in
+  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  (* Wrap from inner-most outward with Fun nodes *)
+  let rec wrap i body_acc body_ty =
+    if i < 0 then body_acc
+    else
+      let arg_ty = List.nth arg_tys i in
+      let fn_ty = Ast.TyArrow (arg_ty, body_ty) in
+      let fn_node =
+        mk (Ast.Fun (Printf.sprintf "__arg%d" i, Some arg_ty, body_acc)) fn_ty
+      in
+      wrap (i - 1) fn_node fn_ty
+  in
+  wrap (n - 1) inner_apps ret_ty
+
 (* Phase 23.3: poly fns that need per-instantiation specialization.
    Key = fn name (e.g., "rev_aux"). Value = list of distinct concrete
    arrow types observed at use sites. Each entry causes resolve_fn_types
@@ -717,28 +765,49 @@ let rec emit_expr (e : Ast.expr) : string =
                  (Phase 35.1 MVP: nullary factory as value only works when use \
                  site infers a concrete element type. Use direct application \
                  like `vec_new ()` or write `fn () -> vec_new ()` manually)");
-    if not is_shadowed && (
-       (* Phase 35.1: vec_new / owned_vec_new / strbuf_new / map_new は
-          上記 nullary factory として処理済み — ここでは reject しない *)
-       name = "vec_push"
-       || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
-       || name = "vec_map" || name = "vec_filter"
-       || name = "vec_to_owned" || name = "owned_vec_to_vec"
-       || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len"
-       || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" || name = "map_iter") then
+    let is_curried_collection_builtin =
+      name = "vec_push"
+      || name = "vec_get" || name = "vec_len"
+      || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+      || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
+      || name = "vec_map" || name = "vec_filter"
+      || name = "vec_to_owned" || name = "owned_vec_to_vec"
+      || name = "owned_vec_push"
+      || name = "owned_vec_get" || name = "owned_vec_len"
+      || name = "strbuf_push"
+      || name = "strbuf_to_str" || name = "strbuf_len"
+      || name = "map_set" || name = "map_get"
+      || name = "map_has" || name = "map_len" || name = "map_iter"
+    in
+    (* Phase 38.C-1 (DEFERRED §1.2 A2): try eta-expansion before rejecting.
+       If e.ty is a concrete arrow chain, synthesize the curried Fun chain
+       and recurse — the resulting AST goes through the existing anonymous
+       Fun adapter + direct-call fast paths. spike では owned_vec_push に
+       絞って試運転、 動作確認後に他 builtin へ展開。 *)
+    let is_phase38c_target = name = "owned_vec_push" in
+    let try_eta () =
+      match e.Ast.ty with
+      | Some t when ty_is_concrete (Ast.walk t) ->
+        (match Ast.walk t with
+         | Ast.TyArrow _ as arrow ->
+           Some (emit_expr (synthesize_curried_eta name arrow e.loc))
+         | _ -> None)
+      | _ -> None
+    in
+    if not is_shadowed && is_curried_collection_builtin && is_phase38c_target then
+      (match try_eta () with
+       | Some s -> s
+       | None ->
+         unsupported e.loc
+           (name ^ " as a value: type is polymorphic, can't monomorphize (Phase 38.C-1 MVP: use a fn wrapper or constrain types at use site)"))
+    else if not is_shadowed && is_curried_collection_builtin then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数 builtin は直接 application のみ対応、first-class value 用法は Phase 35 で未対応)");
-    if not is_shadowed && (name = "len" || name = "vec_to_list") then
+        (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数 builtin は直接 application のみ対応、first-class value 用法は Phase 38.C で進行中、 現状 owned_vec_push のみ spike 実装済)")
+    else if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)")
     (* Phase 34.1: float constants — interp 側の builtin と完全一致 *)
-    if not is_shadowed && name = "pi" then
+    else if not is_shadowed && name = "pi" then
       "(3.14159265358979323846)"
     else if not is_shadowed && name = "e" then
       "(2.7182818284590452354)"

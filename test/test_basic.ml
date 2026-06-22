@@ -5836,6 +5836,47 @@ let () =
      if String.length wat_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 38.C-1: multi-arg curried builtin first-class value 化
+     (DEFERRED §1.2 A2 残りの spike — owned_vec_push のみ C で対応)
+     value 位置で synthesize_curried_eta が `fn __arg0 -> fn __arg1 ->
+     owned_vec_push __arg0 __arg1` を生成、 anonymous Fun adapter machinery
+     + direct-call fast path に乗る。 *)
+  check "Phase 38.C-1: owned_vec_push fully unapplied (interp)"
+    (Pipeline.process
+       "let v = owned_vec_new () in
+        let push = owned_vec_push in
+        let _ = push v 1 in
+        let _ = push v 2 in
+        let _ = push v 3 in
+        owned_vec_len v")
+    "3";
+  check "Phase 38.C-1: owned_vec_push partial app (interp)"
+    (Pipeline.process
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 0 in
+        let push_v = owned_vec_push v in
+        let _ = push_v 1 in
+        let _ = push_v 2 in
+        owned_vec_len v")
+    "3";
+  check "Phase 38.C-1: owned_vec_push fully unapplied emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = owned_vec_new () in
+        let push = (owned_vec_push : OwnedVec[int] -> int -> unit) in
+        let _ = push v 1 in
+        owned_vec_len v") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-1: owned_vec_push partial app emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 0 in
+        let push_v = owned_vec_push v in
+        let _ = push_v 1 in
+        owned_vec_len v") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)
