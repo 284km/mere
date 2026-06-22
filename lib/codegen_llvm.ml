@@ -765,8 +765,118 @@ let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
     in
     not (ty_contains_owned_vec_llvm tail_ty)
 
+let rec is_trivial_ty_llvm (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyTuple ts -> List.for_all is_trivial_ty_llvm ts
+  | _ -> false
+
+let collect_tainted_names_llvm (v : string) (body : Ast.expr) : string list =
+  let tainted = ref [v] in
+  let any_tainted_in e =
+    List.exists (fun n -> var_appears_in_llvm n e) !tainted
+  in
+  let value_propagates_taint value =
+    let vty = match value.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    (not (is_trivial_ty_llvm vty)) && any_tainted_in value
+  in
+  let rec walk e =
+    match e.Ast.node with
+    | Ast.Let (pat, value, body') ->
+      walk value;
+      if value_propagates_taint value then
+        tainted := pattern_vars pat @ !tainted;
+      walk body'
+    | Ast.Let_rec (bs, body') ->
+      List.iter (fun (_, v') -> walk v') bs;
+      if List.exists (fun (_, v') -> value_propagates_taint v') bs then
+        tainted := List.map fst bs @ !tainted;
+      walk body'
+    | Ast.With (n, value, body') ->
+      walk value;
+      if value_propagates_taint value then tainted := n :: !tainted;
+      walk body'
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk a; walk b
+    | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> walk a
+    | Ast.If (c, t, e_) -> walk c; walk t; walk e_
+    | Ast.Fun (_, _, b) -> walk b
+    | Ast.Constr (_, Some a) -> walk a
+    | Ast.Match (s, arms) ->
+      walk s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk ge | None -> ());
+        walk b) arms
+    | Ast.Tuple es -> List.iter walk es
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e') -> walk e') fs
+    | Ast.Record_update (a, fs) ->
+      walk a; List.iter (fun (_, e') -> walk e') fs
+    | Ast.Region_block (_, b) -> walk b
+    | Ast.Ref (_, _, a) -> walk a
+    | _ -> ()
+  in
+  walk body;
+  !tainted
+
+let rec tail_does_not_return_any_llvm (tainted : string list) (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Var n -> not (List.mem n tainted)
+  | Ast.Let (_, _, body) -> tail_does_not_return_any_llvm tainted body
+  | Ast.Let_rec (_, body) -> tail_does_not_return_any_llvm tainted body
+  | Ast.If (_, t, e_) ->
+    tail_does_not_return_any_llvm tainted t
+    && tail_does_not_return_any_llvm tainted e_
+  | Ast.Match (_, arms) ->
+    List.for_all (fun (_, _, b) -> tail_does_not_return_any_llvm tainted b) arms
+  | Ast.With (_, _, body) -> tail_does_not_return_any_llvm tainted body
+  | Ast.Region_block (_, body) -> tail_does_not_return_any_llvm tainted body
+  | Ast.Annot (a, _) -> tail_does_not_return_any_llvm tainted a
+  | _ ->
+    let tail_ty = match e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    not (ty_contains_owned_vec_llvm tail_ty)
+
+let rec no_tainted_leak_llvm (tainted : string list) (e : Ast.expr) : bool =
+  let g = no_tainted_leak_llvm tainted in
+  let appears e' = List.exists (fun n -> var_appears_in_llvm n e') tainted in
+  match e.Ast.node with
+  | Ast.Var _ | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit -> true
+  | Ast.Tuple es ->
+    List.for_all (fun e' -> not (appears e') && g e') es
+  | Ast.Constr (_, Some a) -> not (appears a) && g a
+  | Ast.Constr (_, None) -> true
+  | Ast.Record_lit (_, fs) ->
+    List.for_all (fun (_, e') -> not (appears e') && g e') fs
+  | Ast.Record_update (a, fs) ->
+    not (appears a)
+    && List.for_all (fun (_, e') -> not (appears e') && g e') fs
+  | Ast.Fun (param, _, fbody) ->
+    List.mem param tainted || g fbody
+  | Ast.Annot (a, _) | Ast.Neg a | Ast.Field_get (a, _) -> g a
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) -> g a && g b
+  | Ast.Let (_, value, body) -> g value && g body
+  | Ast.Let_rec (bs, body) ->
+    List.for_all (fun (_, v') -> g v') bs && g body
+  | Ast.If (c, t, e_) -> g c && g t && g e_
+  | Ast.Match (s, arms) ->
+    g s
+    && List.for_all (fun (_, gd, b) ->
+       (match gd with Some ge -> g ge | None -> true) && g b) arms
+  | Ast.With (_, value, body) -> g value && g body
+  | Ast.Region_block (_, b) -> g b
+  | Ast.Ref (_, _, a) -> g a
+
 let owned_vec_safe_to_drop_at_scope_llvm (body : Ast.expr) (v : string) : bool =
-  no_value_leak_llvm v body && tail_does_not_return_v_llvm v body
+  let tainted = collect_tainted_names_llvm v body in
+  no_tainted_leak_llvm tainted body
+  && tail_does_not_return_any_llvm tainted body
 
 let pending_closures : closure_emission list ref = ref []
 let anon_env_typedefs : string list ref = ref []

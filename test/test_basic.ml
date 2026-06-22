@@ -6118,6 +6118,37 @@ let () =
         owned_vec_len v"))
     "1";
 
+  (* Phase 38.G-1 soundness: closure capturing v が body の tail で返るとき
+     auto-Drop すると use-after-free 発生。 taint 伝播で防止すること。 *)
+  check "Phase 38.G-1: 返される closure が v を capture → NO auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let make_getter = fn () ->
+          let v = owned_vec_new () in
+          let _ = owned_vec_push v 100 in
+          let get = owned_vec_get v in
+          get in
+        let g = make_getter () in
+        g 0"))
+    "0";
+  check "Phase 38.G-1: tuple stash via let の transitive 検出"
+    (string_of_int (count_owned_vec_free_c
+       "let make_pair = fn () ->
+          let v = owned_vec_new () in
+          let _ = owned_vec_push v 7 in
+          let bundle = (v, 42) in
+          bundle in
+        let p = make_pair () in
+        snd p"))
+    "0";
+  check "Phase 38.G-1: scalar 派生 (len v) は taint 伝播しない"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        let _ = owned_vec_push v 2 in
+        let n = owned_vec_len v in
+        n + 100"))
+    "1";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)
