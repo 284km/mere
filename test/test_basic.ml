@@ -5994,6 +5994,130 @@ let () =
      if String.length wat_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 38.G-1: OwnedVec auto scope-bound Drop (DEFERRED §1.3 Level 1)
+     `let v = owned_vec_new () in body` で body が v を escape させない時、
+     scope 末で `free(v->data)` を auto-emit。 conservative 静的解析
+     (no_value_leak + tail_does_not_return_v + value is fresh owned_vec_new
+     factory call) を満たせば auto-Drop、 さもなければ既存の registry +
+     main-end sweep にフォールバック。 *)
+  let count_owned_vec_free_c src =
+    let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog src) in
+    let needle = "free(((__mere_owned_vec_base*)" in
+    let rec count i acc =
+      let len = String.length needle in
+      if i + len > String.length c_src then acc
+      else if String.sub c_src i len = needle then count (i + 1) (acc + 1)
+      else count (i + 1) acc
+    in
+    count 0 0
+  in
+  check "Phase 38.G-1: safe pattern auto-Drops in C codegen (1 free emit)"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        let _ = owned_vec_push v 2 in
+        owned_vec_len v"))
+    "1";
+  check "Phase 38.G-1: body returns v → no auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        v"))
+    "0";
+  check "Phase 38.G-1: v stashed in tuple → no auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        let pair = (v, 42) in
+        snd pair"))
+    "0";
+  check "Phase 38.G-1: closure captures v → no auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        let getter = fn () -> owned_vec_len v in
+        getter ()"))
+    "0";
+  check "Phase 38.G-1: nested let chain with safe tail → auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 10 in
+        let _ = owned_vec_push v 20 in
+        let _ = owned_vec_push v 30 in
+        let sum = owned_vec_len v in
+        sum * 2"))
+    "1";
+  check "Phase 38.G-1: if branches both return scalar → auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 5 in
+        if owned_vec_len v > 0 then 1 else 0"))
+    "1";
+  check "Phase 38.G-1: if branch returns v → no auto-Drop"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        if true then v else v"))
+    "0";
+  check "Phase 38.G-1: interp behavior preserved (auto-Drop case)"
+    (Pipeline.process
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 7 in
+        let _ = owned_vec_push v 8 in
+        owned_vec_len v")
+    "2";
+  let llvm_main_has_free src =
+    let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog src) in
+    let needle = "define i32 @main" in
+    let len_n = String.length needle in
+    let rec find_main i =
+      if i + len_n > String.length ll then -1
+      else if String.sub ll i len_n = needle then i
+      else find_main (i + 1)
+    in
+    let main_start = find_main 0 in
+    if main_start < 0 then false
+    else
+      let rest = String.sub ll main_start (String.length ll - main_start) in
+      let end_marker = "\n}" in
+      let elen = String.length end_marker in
+      let rec find_end i =
+        if i + elen > String.length rest then String.length rest
+        else if String.sub rest i elen = end_marker then i
+        else find_end (i + 1)
+      in
+      let main_body = String.sub rest 0 (find_end 0) in
+      let free_needle = "call void @free" in
+      let fn_len = String.length free_needle in
+      let rec scan i =
+        if i + fn_len > String.length main_body then false
+        else if String.sub main_body i fn_len = free_needle then true
+        else scan (i + 1)
+      in
+      scan 0
+  in
+  check "Phase 38.G-1: LLVM emits scope-end free in main for safe pattern"
+    (if llvm_main_has_free
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        owned_vec_len v" then "ok" else "no free")
+    "ok";
+  check "Phase 38.G-1: LLVM does NOT emit scope-end free in main for escape"
+    (if llvm_main_has_free
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 1 in
+        v" then "main has free" else "ok")
+    "ok";
+  check "Phase 38.G-1: Phase 38.C partial app + auto-Drop は両立"
+    (string_of_int (count_owned_vec_free_c
+       "let v = owned_vec_new () in
+        let _ = owned_vec_push v 0 in
+        let push_v = owned_vec_push v in
+        let _ = push_v 1 in
+        let _ = push_v 2 in
+        owned_vec_len v"))
+    "1";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)

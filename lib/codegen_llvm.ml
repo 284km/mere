@@ -663,6 +663,111 @@ type closure_emission = {
   ce_body         : Ast.expr;
   mutable ce_host : string;  (* Phase 25.3: host scope at queue time *)
 }
+(* Phase 38.G-1 (DEFERRED §1.3 Level 1): auto-Drop static check helpers.
+   Same logic as codegen_c.ml; see that file for the design rationale. *)
+let rec ty_contains_owned_vec_llvm (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon ("OwnedVec", _) -> true
+  | Ast.TyCon (_, args) -> List.exists ty_contains_owned_vec_llvm args
+  | Ast.TyTuple ts -> List.exists ty_contains_owned_vec_llvm ts
+  | Ast.TyArrow (a, b) ->
+    ty_contains_owned_vec_llvm a || ty_contains_owned_vec_llvm b
+  | Ast.TyRef (_, _, t') -> ty_contains_owned_vec_llvm t'
+  | _ -> false
+
+let rec var_appears_in_llvm (v : string) (e : Ast.expr) : bool =
+  let g = var_appears_in_llvm v in
+  match e.Ast.node with
+  | Ast.Var n -> n = v
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+  | Ast.Unit_lit -> false
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) -> g a || g b
+  | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> g a
+  | Ast.Let (pat, value, body) ->
+    g value || (not (List.mem v (pattern_vars pat)) && g body)
+  | Ast.Let_rec (bs, body) ->
+    let names = List.map fst bs in
+    List.exists (fun (_, e') -> g e') bs
+    || (not (List.mem v names) && g body)
+  | Ast.With (n, value, body) -> g value || (n <> v && g body)
+  | Ast.If (c, t, e_) -> g c || g t || g e_
+  | Ast.Fun (param, _, body) -> param <> v && g body
+  | Ast.Constr (_, Some a) -> g a
+  | Ast.Constr (_, None) -> false
+  | Ast.Match (s, arms) ->
+    g s
+    || List.exists (fun (pat, gd, b) ->
+       (match gd with Some ge -> g ge | None -> false)
+       || (not (List.mem v (pattern_vars pat)) && g b)) arms
+  | Ast.Tuple es -> List.exists g es
+  | Ast.Record_lit (_, fs) -> List.exists (fun (_, e') -> g e') fs
+  | Ast.Record_update (a, fs) -> g a || List.exists (fun (_, e') -> g e') fs
+  | Ast.Region_block (_, b) -> g b
+  | Ast.Ref (_, _, a) -> g a
+
+let rec no_value_leak_llvm (v : string) (e : Ast.expr) : bool =
+  let g = no_value_leak_llvm v in
+  match e.Ast.node with
+  | Ast.Var _ | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit -> true
+  | Ast.Tuple es ->
+    List.for_all (fun e' -> not (var_appears_in_llvm v e') && g e') es
+  | Ast.Constr (_, Some a) -> not (var_appears_in_llvm v a) && g a
+  | Ast.Constr (_, None) -> true
+  | Ast.Record_lit (_, fs) ->
+    List.for_all (fun (_, e') -> not (var_appears_in_llvm v e') && g e') fs
+  | Ast.Record_update (a, fs) ->
+    not (var_appears_in_llvm v a)
+    && List.for_all (fun (_, e') -> not (var_appears_in_llvm v e') && g e') fs
+  | Ast.Fun (param, _, fbody) ->
+    param = v || not (var_appears_in_llvm v fbody)
+  | Ast.Annot (a, _) | Ast.Neg a | Ast.Field_get (a, _) -> g a
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) -> g a && g b
+  | Ast.Let (pat, value, body) ->
+    g value && (List.mem v (pattern_vars pat) || g body)
+  | Ast.Let_rec (bs, body) ->
+    let names = List.map fst bs in
+    List.for_all (fun (_, v') -> g v') bs
+    && (List.mem v names || g body)
+  | Ast.If (c, t, e_) -> g c && g t && g e_
+  | Ast.Match (s, arms) ->
+    g s
+    && List.for_all (fun (pat, gd, b) ->
+       (match gd with Some ge -> g ge | None -> true)
+       && (List.mem v (pattern_vars pat) || g b)) arms
+  | Ast.With (n, value, body) -> g value && (n = v || g body)
+  | Ast.Region_block (_, b) -> g b
+  | Ast.Ref (_, _, a) -> g a
+
+let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Var n -> n <> v
+  | Ast.Let (pat, _, body) ->
+    List.mem v (pattern_vars pat) || tail_does_not_return_v_llvm v body
+  | Ast.Let_rec (bs, body) ->
+    List.exists (fun (n, _) -> n = v) bs
+    || tail_does_not_return_v_llvm v body
+  | Ast.If (_, t, e_) ->
+    tail_does_not_return_v_llvm v t && tail_does_not_return_v_llvm v e_
+  | Ast.Match (_, arms) ->
+    List.for_all (fun (pat, _, b) ->
+       List.mem v (pattern_vars pat)
+       || tail_does_not_return_v_llvm v b) arms
+  | Ast.With (n, _, body) -> n = v || tail_does_not_return_v_llvm v body
+  | Ast.Region_block (_, body) -> tail_does_not_return_v_llvm v body
+  | Ast.Annot (a, _) -> tail_does_not_return_v_llvm v a
+  | _ ->
+    let tail_ty = match e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    not (ty_contains_owned_vec_llvm tail_ty)
+
+let owned_vec_safe_to_drop_at_scope_llvm (body : Ast.expr) (v : string) : bool =
+  no_value_leak_llvm v body && tail_does_not_return_v_llvm v body
+
 let pending_closures : closure_emission list ref = ref []
 let anon_env_typedefs : string list ref = ref []
 let anon_closure_counter = ref 0
@@ -2274,8 +2379,33 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        if Hashtbl.mem top_globals_llvm name then
          emit_instr (Printf.sprintf "  store %s %s, ptr @%s"
                        (llvm_ty_of value_ty) rv name);
+       (* Phase 38.G-1 (DEFERRED §1.3 Level 1): detect safe auto-Drop. *)
+       let value_is_fresh_owned_vec =
+         (match value.Ast.node with
+          | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> true
+          | _ -> false)
+         && (match value_ty with
+             | Ast.TyCon ("OwnedVec", _) -> true
+             | _ -> false)
+       in
+       let do_auto_drop =
+         value_is_fresh_owned_vec
+         && (not (Hashtbl.mem top_globals_llvm name))
+         && owned_vec_safe_to_drop_at_scope_llvm body name
+       in
        let r = emit_expr ((name, rv) :: env) body in
        current_var_types := saved;
+       (* Emit scope-end free for auto-Drop — same shape as Phase 15.13 `with`. *)
+       if do_auto_drop then begin
+         let dp = fresh_reg () in
+         emit_instr (Printf.sprintf
+                       "  %s = getelementptr {ptr, i32, i32}, ptr %s, i32 0, i32 0"
+                       dp rv);
+         let data = fresh_reg () in
+         emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" data dp);
+         emit_instr (Printf.sprintf "  call void @free(ptr %s)" data);
+         emit_instr (Printf.sprintf "  store ptr null, ptr %s" dp)
+       end;
        r
      | Ast.P_wild | Ast.P_unit ->
        (* Phase 22.1: evaluate RHS for side effects, then continue with body. *)

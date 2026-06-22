@@ -601,6 +601,133 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
   go e initially_bound;
   List.rev !order
 
+(* Phase 38.G-1 (DEFERRED §1.3 Level 1): static auto-Drop check for OwnedVec.
+
+   Given `let v = owned_vec_new () in body`, returns true iff v is statically
+   provably *safe to free at the end of body* — i.e., v's value does not
+   escape the lexical scope of the let binding. Conservative: false-positives
+   (saying "unsafe" when actually safe) are OK and just fall back to the
+   process-wide registry sweep; false-negatives (saying "safe" when actually
+   escapes) would cause use-after-free, so the check must be sound.
+
+   Escape sources we detect:
+   1. Var v appears in a value-leaking construction (Tuple, Constr payload,
+      Record_lit, Record_update) — the value could be stashed.
+   2. Var v appears inside a Fun body that isn't immediately consumed
+      (closure capture, value-position).
+   3. Body's tail expression returns v or a value containing v (typed via
+      `ty_contains_owned_vec`).
+
+   Safe uses (allowed):
+   - `App (..., Var v)` where the App's result type doesn't contain OwnedVec
+     (e.g., `owned_vec_push v x` returns unit, `owned_vec_get v 0` returns T)
+   - Annot / Neg / Field_get / arithmetic / comparison / `let _ = ... in ...`
+   - if/match arms where each arm body doesn't return v *)
+let rec ty_contains_owned_vec (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon ("OwnedVec", _) -> true
+  | Ast.TyCon (_, args) -> List.exists ty_contains_owned_vec args
+  | Ast.TyTuple ts -> List.exists ty_contains_owned_vec ts
+  | Ast.TyArrow (a, b) -> ty_contains_owned_vec a || ty_contains_owned_vec b
+  | Ast.TyRef (_, _, t') -> ty_contains_owned_vec t'
+  | _ -> false
+
+let rec var_appears_in (v : string) (e : Ast.expr) : bool =
+  let g = var_appears_in v in
+  match e.Ast.node with
+  | Ast.Var n -> n = v
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+  | Ast.Unit_lit -> false
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) -> g a || g b
+  | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> g a
+  | Ast.Let (pat, value, body) ->
+    g value || (not (List.mem v (pattern_vars pat)) && g body)
+  | Ast.Let_rec (bs, body) ->
+    let names = List.map fst bs in
+    List.exists (fun (_, e') -> g e') bs
+    || (not (List.mem v names) && g body)
+  | Ast.With (n, value, body) -> g value || (n <> v && g body)
+  | Ast.If (c, t, e_) -> g c || g t || g e_
+  | Ast.Fun (param, _, body) -> param <> v && g body
+  | Ast.Constr (_, Some a) -> g a
+  | Ast.Constr (_, None) -> false
+  | Ast.Match (s, arms) ->
+    g s
+    || List.exists (fun (pat, gd, b) ->
+       (match gd with Some ge -> g ge | None -> false)
+       || (not (List.mem v (pattern_vars pat)) && g b)) arms
+  | Ast.Tuple es -> List.exists g es
+  | Ast.Record_lit (_, fs) -> List.exists (fun (_, e') -> g e') fs
+  | Ast.Record_update (a, fs) -> g a || List.exists (fun (_, e') -> g e') fs
+  | Ast.Region_block (_, b) -> g b
+  | Ast.Ref (_, _, a) -> g a
+
+(* Check 1: no value-leaking construction has v inside it. *)
+let rec no_value_leak (v : string) (e : Ast.expr) : bool =
+  let g = no_value_leak v in
+  match e.Ast.node with
+  | Ast.Var _ | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit -> true
+  | Ast.Tuple es ->
+    List.for_all (fun e' -> not (var_appears_in v e') && g e') es
+  | Ast.Constr (_, Some a) -> not (var_appears_in v a) && g a
+  | Ast.Constr (_, None) -> true
+  | Ast.Record_lit (_, fs) ->
+    List.for_all (fun (_, e') -> not (var_appears_in v e') && g e') fs
+  | Ast.Record_update (a, fs) ->
+    not (var_appears_in v a)
+    && List.for_all (fun (_, e') -> not (var_appears_in v e') && g e') fs
+  | Ast.Fun (param, _, fbody) ->
+    param = v || not (var_appears_in v fbody)
+  | Ast.Annot (a, _) | Ast.Neg a | Ast.Field_get (a, _) -> g a
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) -> g a && g b
+  | Ast.Let (pat, value, body) ->
+    g value && (List.mem v (pattern_vars pat) || g body)
+  | Ast.Let_rec (bs, body) ->
+    let names = List.map fst bs in
+    List.for_all (fun (_, v') -> g v') bs
+    && (List.mem v names || g body)
+  | Ast.If (c, t, e_) -> g c && g t && g e_
+  | Ast.Match (s, arms) ->
+    g s
+    && List.for_all (fun (pat, gd, b) ->
+       (match gd with Some ge -> g ge | None -> true)
+       && (List.mem v (pattern_vars pat) || g b)) arms
+  | Ast.With (n, value, body) -> g value && (n = v || g body)
+  | Ast.Region_block (_, b) -> g b
+  | Ast.Ref (_, _, a) -> g a
+
+(* Check 2: tail expression of body doesn't return v (or a value containing v). *)
+let rec tail_does_not_return_v (v : string) (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Var n -> n <> v
+  | Ast.Let (pat, _, body) ->
+    List.mem v (pattern_vars pat) || tail_does_not_return_v v body
+  | Ast.Let_rec (bs, body) ->
+    List.exists (fun (n, _) -> n = v) bs || tail_does_not_return_v v body
+  | Ast.If (_, t, e_) ->
+    tail_does_not_return_v v t && tail_does_not_return_v v e_
+  | Ast.Match (_, arms) ->
+    List.for_all (fun (pat, _, b) ->
+       List.mem v (pattern_vars pat) || tail_does_not_return_v v b) arms
+  | Ast.With (n, _, body) -> n = v || tail_does_not_return_v v body
+  | Ast.Region_block (_, body) -> tail_does_not_return_v v body
+  | Ast.Annot (a, _) -> tail_does_not_return_v v a
+  | _ ->
+    (* Other tail expressions: type determines safety. If tail type contains
+       OwnedVec, conservatively say unsafe (might be returning v). *)
+    let tail_ty = match e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    not (ty_contains_owned_vec tail_ty)
+
+(* Combined check. *)
+let owned_vec_safe_to_drop_at_scope (body : Ast.expr) (v : string) : bool =
+  no_value_leak v body && tail_does_not_return_v v body
+
 (* Phase 15.10: extract (K_tag, V_tag) from a Map[R, K, V] typed expr,
    register in `map_instances`. *)
 let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
@@ -909,9 +1036,40 @@ let rec emit_expr (e : Ast.expr) : string =
           assign to it directly. The static declaration is emitted in
           emit_program; here we just emit the assignment so source-order
           side effects in main_body are preserved. *)
+       (* Phase 38.G-1 (DEFERRED §1.3 Level 1): auto-Drop check.
+          If value is `owned_vec_new ()` (or a chain that returns a fresh
+          OwnedVec) AND the body provably doesn't let v escape, emit a
+          scope-end free — same shape as `with v = ...` (Phase 15.13).
+          Otherwise the existing main-end registry sweep handles cleanup. *)
+       let bind_ty_walked = Ast.walk bind_ty in
+       let value_is_fresh_owned_vec =
+         (match value.Ast.node with
+          | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> true
+          | _ -> false)
+         &&
+         (match bind_ty_walked with
+          | Ast.TyCon ("OwnedVec", _) -> true
+          | _ -> false)
+       in
+       let do_auto_drop =
+         value_is_fresh_owned_vec
+         && (not (Hashtbl.mem top_globals name))
+         && owned_vec_safe_to_drop_at_scope body name
+       in
        if Hashtbl.mem top_globals name then
          Printf.sprintf
            "({ %s = %s; %s; })" (c_safe_name name) value_c body_c
+       else if do_auto_drop then
+         (* Mirror the Phase 15.13 `with` shape: bind, evaluate body, free
+            v's data buffer at scope end, return the body's result.
+            free(NULL) is a no-op so main-end free_all stays safe. *)
+         Printf.sprintf
+           "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; \
+            __auto_type __let_result_%s = (%s); \
+            free(((__mere_owned_vec_base*)%s)->data); \
+            ((__mere_owned_vec_base*)%s)->data = NULL; \
+            __let_result_%s; })"
+           name value_c name name name body_c name name name
        else
          Printf.sprintf
            "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
