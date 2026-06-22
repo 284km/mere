@@ -102,6 +102,8 @@ backend いずれかへ codegen。
 | [math_demo.mere](math_demo.mere) ⭐ | float の四則演算 + sqrt / sin / cos / tan / f_pow / atan2 を combined で dogfood。Pythagorean / 三角恒等式 / 円周計算等。4 backend で diff = 0 |
 | **Phase 35 (2026-06-22) 追加 — first-class builtin (DEFERRED §1.2 A1)** | |
 | [factory_value.mere](factory_value.mere) ⭐ | nullary factory builtin (vec_new / owned_vec_new / strbuf_new / map_new) を first-class value として HOF に渡す。Phase 35 eta-wrap で 4 backend 対応 (MVP は HOF 引数注釈で ret_ty を固定する必要あり) |
+| **Phase 36 (2026-06-22) 追加 — histogram dogfood** | |
+| [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket カウンタ + 最頻 bucket 検出。10 単位 bucket に 20 件の観測値を accumulate、map_iter で線形 scan して mode を求める。**新摩擦 (DEFERRED §1.13)**: top-level `let v = map_get m k` が let-poly で 'a 化 → `(... : int)` 注釈で workaround |
 
 ### Q-010 collection 基本
 

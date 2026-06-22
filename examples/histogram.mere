@@ -1,0 +1,95 @@
+// histogram: int bucket カウンタ + 最頻値検出 (Phase 36)
+//
+// 目的: examples roadmap A5。Map[int, int] (key = bucket、value = count)
+//   を使った accumulate / max-finding パターンを 4 backend で dogfood。
+//   テストデータは固定 list で deterministic、prelude の list_fold を
+//   再利用。
+//
+// 設計:
+//   - sample: int list — 観測値
+//   - bucket_of: 観測値を bucket index に丸める (例: 10 単位の bucket)
+//   - hist: Map[int, int] — bucket → count
+//   - max bucket は map_iter で線形 scan
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/histogram.mere
+
+let _ = print "=== histogram (Phase 36) ===";
+
+// 10 単位の bucket。`23` は bucket 20、`47` は bucket 40 など
+let bucket_of = fn (x: int) -> (x / 10) * 10;
+
+// テストデータ: 観測 20 件
+let samples =
+  [3, 7, 12, 15, 22, 23, 24, 28, 31, 32,
+   42, 45, 47, 48, 51, 52, 53, 67, 71, 99];
+
+// list_iter で Map に累積。Map は call-by-ref で mutate される。
+let hist = map_new ();
+
+let bump = fn (b: int) ->
+  if map_has hist b then
+    let n = map_get hist b in
+    let _ = map_set hist b (n + 1) in
+    ()
+  else
+    let _ = map_set hist b 1 in
+    ();
+
+let _ = list_iter samples (fn (x: int) -> bump (bucket_of x));
+
+// bucket を昇順に走査するため、samples 由来の bucket 集合を整序した
+// list を別途構築する。map_iter は insertion order なので、ここでは
+// 0, 10, 20, ..., 90 を試して存在する bucket のみ print する。
+let print_bucket = fn (b: int) ->
+  if map_has hist b then
+    print (show b ++ "-" ++ show (b + 9) ++ ": " ++ show (map_get hist b))
+  else
+    ();
+
+let _ = print "--- buckets (ascending) ---";
+let _ = print_bucket 0;
+let _ = print_bucket 10;
+let _ = print_bucket 20;
+let _ = print_bucket 30;
+let _ = print_bucket 40;
+let _ = print_bucket 50;
+let _ = print_bucket 60;
+let _ = print_bucket 70;
+let _ = print_bucket 80;
+let _ = print_bucket 90;
+
+// 最頻 bucket を線形 scan で求める。Map を mutable な 1-cell
+// container として再利用 (key "count" と "bucket" に最大値を保持)。
+let _ = print "--- max bucket ---";
+
+let max_state = map_new ();
+let _ = map_set max_state "count" 0;
+let _ = map_set max_state "bucket" (-1);
+
+let _ = map_iter hist (fn (b: int) -> fn (n: int) ->
+  let cur = map_get max_state "count" in
+  if n > cur then
+    let _ = map_set max_state "count" n in
+    let _ = map_set max_state "bucket" b in
+    ()
+  else
+    ());
+
+// 摩擦点: `let mb = map_get max_state "bucket"` のように top-level
+// let の値が `map_get` の戻り値だけだと let-poly で `'a` に generalize
+// され、C/LLVM/Wasm codegen が "unsupported type element: 'a" で落ちる。
+// 値式に `(... : int)` 注釈を付けると monomorphize される。
+let _ =
+  let mb = (map_get max_state "bucket" : int) in
+  let mn = (map_get max_state "count" : int) in
+  print ("most common: " ++ show mb ++ "-" ++ show (mb + 9)
+         ++ " (" ++ show mn ++ " obs)");
+
+// total 件数 (Phase 19.4 prelude の list_len)
+let total = list_len samples;
+let _ = print ("total samples = " ++ show total);
+
+0
