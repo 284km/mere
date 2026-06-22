@@ -29,50 +29,50 @@ let _ = bind "4" "....-"; let _ = bind "5" "....."; let _ = bind "6" "-...."; le
 let _ = bind "8" "---.."; let _ = bind "9" "----.";
 
 // 文字列を encode: 各文字を to_morse で lookup、文字間は space、空白は "/" に
-// 注: region R { strbuf_to_str b } で str を返すと、region 終了時に
-// 開放されたメモリへの dangling pointer になる (Phase 36 dogfood で
-// DEFERRED §1.16 として記録)。回避策として __heap region (annotation
-// 省略時の default) の StrBuf を使う。
 let encode = fn (s: str) ->
   let upper = to_upper s in
-  let b = strbuf_new () in
-  let n = str_len upper in
-  let rec loop = fn (i: int) -> fn (first: bool) ->
-    if i >= n then ()
-    else
-      let c = char_at upper i in
-      if c == " " then
-        let _ = strbuf_push b (if first then "/" else " /") in
-        loop (i + 1) false
-      else if map_has to_morse c then
-        let _ = strbuf_push b (if first then "" else " ") in
-        let _ = strbuf_push b (map_get to_morse c) in
-        loop (i + 1) false
+  region R {
+    let b = strbuf_new () in
+    let n = str_len upper in
+    let rec loop = fn (i: int) -> fn (first: bool) ->
+      if i >= n then ()
       else
-        // 未対応文字は skip
-        loop (i + 1) first in
-  let _ = loop 0 true in
-  strbuf_to_str b;
+        let c = char_at upper i in
+        if c == " " then
+          let _ = strbuf_push b (if first then "/" else " /") in
+          loop (i + 1) false
+        else if map_has to_morse c then
+          let _ = strbuf_push b (if first then "" else " ") in
+          let _ = strbuf_push b (map_get to_morse c) in
+          loop (i + 1) false
+        else
+          // 未対応文字は skip
+          loop (i + 1) first in
+    let _ = loop 0 true in
+    strbuf_to_str b
+  };
 
 // decode: space で分割した token を順に lookup、"/" は空白扱い
 let decode = fn (morse: str) ->
   let toks = str_split morse " " in
-  let b = strbuf_new () in
-  let rec walk = fn (xs: str list) ->
-    match xs with
-    | Nil -> ()
-    | Cons (t, rest) ->
-      if t == "/" then
-        let _ = strbuf_push b " " in
-        walk rest
-      else if t == "" then walk rest
-      else if map_has from_morse t then
-        let _ = strbuf_push b (map_get from_morse t) in
-        walk rest
-      else
-        walk rest in
-  let _ = walk toks in
-  strbuf_to_str b;
+  region R {
+    let b = strbuf_new () in
+    let rec walk = fn (xs: str list) ->
+      match xs with
+      | Nil -> ()
+      | Cons (t, rest) ->
+        if t == "/" then
+          let _ = strbuf_push b " " in
+          walk rest
+        else if t == "" then walk rest
+        else if map_has from_morse t then
+          let _ = strbuf_push b (map_get from_morse t) in
+          walk rest
+        else
+          walk rest in
+    let _ = walk toks in
+    strbuf_to_str b
+  };
 
 let check = fn (s: str) ->
   let enc = encode s in

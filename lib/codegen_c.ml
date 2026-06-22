@@ -3221,8 +3221,11 @@ let strbuf_runtime =
       "}";
       "";
       "static const char* mere_strbuf_to_str(mere_strbuf* sb) {";
-      "  /* Return null-terminated copy allocated in the same region. */";
-      "  char* r = (char*)__lang_region_alloc(sb->region, sb->len + 1);";
+      "  /* Phase 36 (DEFERRED §1.16 fix): allocate result in the process-";
+      "     wide default region so the returned str outlives the StrBuf's";
+      "     scoped region. Avoids dangling pointers when";
+      "     `region R { ...; strbuf_to_str b }` returns a value out of R. */";
+      "  char* r = (char*)__lang_region_alloc(&__lang_default_region, sb->len + 1);";
       "  for (int i = 0; i < sb->len; i++) r[i] = sb->data[i];";
       "  r[sb->len] = '\\0';";
       "  return r;";

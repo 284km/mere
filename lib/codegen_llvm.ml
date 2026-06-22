@@ -5660,16 +5660,17 @@ let strbuf_runtime_llvm =
       "  ret i32 0";
       "}";
       "";
-      (* to_str *)
+      (* to_str — Phase 36 (DEFERRED §1.16 fix): allocate result in the
+         process-wide default region so the returned str outlives the
+         StrBuf's scoped region. Avoids dangling pointers when
+         `region R { ...; strbuf_to_str b }` escapes a value out of R. *)
       "define ptr @mere_strbuf_to_str(ptr %sb) {";
       "entry:";
       "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
       "  %len = load i32, ptr %lp";
-      "  %rp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 3";
-      "  %reg = load ptr, ptr %rp";
       "  %len1 = add i32 %len, 1";
       "  %len1_64 = zext i32 %len1 to i64";
-      "  %out = call ptr @__lang_region_alloc(ptr %reg, i64 %len1_64)";
+      "  %out = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %len1_64)";
       "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
       "  %buf = load ptr, ptr %dp";
       "  %len_64 = zext i32 %len to i64";
