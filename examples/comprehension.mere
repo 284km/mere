@@ -4,15 +4,10 @@
 //   `[ expr | x <- xs ]`           → `list_map xs (\x -> expr)`
 //   `[ expr | x <- xs, cond ]`     → `list_map (list_filter xs (\x -> cond)) (\x -> expr)`
 //
-// 注: list_filter は prelude には未投入なのでこの example の冒頭で定義
-//   (将来 prelude 化候補)。
+// 注: list_filter / list_take / list_drop / list_find は Phase 36 で
+//   prelude に投入済 (`a..b` の `range` と同じバッチ)。
 //
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
-
-let rec list_filter = \xs p ->
-  match xs with
-  | Nil -> Nil
-  | Cons (h, t) -> if p h then h :: list_filter t p else list_filter t p;
 
 let _ = print "=== comprehension (Phase 36) ===";
 

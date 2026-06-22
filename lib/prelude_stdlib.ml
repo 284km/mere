@@ -62,6 +62,36 @@ let rec range = fn (a: int) -> fn (b: int) ->
   if a > b then Nil
   else Cons (a, range (a + 1) b);
 
+// Phase 36: 述語で list を絞り込み (list_map / list_iter と対称)
+let rec list_filter = fn xs -> fn p ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if p h then Cons (h, list_filter t p)
+    else list_filter t p;
+
+// Phase 36: 最初の n 要素を取る (n が len 超なら全部)
+let rec list_take = fn xs -> fn n ->
+  if n <= 0 then Nil
+  else
+    match xs with
+    | Nil -> Nil
+    | Cons (h, t) -> Cons (h, list_take t (n - 1));
+
+// Phase 36: 最初の n 要素を捨てる
+let rec list_drop = fn xs -> fn n ->
+  if n <= 0 then xs
+  else
+    match xs with
+    | Nil -> Nil
+    | Cons (_, t) -> list_drop t (n - 1);
+
+// Phase 36: 述語に最初に一致する要素を Some で返す、無ければ None
+let rec list_find = fn xs -> fn p ->
+  match xs with
+  | Nil -> None
+  | Cons (h, t) -> if p h then Some h else list_find t p;
+
 // === Option helpers ===
 
 let rec option_map = fn opt -> fn f ->

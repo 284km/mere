@@ -27,12 +27,7 @@ let is_prime = \n ->
       | Cons (h, t) -> if n % h == 0 then true else any_divisor t in
     not (any_divisor candidates);
 
-// section + filter
-let rec list_filter = \xs p ->
-  match xs with
-  | Nil -> Nil
-  | Cons (h, t) -> if p h then h :: list_filter t p else list_filter t p;
-
+// section + filter (list_filter は Phase 36 で prelude に投入済)
 let primes_under = \n -> list_filter (2..n) is_prime;
 let _ = list_iter (primes_under 30) <| \p -> print "{show p}";
 

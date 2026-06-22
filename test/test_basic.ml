@@ -5723,9 +5723,10 @@ let () =
         + Phase 21.2: 6 list helpers
         + Phase 23.2: 3 option + 5 result helpers
         + Phase 33.1: 1 option_and_then
-        + Phase 36: 1 range = 19 total *)
+        + Phase 36: 1 range + 4 list helpers
+          (list_filter / list_take / list_drop / list_find) = 23 total *)
      string_of_int (List.length prog.Ast.decls))
-    "19";
+    "23";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"
