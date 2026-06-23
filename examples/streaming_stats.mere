@@ -1,0 +1,90 @@
+// streaming_stats: 入力 list から複数の統計量 (mean / variance / median /
+// min / max) を計算
+//
+// 構造的に NLL Level 2 の痛みを探る:
+//   - 関数内で input list を OwnedVec に貯める
+//   - 最初の半分の処理: count / sum / max
+//   - 中盤: variance のための偏差平方和
+//   - 終盤: median のための sort と中央値抽出
+//   - 最後の tail: stat tuple (int * int * int * int * int) を return
+//
+// Level 1 では vec は scope 末まで生きる。 Level 2 では「median 計算後の
+// last-use」 で drop されてほしい。 vec が大きいほど Level 2 の効果が見える。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// vec を sorted な int list に変換 (insertion sort、 教育的に手書き)
+let rec insert_sorted = fn (xs: int list) -> fn (x: int) ->
+  match xs with
+  | Nil -> Cons (x, Nil)
+  | Cons (h, t) ->
+    if x <= h then Cons (x, xs)
+    else Cons (h, insert_sorted t x);
+
+let stats = fn (data: int list) ->
+  let v = owned_vec_new () in
+  let _ = list_iter data (fn x ->
+    let _ = owned_vec_push v x in ()) in
+  let n = owned_vec_len v in
+
+  // === Phase 1: count / sum / max / min ===
+  let rec scan = fn i -> fn sum -> fn max_v -> fn min_v ->
+    if i >= n then (sum, max_v, min_v)
+    else
+      let x = owned_vec_get v i in
+      let s2 = sum + x in
+      let mx = if x > max_v then x else max_v in
+      let mn = if x < min_v then x else min_v in
+      scan (i + 1) s2 mx mn in
+  let (sum, max_v, min_v) =
+    if n == 0 then (0, 0, 0)
+    else
+      let first = owned_vec_get v 0 in
+      scan 0 0 first first in
+  let mean = if n == 0 then 0 else sum / n in
+
+  // === Phase 2: variance (mean を使って偏差^2 を集計) ===
+  let rec var_acc = fn i -> fn acc ->
+    if i >= n then acc
+    else
+      let x = owned_vec_get v i in
+      let d = x - mean in
+      var_acc (i + 1) (acc + d * d) in
+  let variance = if n == 0 then 0 else (var_acc 0 0) / n in
+
+  // === Phase 3: median (insertion sort → 中央値抽出) ===
+  let rec build_sorted = fn i -> fn acc ->
+    if i >= n then acc
+    else build_sorted (i + 1) (insert_sorted acc (owned_vec_get v i)) in
+  let sorted = build_sorted 0 (Nil: int list) in
+  let rec list_nth = fn (xs: int list) -> fn (k: int) ->
+    match xs with
+    | Nil -> 0
+    | Cons (h, t) -> if k <= 0 then h else list_nth t (k - 1) in
+  let median = if n == 0 then 0 else list_nth sorted (n / 2) in
+
+  // === tail: scalar tuple (NLL Level 2 のチャンス) ===
+  // Level 1: v は scope 末まで生きる (data buffer + struct = 数百 bytes 〜)
+  // Level 2: median の計算が終わった時点で v は最後の使用が終わっており、
+  //          drop できる。 sorted (int list) はこの後 tail まで使うが、
+  //          v は不要。
+  (n, sum, mean, variance, max_v, min_v, median);
+
+let show_stats = fn label -> fn s ->
+  let (n, sum, mean, variance, max_v, min_v, median) = s in
+  let _ = print ("=== " ++ label ++ " ===") in
+  let _ = print ("  n = " ++ show n) in
+  let _ = print ("  sum = " ++ show sum) in
+  let _ = print ("  mean = " ++ show mean) in
+  let _ = print ("  variance = " ++ show variance) in
+  let _ = print ("  min = " ++ show min_v) in
+  let _ = print ("  max = " ++ show max_v) in
+  print ("  median = " ++ show median);
+
+let _ = show_stats "small dataset" (stats [4, 1, 7, 2, 8, 3, 5]);
+let _ = show_stats "uniform" (stats [10, 10, 10, 10, 10]);
+let _ = show_stats "with negatives" (stats [(0 - 5), 3, (0 - 2), 8, 1, (0 - 7), 4]);
+let _ = show_stats "single value" (stats [42]);
+let _ = show_stats "empty" (stats (Nil: int list));
+
+0

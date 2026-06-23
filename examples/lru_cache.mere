@@ -1,0 +1,118 @@
+// lru_cache: 容量制限付き LRU (Least Recently Used) キャッシュ
+//
+// 実装:
+//   - storage: Map[str, str]  キー → 値
+//   - access:  Map[str, int]  キー → 最終アクセス時刻 (tick)
+//   - tick:    Map[str, int]  "tick" → 現在の時刻カウンタ
+//
+// 容量超過時、 最も古い access の key を evict。
+//
+// dogfood goal: NLL / trait / effect の痛みが顕在化するか観察
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let cache_new = fn (cap: int) ->
+  let storage = map_new () in
+  let access = map_new () in
+  let _ = map_set access "_tick" 0 in
+  let _ = map_set access "_cap" cap in
+  (storage, access);
+
+// 次の tick を発行
+let bump_tick = fn access ->
+  let t = (map_get access "_tick") + 1 in
+  let _ = map_set access "_tick" t in
+  t;
+
+// 最も古い access の key を探す ("_" 始まりの内部 key は除外)
+//
+// 痛み観察 (dogfood note #1): Map V 型は uniform。 key (str) と min_tick (int)
+// を 1 Map に同居できないので、 2 つの Map で分けるか str に encode する必要
+// あり。 ad-hoc multi-value Map / sum-typed Map value が欲しくなる場面。
+let find_lru_key = fn access ->
+  let best_key = map_new () in
+  let best_tick = map_new () in
+  let _ = map_set best_key "k" "" in
+  let _ = map_set best_tick "t" 999999 in
+  // 痛み観察 (dogfood note #2): map_delete builtin が無いため、 削除を
+  // sentinel value (-1) で表現。 find_lru_key は v > 0 でフィルタする必要あり。
+  // user-defined Map なら delete 操作を持てるが、 builtin Map に delete を
+  // 追加すべき trigger としては存在。
+  let _ = map_iter access (fn k -> fn v ->
+    let starts_underscore =
+      if str_len k == 0 then false
+      else char_at k 0 == "_" in
+    if not starts_underscore && v > 0 then
+      if v < (map_get best_tick "t") then
+        let _ = map_set best_key "k" k in
+        let _ = map_set best_tick "t" v in
+        ()
+      else ()
+    else ()) in
+  map_get best_key "k";
+
+let put = fn cache -> fn (key: str) -> fn (value: str) ->
+  let storage = fst cache in
+  let access = snd cache in
+  // 既存 key の更新 or 新規追加
+  let exists = map_has storage key in
+  let _ = map_set storage key value in
+  let t = bump_tick access in
+  let _ = map_set access key t in
+  // 容量チェック (実 user key の数 = access 全 entry から内部 _key を引く)
+  if not exists then
+    let total = map_len access in
+    // _tick / _cap の 2 つを除外
+    let user_count = total - 2 in
+    let cap = map_get access "_cap" in
+    if user_count > cap then
+      let lru = find_lru_key access in
+      let _ = map_set storage lru "" in     // 削除を表現する placeholder
+      // 真の delete が無いので "_deleted_<key>" flag に倒す
+      let _ = map_set access lru (0 - 1) in  // mark as deleted (negative tick)
+      let _ = map_set access ("_deleted_" ++ lru) 1 in
+      ()
+    else ()
+  else ();
+
+let get = fn cache -> fn (key: str) ->
+  let storage = fst cache in
+  let access = snd cache in
+  if map_has storage key && (map_get access key) > 0 then
+    let t = bump_tick access in
+    let _ = map_set access key t in
+    Some (map_get storage key)
+  else None;
+
+let show_get = fn cache -> fn (key: str) ->
+  match get cache key with
+  | Some v -> "got \"" ++ v ++ "\""
+  | None -> "miss";
+
+let _ = print "=== LRU cache (capacity 3) ===";
+let c = cache_new 3;
+let _ = put c "a" "apple";
+let _ = put c "b" "banana";
+let _ = put c "c" "cherry";
+
+let _ = print ("size after 3 inserts: a/b/c");
+let _ = print ("get a = " ++ show_get c "a");  // hit, refresh a
+let _ = print ("get b = " ++ show_get c "b");  // hit, refresh b
+
+// "d" を追加すると、 access 最古の "c" が evict されるはず
+let _ = put c "d" "date";
+let _ = print "--- after insert d (c should be evicted) ---";
+let _ = print ("get a = " ++ show_get c "a");  // hit
+let _ = print ("get b = " ++ show_get c "b");  // hit
+let _ = print ("get c = " ++ show_get c "c");  // miss (evicted)
+let _ = print ("get d = " ++ show_get c "d");  // hit
+
+// "e" を追加すると、 a が最古 (b/d より前にアクセス) なので a が evict
+let _ = put c "e" "elderberry";
+let _ = print "--- after insert e (a should be evicted) ---";
+let _ = print ("get a = " ++ show_get c "a");  // miss
+let _ = print ("get b = " ++ show_get c "b");
+let _ = print ("get d = " ++ show_get c "d");
+let _ = print ("get e = " ++ show_get c "e");
+
+0
