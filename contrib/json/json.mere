@@ -3,12 +3,22 @@
 // stdlib (str ops + is_digit + try_or + fail) と user-defined sum types
 // + 多相 list / pattern matching + 相互再帰 fn の組み合わせで実装。
 //
-// Phase 40 (contrib stage 2): examples/json_parser.mere から移設。 prelude が
-// `type 'a list` を提供するようになったため、 redundant な再宣言を削除。
+// Phase 40 (contrib stage 2): examples/json_parser.mere から移設。
+// Phase 41: qualified pattern match の 4 backend codegen 対応に伴い、
+// 本 lib を `module Json { ... }` で wrap して名前空間化。
 //
-// 使い方: このファイルをユーザ project にコピーすると、 top-level に
-// `type json` と `parse_json: str -> json` が available になる。 末尾の
-// self-test ブロック (`let run_case = ...` 以下) は実 use 時に削除して構わない。
+// 使い方:
+//   import "contrib/json/json.mere";
+//   let v = Json.parse_json "[1, 2]";
+//   match v with
+//   | Json.JArr xs -> ...
+//   | Json.JNull -> ...
+//   | _ -> ...
+//
+// 末尾の self-test ブロック (`let run_case = ...` 以下) は demo として残し、
+// `Json` module の外側に書いてある。 実 use 時に削除して構わない。
+
+module Json {
 
 type json =
   | JNull
@@ -150,10 +160,12 @@ let parse_json = fn (s: str) ->
     then fail ("trailing input at pos " ++ str_of_int i)
   else v;
 
-// === Self-tests ===
+};   // end of `module Json`
+
+// === Self-tests (module の外側、 demo として残置。 実 use 時は削除) ===
 
 let run_case = fn (name: str, s: str) ->
-  let result = try_or (fn () -> show (parse_json s)) "<error>" in
+  let result = try_or (fn () -> show (Json.parse_json s)) "<error>" in
   print (name ++ " | " ++ s ++ " => " ++ result);
 
 let _ = run_case "null"     "null";

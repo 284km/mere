@@ -8,24 +8,36 @@ Mere で書かれた JSON parse / serialize ライブラリ。 stdlib (`str_*` /
 
 | file | export | 行数 |
 |---|---|---|
-| `json.mere` | `type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj` + `parse_json: str -> json` | 約 180 行 |
-| `writer.mere` | `to_json_str: json -> str` + `to_pretty_str: json -> str` | 約 130 行 |
+| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj; parse_json: str -> json }` | 約 180 行 |
+| `writer.mere` | `to_json_str: json -> str` + `to_pretty_str: json -> str` (top-level、 module 化は将来) | 約 130 行 |
 
 ## 使い方 (pkg manager 完成前)
 
+```mere
+// import で取り込み (Phase 9.5 から動く)
+import "contrib/json/json.mere";
+
+let v = Json.parse_json "[1, 2, 3]" in
+match v with
+| Json.JArr xs -> ...
+| Json.JNull -> ...
+| _ -> ...
+```
+
+または **copy-paste** で project に取り込み:
+
 ```sh
-# ユーザ project に copy paste
 cp contrib/json/json.mere    my_project/
 cp contrib/json/writer.mere  my_project/
 ```
 
-各ファイル末尾の self-test ブロック (`case_v` で始まる demo / `let doc = …` 等)
+各ファイル末尾の self-test ブロック (`run_case` で始まる demo / `let doc = …` 等)
 は実 use 時に削除して良い。
 
-`parse_json` と `to_json_str` を同じ project で使う場合は、 **`json.mere` の
-`type json = …` 宣言を 1 箇所に統合する** 必要あり (Mere は同名 type の
-multiple declaration を最新で上書きするので、 後勝ちで動くがソース merge が
-推奨)。
+`writer.mere` はまだ `module` 化していない (top-level に `to_json_str` /
+`to_pretty_str` を export)。 これは旧 `examples/` 時代の構造で、 Phase 41 で
+qualified pattern match が 4 backend codegen に対応したため、 将来は writer も
+`module JsonWriter { ... }` に書き直す予定。
 
 ## サポート範囲
 

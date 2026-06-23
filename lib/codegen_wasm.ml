@@ -2123,17 +2123,19 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
     ) decl_fields;
     emit_instr (Printf.sprintf "local.get %d" dst_slot)
-  | Ast.Constr (cname, arg_opt) ->
+  | Ast.Constr (raw_cname, arg_opt) ->
+    (* Phase 41: canonicalize `M.Foo` for Typer / variant_tags lookups *)
+    let cname = Ast.canonical_ctor raw_cname in
     let info =
       match Hashtbl.find_opt Typer.constructors cname with
       | Some i -> i
-      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ cname)
+      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname)
     in
     let type_name = info.Typer.type_name in
     let tag =
       match Hashtbl.find_opt variant_tags cname with
       | Some t -> t
-      | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
+      | None -> unsupported e.Ast.loc ("constructor without tag: " ^ raw_cname)
     in
     (* Phase 26.0: cell size is 8 bytes whenever the variant has any
        payload-bearing ctor (uniform layout `{i32 tag, i32 payload_i32}`).
@@ -2264,11 +2266,13 @@ let rec emit_expr (e : Ast.expr) : unit =
         let cond = List.fold_left combine_and (true_cond ()) conds in
         let bs = List.concat_map snd conds_bs in
         (cond, bs)
-      | Ast.P_constr (cname, sub) ->
+      | Ast.P_constr (raw_cname, sub) ->
+        (* Phase 41: canonicalize `M.Foo` pattern → `Foo` for ctor lookup *)
+        let cname = Ast.canonical_ctor raw_cname in
         let info =
           match Hashtbl.find_opt Typer.constructors cname with
           | Some i -> i
-          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname)
         in
         let _type_name = info.Typer.type_name in
         (* Phase 26.0: per-ctor payload type. For poly variants, walk

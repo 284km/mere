@@ -130,6 +130,18 @@ let c_reserved_keywords =
    "_Thread_local"; "_Alignas"; "_Alignof"; "_Generic"; "_Noreturn";
    "main"]
 let c_safe_name (n : string) : string =
+  (* Phase 41: module-qualified name (`M.foo`) を C 識別子に変換。 `.` は
+     C で識別子に使えないので `__` に置換 (`M.foo` → `M__foo`)。 入れ子
+     module (`A.B.foo`) も同様に `A__B__foo` に flatten される。 *)
+  let n =
+    if String.contains n '.' then begin
+      let b = Buffer.create (String.length n) in
+      String.iter (fun c ->
+        if c = '.' then Buffer.add_string b "__"
+        else Buffer.add_char b c) n;
+      Buffer.contents b
+    end else n
+  in
   if List.mem n c_reserved_keywords then n ^ "_" else n
 
 (* Variant types whose constructors carry payload referencing the same
@@ -391,7 +403,9 @@ let mangled_inst_name (base : string) (arrow : Ast.ty) : string =
     | _ -> List.rev (t :: acc)
   in
   let tys = collect_tys arrow [] in
-  base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
+  (* Phase 41: base が module-qualified (`Json.rev_aux`) なら C identifier 化
+     してから mono suffix を付ける (`Json__rev_aux__list_json__...`)。 *)
+  c_safe_name base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
 
 (* Specialized struct name for a polymorphic variant at given args. *)
 let mono_variant_name (name : string) (args : Ast.ty list) : string =
@@ -433,7 +447,9 @@ let is_ptr_ty (v_ty : Ast.ty) : bool =
 
 (* For a value of `v_ty` (assumed to be a variant), return the payload
    type of constructor `cname` (with type-params substituted). *)
-let payload_ty_for_ctor (v_ty : Ast.ty) (cname : string) : Ast.ty option =
+let payload_ty_for_ctor (v_ty : Ast.ty) (raw_cname : string) : Ast.ty option =
+  (* Phase 41: canonicalize qualified `M.Foo` → `Foo`. *)
+  let cname = Ast.canonical_ctor raw_cname in
   match Ast.walk v_ty with
   | Ast.TyCon (tname, args) when Hashtbl.mem polymorphic_variants tname ->
     let (params, variants) = Hashtbl.find polymorphic_variants tname in
@@ -2168,11 +2184,15 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
          (emit_expr f) (emit_expr arg)))
-  | Ast.Constr (name, arg_opt) ->
+  | Ast.Constr (raw_name, arg_opt) ->
+    (* Phase 41: qualified ctor (`M.Foo`) を canonical (`Foo`) に正規化してから
+       Typer.constructors / variant_tags を引く。 これで module 内の type 宣言
+       で構築される alias 経由の qualified call が 4 backend で動くようになる。 *)
+    let name = Ast.canonical_ctor raw_name in
     let info =
       try Hashtbl.find Typer.constructors name
       with Not_found ->
-        unsupported e.loc ("unknown constructor: " ^ name)
+        unsupported e.loc ("unknown constructor: " ^ raw_name)
     in
     let tag = Hashtbl.find variant_tags name in
     let type_name = info.Typer.type_name in
@@ -2406,11 +2426,13 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
   | Ast.P_str s ->
     (Printf.sprintf "(strcmp((%s), %s) == 0)" v_c (Ast.escape_string s), "")
   | Ast.P_unit -> ("1", "")
-  | Ast.P_constr (cname, sub_opt) ->
+  | Ast.P_constr (raw_cname, sub_opt) ->
+    (* Phase 41: qualified ctor pattern (`| M.Foo -> ...`) を canonical 化 *)
+    let cname = Ast.canonical_ctor raw_cname in
     let tag =
       try Hashtbl.find variant_tags cname
       with Not_found ->
-        unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ cname)
+        unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ raw_cname)
     in
     let dot = if is_ptr_ty v_ty then "->" else "." in
     let tag_test = Printf.sprintf "(%s)%stag == %d" v_c dot tag in
@@ -3141,7 +3163,11 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         subst_variants params args vs
       else
         Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
-          if info.type_name = name then (cname, info.arg) :: acc else acc)
+          (* Phase 41: alias_ctor が `Json.JNull` も registers するので、
+             show fn の iteration では canonical bare name のみ採用して重複を避ける。 *)
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc
+          else acc)
           Typer.constructors []
     in
     let is_ptr = is_recursive_variant cty in

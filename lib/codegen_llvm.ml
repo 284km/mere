@@ -1428,7 +1428,9 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.ty with Some t -> walk_ty t | None -> ());
     (match e.Ast.node with
-     | Ast.Constr (cname, _) ->
+     | Ast.Constr (raw_cname, _) ->
+       (* Phase 41: canonicalize `M.Foo` → `Foo` for Typer lookup *)
+       let cname = Ast.canonical_ctor raw_cname in
        (match Hashtbl.find_opt Typer.constructors cname with
         | Some info -> add info.Typer.type_name
         | None -> ())
@@ -4121,11 +4123,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         apply r rest
     in
     apply bv updates
-  | Ast.Constr (cname, arg_opt) ->
+  | Ast.Constr (raw_cname, arg_opt) ->
+    (* Phase 41: canonicalize `M.Foo` for Typer / variant_tags lookups *)
+    let cname = Ast.canonical_ctor raw_cname in
     let info =
       match Hashtbl.find_opt Typer.constructors cname with
       | Some i -> i
-      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ cname)
+      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname)
     in
     let type_name = info.Typer.type_name in
     if not (Hashtbl.mem Typer.types type_name) then
@@ -4354,11 +4358,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
               (List.rev_append bs acc_bs) (List.rev_append tys acc_tys) rest
         in
         go "1" [] [] sub_fields
-      | Ast.P_constr (cname, sub) ->
+      | Ast.P_constr (raw_cname, sub) ->
+        (* Phase 41: canonicalize `M.Foo` pattern → `Foo` for ctor lookup *)
+        let cname = Ast.canonical_ctor raw_cname in
         let info =
           match Hashtbl.find_opt Typer.constructors cname with
           | Some i -> i
-          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname)
         in
         let type_name = info.Typer.type_name in
         let struct_name =

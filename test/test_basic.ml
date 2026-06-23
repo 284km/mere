@@ -4140,6 +4140,37 @@ let () =
       Pipeline.process
         "import \"/nonexistent/path/foo.lang\";\n42");
 
+  (* --- Phase 41: qualified ctor pattern in 4 backend codegen (Ast.canonical_ctor
+     を Constr / P_constr lookup に適用したので `match v with | M.A -> ...` が
+     C / LLVM / Wasm で動く。 DEFERRED §4.1 の qualified pattern gap fix。 *)
+  check "module: qualified ctor construction + pattern (interp)"
+    (Pipeline.process
+       "module Color { type t = Red | Green | Blue | Mix of int; };\n\
+        let c1 = Color.Red in\n\
+        let n = match c1 with\n\
+        | Color.Red -> 1\n\
+        | Color.Green -> 2\n\
+        | Color.Blue -> 3\n\
+        | Color.Mix k -> 100 + k in n") "1";
+  check "module: qualified ctor with payload pattern (interp)"
+    (Pipeline.process
+       "module Color { type t = Red | Mix of int; };\n\
+        let c = Color.Mix 7 in\n\
+        match c with | Color.Red -> 0 | Color.Mix k -> 100 + k") "107";
+  check "module: bare ctor name still works via alias backward compat"
+    (Pipeline.process
+       "module Color { type t = Red | Green; };\n\
+        let c = Red in match c with | Red -> 1 | Green -> 2") "1";
+  (* C codegen でも qualified pattern が emit されることを確認 *)
+  assert_contains "module: C codegen — qualified ctor name uses `__` separator"
+    (Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (let prog = Pipeline.parse_program
+          "module Color { type t = Red | Green; let to_int = fn c -> match c with | Red -> 1 | Green -> 2; };\n\
+           Color.to_int Color.Red" in
+        let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+        prog))
+    "Color__to_int";
+
   (* --- Phase 11.1: 借用注釈の細分化 (Q-004 narrowed) --- *)
   (* デフォルト `&R T` は BorrowedRead (shared read)、syntax 上は無印。 *)
   check "borrow: &R T parses as default (borrowed/shared-read)"
