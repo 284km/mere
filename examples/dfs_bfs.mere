@@ -18,35 +18,22 @@ let rec neighbors = fn (edges: edge list) -> fn (u: int) ->
     else if b == u then Cons (a, neighbors rest u)
     else neighbors rest u;
 
-// DFS: iterative + stack (Map-based)。 BFS と同じ構造で policy のみ違う —
-// stack は LIFO で末尾を pop、 queue は FIFO で先頭を pop。
-// recursive 版だと inner-lifted fn の closure capture が C codegen で
-// 漏れるため、 explicit stack version で実装。
+// DFS: 再帰版 (Phase 39.A2 で inner-lifted fn を value 位置で使えるよう
+// なったため、 visited / order を closure に capture した visit を
+// list_iter に直接渡せる natural style)。
 let dfs = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   let visited = map_new () in
-  let stk = map_new () in
-  let _ = map_set stk "size" 1 in
-  let _ = map_set stk "0" source in
   let order = map_new () in
   let _ = map_set order "count" 0 in
-  let _ = while (map_get stk "size") > 0 do
-    let sz = map_get stk "size" in
-    let top_idx = sz - 1 in
-    let u = map_get stk (show top_idx) in
-    let _ = map_set stk "size" top_idx in
+  let rec visit = fn u ->
     if map_has visited (show u) then ()
     else
       let _ = map_set visited (show u) 1 in
       let c = map_get order "count" in
       let _ = map_set order (show c) u in
       let _ = map_set order "count" (c + 1) in
-      list_iter (neighbors edges u) (fn v ->
-        if map_has visited (show v) then ()
-        else
-          let s = map_get stk "size" in
-          let _ = map_set stk (show s) v in
-          let _ = map_set stk "size" (s + 1) in
-          ()) in
+      list_iter (neighbors edges u) visit in
+  let _ = visit source in
   let _ = n in
   order;
 

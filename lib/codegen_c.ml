@@ -252,6 +252,15 @@ let inner_lifts : (string, lifted_inner) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host : (string, (string, lifted_inner) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
 let current_host_fn : string ref = ref ""
+
+(* Phase 39.A2 (DEFERRED patterns.md §8): inner-lifted fn を value 位置で
+   使えるよう、 per-fn の env 構造体 + adapter 関数を一度だけ emit する。
+   emit_expr は c_type_of の前で定義されているため、 各 use 位置で
+   (lifted_name, captures, arg_ty, ret_ty) を pending list に積み、
+   emit_program で typedef + adapter 本体を生成する。 *)
+let inner_lift_closures_emitted : (string, unit) Hashtbl.t = Hashtbl.create 4
+let inner_lift_closure_pending :
+  (string * (string * Ast.ty) list * Ast.ty * Ast.ty) list ref = ref []
 let set_inner_lifts_for_host (host : string) : unit =
   Hashtbl.reset inner_lifts;
   (match Hashtbl.find_opt inner_lifts_by_host host with
@@ -1111,9 +1120,54 @@ let rec emit_expr (e : Ast.expr) : string =
      | None ->
        if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
        else if Hashtbl.mem inner_lifts name then
-         unsupported e.loc
-           ("inner-lifted fn `" ^ name ^
-            "` used as a value — only direct calls are supported (Phase 4.9-a)")
+         (* Phase 39.A2 (DEFERRED patterns.md §8): inner-lifted fn を value
+            位置で使えるよう materialize。 env 構造体に capture を詰めて
+            closure 値 `{env_ptr, &adapter_fn}` を返す。 adapter は env を
+            unpack して lifted_name(cap1, ..., arg) を呼ぶ。 *)
+         let li = Hashtbl.find inner_lifts name in
+         (match e.Ast.ty with
+          | Some t ->
+            (match Ast.walk t with
+             | Ast.TyArrow (arg_ty, ret_ty) ->
+               let arg_ty = Ast.walk arg_ty in
+               let ret_ty = Ast.walk ret_ty in
+               let env_struct_name = li.lifted_name ^ "_env" in
+               let adapter_name = li.lifted_name ^ "_inner_closure_fn" in
+               (* per-fn で 1 度だけ pending に積む (emit_program で c_type_of
+                  経由で env typedef + adapter 本体を生成) *)
+               if not (Hashtbl.mem inner_lift_closures_emitted li.lifted_name) then begin
+                 Hashtbl.add inner_lift_closures_emitted li.lifted_name ();
+                 inner_lift_closure_pending :=
+                   (li.lifted_name, li.captures, arg_ty, ret_ty)
+                   :: !inner_lift_closure_pending
+               end;
+               (* 使用位置: env alloc + 各 capture の現在値を store + closure 値 *)
+               let closure_struct = closure_struct_name arg_ty ret_ty in
+               let store_caps =
+                 String.concat " "
+                   (List.map (fun (n, _) ->
+                      let v =
+                        match List.assoc_opt n !current_env_subst with
+                        | Some s -> s
+                        | None -> c_safe_name n
+                      in
+                      Printf.sprintf "__env_local->%s = %s;" (c_safe_name n) v)
+                      li.captures)
+               in
+               (* GCC statement expression: 最後の expression が値、
+                  semicolon は問題なし。 0-capture でも store_caps が空文字
+                  なら ` ` の隙間が入るだけで構文 OK。 *)
+               Printf.sprintf
+                 "({ %s* __env_local = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s(%s){.env = __env_local, .fn = %s}; })"
+                 env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
+             | _ ->
+               unsupported e.loc
+                 ("inner-lifted fn `" ^ name ^
+                  "` used as a value — type is not an arrow (Phase 39.A2)"))
+          | None ->
+            unsupported e.loc
+              ("inner-lifted fn `" ^ name ^
+               "` used as a value — missing inferred type (Phase 39.A2)"))
        else c_safe_name name))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
@@ -4701,6 +4755,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset polymorphic_variants;
   Hashtbl.reset mono_variant_instances;
   Hashtbl.reset polymorphic_records;
+  Hashtbl.reset inner_lift_closures_emitted;
+  inner_lift_closure_pending := [];
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   Hashtbl.reset owned_vec_instances;
@@ -5226,18 +5282,66 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Printf.sprintf "extern const %s %s_as_value;" cstruct (c_safe_name f.name))
       fns
   in
+  (* Phase 39.A2: generate env typedef + adapter body for each
+     inner-lifted fn used as a value. *)
+  let inner_lift_closure_decls =
+    List.rev_map (fun (lifted_name, captures, _arg_ty, _ret_ty) ->
+      let env_struct_name = lifted_name ^ "_env" in
+      let env_fields =
+        if captures = [] then "char __unused;"  (* 0-capture でも sizeof > 0 *)
+        else
+          String.concat " "
+            (List.map (fun (n, ty) ->
+               Printf.sprintf "%s %s;" (c_type_of ty) (c_safe_name n))
+               captures)
+      in
+      Printf.sprintf "typedef struct { %s } %s;" env_fields env_struct_name
+    ) !inner_lift_closure_pending
+  in
+  let inner_lift_closure_adapter_forward_decls =
+    List.rev_map (fun (lifted_name, _captures, arg_ty, ret_ty) ->
+      let adapter_name = lifted_name ^ "_inner_closure_fn" in
+      Printf.sprintf "static %s %s(void* __env_p, %s __inner_arg);"
+        (c_type_of ret_ty) adapter_name (c_type_of arg_ty)
+    ) !inner_lift_closure_pending
+  in
   let forward_decls =
     List.map emit_fn_forward_decl fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
     @ closure_adapter_forward_decls
     @ closure_wrapper_forward_decls
     @ show_fn_forward_decls
+    @ inner_lift_closure_adapter_forward_decls
+  in
+  let inner_lift_closure_adapters =
+    List.rev_map (fun (lifted_name, captures, arg_ty, ret_ty) ->
+      let env_struct_name = lifted_name ^ "_env" in
+      let adapter_name = lifted_name ^ "_inner_closure_fn" in
+      let unpack =
+        String.concat " "
+          (List.map (fun (n, _) ->
+             Printf.sprintf "__auto_type %s = __env_self->%s;"
+               (c_safe_name n) (c_safe_name n))
+             captures)
+      in
+      let cap_args =
+        String.concat ", "
+          (List.map (fun (n, _) -> c_safe_name n) captures
+           @ [c_safe_name "__inner_arg"])
+      in
+      Printf.sprintf
+        "static %s %s(void* __env_p, %s %s) { %s* __env_self = __env_p; (void)__env_self; %s return %s(%s); }"
+        (c_type_of ret_ty) adapter_name (c_type_of arg_ty)
+        (c_safe_name "__inner_arg")
+        env_struct_name unpack lifted_name cap_args
+    ) !inner_lift_closure_pending
   in
   let fn_defs =
     fn_defs_main
     @ closure_adapters
     @ closure_wrappers
     @ show_fn_defs
+    @ inner_lift_closure_adapters
   in
   (* Phase 15.2: vec_instances is populated during fn / main emission
      via c_type_of and emit_expr. Emit one runtime block per element
@@ -5338,6 +5442,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
     @ (if mono_record_struct_bodies = [] then [] else mono_record_struct_bodies @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
+    @ (if inner_lift_closure_decls = [] then []
+       else inner_lift_closure_decls @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /
        record / variant bodies. OwnedVec registry先行 (各 _new が参照)。 *)

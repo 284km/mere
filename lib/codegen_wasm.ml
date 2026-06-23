@@ -308,6 +308,13 @@ type lifted_inner_wasm = {
 let inner_lifts_wasm : (string, lifted_inner_wasm) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host_wasm : (string, (string, lifted_inner_wasm) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
+
+(* Phase 39.A2 (Wasm port): inner-lifted fn を value 位置で。 各 fn 1 つに対し
+   adapter を fn table に登録、 use 位置で env を bump heap に alloc + capture
+   を store + closure 値 (env_offset, table_idx) を memory に書く。 *)
+let inner_lift_closures_emitted_wasm : (string, int) Hashtbl.t = Hashtbl.create 4
+let inner_lift_closure_pending_wasm :
+  (string * string list * int) list ref = ref []
 let set_inner_lifts_for_host_wasm (host : string) : unit =
   Hashtbl.reset inner_lifts_wasm;
   (match Hashtbl.find_opt inner_lifts_by_host_wasm host with
@@ -1200,6 +1207,62 @@ let rec emit_expr (e : Ast.expr) : unit =
      | None when Hashtbl.mem top_globals_wasm name ->
        (* Phase 30.2c: top-level non-fn let as a Wasm global *)
        emit_instr (Printf.sprintf "global.get $%s" name)
+     | None when Hashtbl.mem inner_lifts_wasm name ->
+       (* Phase 39.A2: inner-lifted fn を value 位置で materialize。
+          env を bump heap に alloc + capture を store + closure 値
+          (env_offset, fn_idx) を 8 bytes 構造体として bump heap に書く。 *)
+       let li = Hashtbl.find inner_lifts_wasm name in
+       let cap_count = List.length li.captures in
+       let env_size = max 4 (cap_count * 4) in
+       let table_idx =
+         match Hashtbl.find_opt inner_lift_closures_emitted_wasm li.lifted_name with
+         | Some idx -> idx
+         | None ->
+           let adapter_name = li.lifted_name ^ "_inner_closure_fn" in
+           let idx = register_in_table adapter_name in
+           Hashtbl.add inner_lift_closures_emitted_wasm li.lifted_name idx;
+           inner_lift_closure_pending_wasm :=
+             (li.lifted_name, li.captures, idx)
+             :: !inner_lift_closure_pending_wasm;
+           idx
+       in
+       (* env 領域確保 *)
+       let env_base = fresh_local () in
+       emit_instr "global.get $__lang_bump";
+       emit_instr (Printf.sprintf "local.set %d" env_base);
+       emit_instr (Printf.sprintf "local.get %d" env_base);
+       emit_instr (Printf.sprintf "i32.const %d" env_size);
+       emit_instr "i32.add";
+       emit_instr "global.set $__lang_bump";
+       (* 各 capture を env field に store *)
+       List.iteri (fun i cn ->
+         let cv_slot =
+           match List.assoc_opt cn !locals with
+           | Some s -> s
+           | None ->
+             unsupported e.Ast.loc
+               ("inner-lifted fn `" ^ name ^ "` の capture `" ^ cn
+                ^ "` を解決できません (Wasm Phase 39.A2 MVP — local のみ対応)")
+         in
+         emit_instr (Printf.sprintf "local.get %d" env_base);
+         emit_instr (Printf.sprintf "local.get %d" cv_slot);
+         emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
+       ) li.captures;
+       (* closure value `{env_offset, fn_table_idx}` を bump heap に *)
+       let cl_base = fresh_local () in
+       emit_instr "global.get $__lang_bump";
+       emit_instr (Printf.sprintf "local.set %d" cl_base);
+       emit_instr (Printf.sprintf "local.get %d" cl_base);
+       emit_instr "i32.const 8";
+       emit_instr "i32.add";
+       emit_instr "global.set $__lang_bump";
+       emit_instr (Printf.sprintf "local.get %d" cl_base);
+       emit_instr (Printf.sprintf "local.get %d" env_base);
+       emit_instr "i32.store offset=0";
+       emit_instr (Printf.sprintf "local.get %d" cl_base);
+       emit_instr (Printf.sprintf "i32.const %d" table_idx);
+       emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" cl_base)
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
@@ -4520,6 +4583,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   inner_fn_counter_wasm := 0;
   lifted_fns_wasm := [];
   current_host_fn_wasm := "";
+  Hashtbl.reset inner_lift_closures_emitted_wasm;
+  inner_lift_closure_pending_wasm := [];
   Hashtbl.reset multi_inst_fns_wasm;
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
@@ -4799,6 +4864,24 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   drain ();
   let anon_adapters = List.rev !anon_adapters in
+  (* Phase 39.A2: Inner-lifted fn 用 adapter を WAT として生成。
+     adapter は env_offset + arg を受けて、 env から caps を load し、
+     lifted fn を caps... + arg で call する。 *)
+  let inner_lift_adapter_strs =
+    List.rev_map (fun (lifted_name, captures, _idx) ->
+      let load_caps =
+        List.mapi (fun i _ ->
+          Printf.sprintf
+            "    local.get 0\n    i32.load offset=%d"
+            (i * 4))
+          captures
+        |> String.concat "\n"
+      in
+      Printf.sprintf
+        "  (func $%s_inner_closure_fn (param i32) (param i32) (result i32)\n%s\n    local.get 1\n    call $%s)"
+        lifted_name load_caps lifted_name
+    ) !inner_lift_closure_pending_wasm
+  in
   (* Phase 16.3 / DEFERRED §1.5: Logger / Metrics runtime — register
      helper fns in the table now (after main body has populated
      table_entries with user closures), so their indices are stable.
@@ -4925,7 +5008,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all

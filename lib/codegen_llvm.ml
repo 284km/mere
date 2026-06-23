@@ -509,6 +509,12 @@ type lifted_inner_llvm = {
 let inner_lifts_llvm : (string, lifted_inner_llvm) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host_llvm : (string, (string, lifted_inner_llvm) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
+
+(* Phase 39.A2 (LLVM port): per-fn の env struct + adapter を生成。 各 use 位置
+   で env を alloc + capture 値を store + closure 値を構築。 *)
+let inner_lift_closures_emitted_llvm : (string, unit) Hashtbl.t = Hashtbl.create 4
+let inner_lift_closure_pending_llvm :
+  (string * (string * Ast.ty) list * Ast.ty * Ast.ty) list ref = ref []
 let set_inner_lifts_for_host_llvm (host : string) : unit =
   Hashtbl.reset inner_lifts_llvm;
   (match Hashtbl.find_opt inner_lifts_by_host_llvm host with
@@ -2414,6 +2420,72 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
        r
+     | None when Hashtbl.mem inner_lifts_llvm name ->
+       (* Phase 39.A2: inner-lifted fn を value 位置で materialize。
+          env を default region に alloc + capture を store + closure 値を
+          insertvalue 連鎖で構築。 *)
+       let li = Hashtbl.find inner_lifts_llvm name in
+       (match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyArrow (arg_ty, ret_ty) ->
+             let arg_ty = Ast.walk arg_ty in
+             let ret_ty = Ast.walk ret_ty in
+             let env_struct_name = li.lifted_name ^ "_env" in
+             let adapter_name = li.lifted_name ^ "_inner_closure_fn" in
+             if not (Hashtbl.mem inner_lift_closures_emitted_llvm li.lifted_name)
+             then begin
+               Hashtbl.add inner_lift_closures_emitted_llvm li.lifted_name ();
+               inner_lift_closure_pending_llvm :=
+                 (li.lifted_name, li.captures, arg_ty, ret_ty)
+                 :: !inner_lift_closure_pending_llvm
+             end;
+             (* sizeof env: GEP null, i32 1 → ptr at offset = sizeof env *)
+             let size_r = fresh_reg () in
+             emit_instr (Printf.sprintf
+                           "  %s = getelementptr %%%s, ptr null, i32 1"
+                           size_r env_struct_name);
+             let size_int = fresh_reg () in
+             emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64"
+                           size_int size_r);
+             let env_p = fresh_reg () in
+             emit_instr (Printf.sprintf
+                           "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                           env_p size_int);
+             (* 各 capture を env field に store *)
+             List.iteri (fun i (cn, cty) ->
+               let cv =
+                 match List.assoc_opt cn env with
+                 | Some r -> r
+                 | None ->
+                   (* 自由変数: 上位スコープから resolve できないので unsupported
+                      にする。 これは synthesize 側の制限 (Phase 39.A2 MVP)。 *)
+                   unsupported e.Ast.loc
+                     ("inner-lifted fn `" ^ name
+                      ^ "` の capture `" ^ cn ^ "` を解決できません (Phase 39.A2 MVP)")
+               in
+               let gep = fresh_reg () in
+               emit_instr (Printf.sprintf
+                             "  %s = getelementptr %%%s, ptr %s, i32 0, i32 %d"
+                             gep env_struct_name env_p i);
+               emit_instr (Printf.sprintf "  store %s %s, ptr %s"
+                             (llvm_ty_of cty) cv gep)
+             ) li.captures;
+             (* closure 値: {env=env_p, fn=&adapter} *)
+             let cname = closure_struct_name arg_ty ret_ty in
+             let r0 = fresh_reg () in
+             emit_instr (Printf.sprintf
+                           "  %s = insertvalue %%%s undef, ptr %s, 0"
+                           r0 cname env_p);
+             let r1 = fresh_reg () in
+             emit_instr (Printf.sprintf
+                           "  %s = insertvalue %%%s %s, ptr @%s, 1"
+                           r1 cname r0 adapter_name);
+             r1
+           | _ -> unsupported e.Ast.loc
+                    ("inner-lifted fn `" ^ name ^ "` 型が arrow でない"))
+        | None -> unsupported e.Ast.loc
+                    ("inner-lifted fn `" ^ name ^ "` の type が unknown"))
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
@@ -7027,6 +7099,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   anon_env_typedefs := [];
   anon_closure_counter := 0;
   current_var_types := [];
+  Hashtbl.reset inner_lift_closures_emitted_llvm;
+  inner_lift_closure_pending_llvm := [];
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset multi_inst_fns_llvm;
   Hashtbl.reset polymorphic_variants;
@@ -7529,6 +7603,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if !anon_env_typedefs = [] then []
        else List.rev !anon_env_typedefs @ [""])
+    @ (if !inner_lift_closure_pending_llvm = [] then []
+       else
+         List.rev_map (fun (lifted_name, captures, _, _) ->
+           let env_fields =
+             if captures = [] then "i8"  (* placeholder for zero-size *)
+             else
+               String.concat ", "
+                 (List.map (fun (_, ty) -> llvm_ty_of ty) captures)
+           in
+           Printf.sprintf "%%%s_env = type { %s }" lifted_name env_fields)
+         !inner_lift_closure_pending_llvm
+         @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ (if !show_string_globals = [] then []
        else List.rev !show_string_globals @ [""])
@@ -7598,6 +7684,39 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
     @ (if anon_adapters = [] then [] else anon_adapters @ [""])
+    @ (if !inner_lift_closure_pending_llvm = [] then []
+       else
+         (* Phase 39.A2: emit adapter body for each inner-lifted fn used as
+            value. Unpacks env into captures, calls lifted fn with
+            captures-followed-by-arg. *)
+         List.rev_map (fun (lifted_name, captures, arg_ty, ret_ty) ->
+           let arg_lty = llvm_ty_of arg_ty in
+           let ret_lty = llvm_ty_of ret_ty in
+           let env_ty = "%" ^ lifted_name ^ "_env" in
+           let unpack_instrs =
+             List.mapi (fun i (_, cty) ->
+               let cty_l = llvm_ty_of cty in
+               Printf.sprintf
+                 "  %%cap%d_p = getelementptr %s, ptr %%env_p, i32 0, i32 %d\n  %%cap%d = load %s, ptr %%cap%d_p"
+                 i env_ty i i cty_l i)
+               captures
+             |> String.concat "\n"
+           in
+           let call_args =
+             let cap_args =
+               List.mapi (fun i (_, cty) ->
+                 Printf.sprintf "%s %%cap%d" (llvm_ty_of cty) i) captures
+             in
+             String.concat ", " (cap_args @ [arg_lty ^ " %x"])
+           in
+           Printf.sprintf
+             "define %s @%s_inner_closure_fn(ptr %%env_p, %s %%x) {\nentry:\n%s\n  %%result = call %s @%s(%s)\n  ret %s %%result\n}"
+             ret_lty lifted_name arg_lty
+             unpack_instrs
+             ret_lty lifted_name call_args
+             ret_lty)
+         !inner_lift_closure_pending_llvm
+         @ [""])
     @ (let eta_lines =
          Hashtbl.fold (fun adapter (builtin, ret_ty) acc ->
            let ret_ll = llvm_ty_of ret_ty in

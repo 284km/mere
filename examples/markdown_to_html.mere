@@ -19,8 +19,10 @@ let starts_with = fn (s: str) -> fn (p: str) ->
   if str_len s < lp then false
   else substring s 0 lp == p;
 
-// Note: inner `let rec find_end` を closure 化すると s/n を capture して
-// C codegen で漏れるため、 top-level fn として書く (引数で s, n を渡す)。
+// Note: inner-lifted fn 同士で互いを参照する (go が find_double / find_single
+// を call) 場合、 capture chain が複雑になるため top-level fn として書く。
+// Phase 39.A2 は「inner-lifted fn を value 位置で」に対応したが、 inner-lifted
+// fn 同士の相互参照は依然 workaround が必要。
 let rec find_double = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
   if j + 1 >= n then j
   else if char_at s j == c && char_at s (j + 1) == c then j
