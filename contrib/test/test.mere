@@ -28,9 +28,9 @@
 //     (Mere 例外は `fail` のみ、 user code が fail すれば test runner も落ちる
 //     - 将来 try_or で wrap して continue する option を入れる)
 //
-// backend サポート: interp / C / LLVM の **3 backend で diff = 0**。 Wasm は
-// 当面非対応 (suite tuple `(Map, StrBuf)` が closure env に乗ると Wasm 側の
-// map_runtime に統合されておらず codegen error — Wasm の Map 統合は別 Phase)。
+// backend サポート: interp / C / LLVM / Wasm の **4 backend で diff = 0**
+// (Phase 43 で codegen_wasm.ml の ty_tag に Map case を追加し、 closure env /
+// tuple slot で Map を carrier として扱えるようになった)。
 
 module Test {
 
@@ -56,28 +56,14 @@ let assert_eq = fn suite -> fn (label: str) -> fn expected -> fn actual ->
     let _ = strbuf_push log ("  actual:   " ++ a ++ "\n") in
     print ("FAIL | " ++ label);
 
-// bool true assertion — assert_eq の中身を inline (DEFERRED §1.7 多 instantiation
-// codegen 制約を回避、 assert_eq[int] と assert_eq[bool] を同 program で同居
-// させると C 4 backend で fail するため)
+// bool true assertion — Phase 43 で DEFERRED §1.7 多 instantiation codegen を
+// fix したので、 内部で assert_eq を call できるようになった (旧 inline 実装は
+// 撤去、 簡潔さ復活)
 let assert_true = fn suite -> fn (label: str) -> fn (cond: bool) ->
-  let (counters, log) = suite in
-  if cond == true then
-    let _ = map_set counters "pass" (map_get counters "pass" + 1) in
-    print ("  ok | " ++ label)
-  else
-    let _ = map_set counters "fail" (map_get counters "fail" + 1) in
-    let _ = strbuf_push log ("FAIL | " ++ label ++ " (expected true)\n") in
-    print ("FAIL | " ++ label);
+  assert_eq suite label true cond;
 
 let assert_false = fn suite -> fn (label: str) -> fn (cond: bool) ->
-  let (counters, log) = suite in
-  if cond == false then
-    let _ = map_set counters "pass" (map_get counters "pass" + 1) in
-    print ("  ok | " ++ label)
-  else
-    let _ = map_set counters "fail" (map_get counters "fail" + 1) in
-    let _ = strbuf_push log ("FAIL | " ++ label ++ " (expected false)\n") in
-    print ("FAIL | " ++ label);
+  assert_eq suite label false cond;
 
 // pass/fail/total を出力。 fail があれば log を吐く
 let summary = fn suite ->

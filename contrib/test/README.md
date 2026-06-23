@@ -53,11 +53,11 @@ FAIL | wrong value
 | interp | ✓ |
 | C | ✓ |
 | LLVM | ✓ |
-| Wasm | ✗ (suite tuple `(Map, StrBuf)` が closure env に乗ると Wasm 側の map runtime に統合されておらず codegen error。 将来 Phase で fix) |
+| Wasm | ✓ (Phase 43 で `ty_tag` に Map case を追加し、 closure env / tuple slot で Map を carrier として扱えるように) |
 
 ## 限定事項 (MVP)
 
-- 多 instantiation: 同じ test program 内で `assert_eq` を異なる型 (int + str + bool) で複数回呼ぶのは OK。 ただし `assert_true` / `assert_false` から内部的に `assert_eq` を呼ぶ実装にすると DEFERRED §1.7 (多 instantiation codegen 制約) に hit するため、 本 lib では `assert_true` / `assert_false` は内部 inline 実装にしている
+- 多 instantiation: 同じ test program 内で `assert_eq` を異なる型 (int + str + bool) で複数回呼ぶのは OK (Phase 43 で DEFERRED §1.7 を fix、 chained poly inst も追従するように)
 - test の grouping (describe/context) なし
 - parallel execution なし (Mere に thread がない)
 - setup/teardown hook なし

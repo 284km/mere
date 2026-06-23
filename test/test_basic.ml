@@ -4194,6 +4194,25 @@ let () =
         let r = Shapes.Rect { w = 3, h = 4 } in show (r.w * r.h)")
     "\"12\"";
 
+  (* --- Phase 43 (DEFERRED §1.7): 多 instantiation codegen — chained poly
+     `let bool_eq = fn b -> poly_eq true b` のような呼び出しで poly_eq の
+     bool 版が後の pass で発見されても spec list に追加されるよう、 各 pass で
+     既存 multi_specs を re-scan する。 *)
+  check "multi_inst: chained poly call adds new instantiation (interp)"
+    (Pipeline.process
+       "let poly_eq = fn x -> fn y -> if show x == show y then 1 else 0 in\n\
+        let bool_eq = fn b -> poly_eq true b in\n\
+        poly_eq 1 1 + poly_eq \"a\" \"a\" + bool_eq true") "3";
+  assert_contains "multi_inst: C codegen — chained poly emits bool inst"
+    (Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (let prog = Pipeline.parse_program
+          "let poly_eq = fn x -> fn y -> if show x == show y then 1 else 0 in\n\
+           let bool_eq = fn b -> poly_eq true b in\n\
+           poly_eq 1 1 + poly_eq \"a\" \"a\" + bool_eq true" in
+        let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+        prog))
+    "poly_eq__bool__bool__int";
+
   (* --- Phase 11.1: 借用注釈の細分化 (Q-004 narrowed) --- *)
   (* デフォルト `&R T` は BorrowedRead (shared read)、syntax 上は無印。 *)
   check "borrow: &R T parses as default (borrowed/shared-read)"

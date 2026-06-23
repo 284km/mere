@@ -2884,11 +2884,60 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
     Hashtbl.create 4
   in
+  (* Phase 43 (DEFERRED §1.7 fix): the clone helper for multi-inst, reused
+     in 2 paths (initial scan + re-scan of existing multi_specs entries
+     when new instantiations are discovered). *)
+  let make_spec arrow s =
+    let cloned_fun = clone_with_fresh_tyvars s.sfun in
+    let clone_fun_ty =
+      match cloned_fun.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
+    let cloned_body =
+      match cloned_fun.Ast.node with
+      | Ast.Fun (_, _, b) -> b
+      | _ ->
+        raise (Codegen_error (s.sfun.Ast.loc,
+          "multi-inst clone: expected Fun at root"))
+    in
+    (arrow, cloned_body)
+  in
   while !progress do
     progress := false;
     List.iter (fun s ->
-      if not (Hashtbl.mem resolved s.sname || Hashtbl.mem multi_specs s.sname)
-      then begin
+      let extra_exprs () =
+        Hashtbl.fold (fun _ specs acc ->
+          List.fold_left (fun acc (_, body) -> body :: acc) acc specs
+        ) multi_specs []
+      in
+      if Hashtbl.mem resolved s.sname then ()
+      else if Hashtbl.mem multi_specs s.sname then begin
+        (* Phase 43 fix (DEFERRED §1.7): re-scan multi-inst fns each pass.
+           When a chained poly call site becomes concrete in a later pass
+           (e.g., `let bool_eq = fn b -> poly_eq true b` resolves bool ->
+           int → bool_eq's body's `poly_eq true b` adds bool arrow to
+           poly_eq specs), grow the spec list. *)
+        let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
+        let existing = Hashtbl.find multi_specs s.sname in
+        let existing_arrows = List.map fst existing in
+        (* Type equality via pp_ty string compare (simple but sufficient — same
+           pattern used by ty_tag for naming) *)
+        let new_arrows = List.filter (fun a ->
+          let a_str = Ast.pp_ty (Ast.walk a) in
+          not (List.exists (fun e -> Ast.pp_ty (Ast.walk e) = a_str) existing_arrows)) all
+        in
+        if new_arrows <> [] then begin
+          let new_specs = List.map (fun a -> make_spec a s) new_arrows in
+          Hashtbl.replace multi_specs s.sname (existing @ new_specs);
+          (* multi_inst_fns is used by emit_expr to pick mangled name;
+             keep the arrow list in sync. *)
+          Hashtbl.replace multi_inst_fns s.sname (existing_arrows @ new_arrows);
+          progress := true
+        end
+      end
+      else begin
         let fun_ty =
           match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
         in
@@ -2896,47 +2945,12 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
           Hashtbl.add resolved s.sname fun_ty;
           progress := true
         end else
-          let extra_exprs =
-            Hashtbl.fold (fun _ specs acc ->
-              List.fold_left (fun acc (_, body) -> body :: acc) acc specs
-            ) multi_specs []
-          in
-          let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs) in
+          let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
           match all with
           | _ :: _ ->
-            (* Phase 23.3: per-instantiation specialization. If the fn
-               is called at 2+ distinct concrete arrow types, clone the
-               body once per type, unify each clone's Fun.ty with the
-               concrete arrow, and emit each as a separately-named
-               fn_decl. Register in multi_inst_fns so call-site
-               dispatch can pick the right mangled name. *)
             if List.length all > 1 then begin
               Hashtbl.add multi_inst_fns s.sname all;
-              let specs = List.map (fun arrow ->
-                (* Phase 23.3 fix: clone the WHOLE Fun expression so the
-                   Fun.ty and the body's annotations share fresh tyvar
-                   identity via the same clone-time map. Cloning them
-                   separately would give independent maps → unify on
-                   Fun.ty wouldn't propagate to body. *)
-                let cloned_fun = clone_with_fresh_tyvars s.sfun in
-                let clone_fun_ty =
-                  match cloned_fun.Ast.ty with
-                  | Some t -> Ast.walk t
-                  | None -> Ast.TyUnit
-                in
-                (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
-                (* Extract the cloned body from the cloned Fun (it's the
-                   3rd field of the Fun expr node). Note: s.sparam is the
-                   param name string, same across all clones. *)
-                let cloned_body =
-                  match cloned_fun.Ast.node with
-                  | Ast.Fun (_, _, b) -> b
-                  | _ ->
-                    raise (Codegen_error (s.sfun.Ast.loc,
-                      "multi-inst clone: expected Fun at root"))
-                in
-                (arrow, cloned_body)
-              ) all in
+              let specs = List.map (fun arrow -> make_spec arrow s) all in
               Hashtbl.add multi_specs s.sname specs;
               progress := true
             end else begin

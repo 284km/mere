@@ -1119,11 +1119,51 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
     Hashtbl.create 4
   in
+  (* Phase 43: re-scan multi-inst fns each pass to catch chained poly
+     instantiations (see codegen_c.ml for design). *)
+  let make_spec arrow s =
+    let cloned_fun = clone_with_fresh_tyvars_llvm s.sfun in
+    let clone_fun_ty =
+      match cloned_fun.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> Ast.TyUnit
+    in
+    (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
+    let cloned_body =
+      match cloned_fun.Ast.node with
+      | Ast.Fun (_, _, b) -> b
+      | _ ->
+        raise (Codegen_error (s.sfun.Ast.loc,
+          "multi-inst clone: expected Fun at root"))
+    in
+    (arrow, cloned_body)
+  in
   while !progress do
     progress := false;
     List.iter (fun s ->
-      if not (Hashtbl.mem resolved s.sname || Hashtbl.mem multi_specs s.sname)
-      then begin
+      let extra_exprs () =
+        Hashtbl.fold (fun _ specs acc ->
+          List.fold_left (fun acc (_, body) -> body :: acc) acc specs
+        ) multi_specs []
+      in
+      if Hashtbl.mem resolved s.sname then ()
+      else if Hashtbl.mem multi_specs s.sname then begin
+        (* Phase 43 fix (DEFERRED §1.7): re-scan multi-inst fns each pass. *)
+        let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
+        let existing = Hashtbl.find multi_specs s.sname in
+        let existing_arrows = List.map fst existing in
+        let new_arrows = List.filter (fun a ->
+          let a_str = Ast.pp_ty (Ast.walk a) in
+          not (List.exists (fun e -> Ast.pp_ty (Ast.walk e) = a_str) existing_arrows)) all
+        in
+        if new_arrows <> [] then begin
+          let new_specs = List.map (fun a -> make_spec a s) new_arrows in
+          Hashtbl.replace multi_specs s.sname (existing @ new_specs);
+          Hashtbl.replace multi_inst_fns_llvm s.sname (existing_arrows @ new_arrows);
+          progress := true
+        end
+      end
+      else begin
         let fun_ty =
           match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
         in
@@ -1131,33 +1171,12 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
           Hashtbl.add resolved s.sname fun_ty;
           progress := true
         end else
-          let extra_exprs =
-            Hashtbl.fold (fun _ specs acc ->
-              List.fold_left (fun acc (_, body) -> body :: acc) acc specs
-            ) multi_specs []
-          in
-          let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs) in
+          let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
           match all with
           | _ :: _ ->
             if List.length all > 1 then begin
               Hashtbl.add multi_inst_fns_llvm s.sname all;
-              let specs = List.map (fun arrow ->
-                let cloned_fun = clone_with_fresh_tyvars_llvm s.sfun in
-                let clone_fun_ty =
-                  match cloned_fun.Ast.ty with
-                  | Some t -> Ast.walk t
-                  | None -> Ast.TyUnit
-                in
-                (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
-                let cloned_body =
-                  match cloned_fun.Ast.node with
-                  | Ast.Fun (_, _, b) -> b
-                  | _ ->
-                    raise (Codegen_error (s.sfun.Ast.loc,
-                      "multi-inst clone: expected Fun at root"))
-                in
-                (arrow, cloned_body)
-              ) all in
+              let specs = List.map (fun arrow -> make_spec arrow s) all in
               Hashtbl.add multi_specs s.sname specs;
               progress := true
             end else begin
