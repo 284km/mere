@@ -31,7 +31,10 @@
 // として書く。 Phase 39.A2 は「inner-lifted fn を value 位置で」に対応したが、
 // inner-lifted fn 同士の相互参照は依然 workaround が必要。
 let rec __md_find_double = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
-  if j + 1 >= n then j
+  // 未マッチ時は `n` を返す (= 文字列終端)。 `j + 1 >= n` で `j` を返すと
+  // off-by-one で末尾 1 byte が落ち、 UTF-8 multi-byte 文字を corrupt する
+  // (例: 末尾 `に` (E3 81 AB) が `E3 81` だけ残り `�` 化)
+  if j + 1 >= n then n
   else if char_at s j == c && char_at s (j + 1) == c then j
   else __md_find_double s n c (j + 1);
 
