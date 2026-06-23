@@ -4345,7 +4345,89 @@ let lift_inner_fns
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
     walk_in_fn f.param [f.param] f.body) fns;
-  List.rev !lifted
+  (* Phase 45 (DEFERRED §8): inner-lifted fn 同士の相互参照を解消するため、
+     transitive capture closure を計算する。
+
+     問題: lifted fn A が lifted fn B を call し、 B が `base` を capture する場合、
+     A の body 内で `__lifted_B(base, ...)` を emit するが、 `base` は A の
+     scope に存在しないため C compile error。
+
+     解決: A も `base` を transitive に capture するようにする。 A の captures
+     を direct captures + ⋃ (called inner fns' captures) で拡張、 fixpoint
+     まで繰り返す。 これで A の env に `base` field が追加され、 A の body 内で
+     `env_self->base` 経由でアクセス可能になる。 *)
+  let all_lifted = List.rev !lifted in
+  (* Mere name → lifted_name の逆引き (body 内の Var をたどるため) *)
+  let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  Hashtbl.iter (fun mname entry ->
+    Hashtbl.replace mere_to_lifted mname entry.lifted_name) inner_lifts;
+  (* lifted_name → captures の最新版を保持する Hashtbl
+     ★ direct captures から inner-lifted fn 名を除外する (それらは runtime
+        value ではなく、 emit_expr 側で `__lifted_X(caps, arg)` 形で展開される。
+        capture として持つと「helper という識別子を C で参照」 して fail する) *)
+  let captures_map : (string, (string * Ast.ty) list) Hashtbl.t =
+    Hashtbl.create 8
+  in
+  List.iter (fun lf ->
+    let filtered = List.filter (fun (n, _) ->
+      not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
+    Hashtbl.replace captures_map lf.l_name filtered)
+    all_lifted;
+  (* fixpoint loop *)
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun lf ->
+      (* lf の body 中で参照される他の inner-lifted fn 名を集める *)
+      let called_inner = ref [] in
+      let rec scan (e : Ast.expr) =
+        (match e.Ast.node with
+         | Ast.Var n when Hashtbl.mem mere_to_lifted n
+                       && Hashtbl.find mere_to_lifted n <> lf.l_name ->
+           let cl_name = Hashtbl.find mere_to_lifted n in
+           if not (List.mem cl_name !called_inner) then
+             called_inner := cl_name :: !called_inner
+         | _ -> ());
+        walk_children (fun _ _ e -> scan e) "" [] e
+      in
+      scan lf.l_body;
+      let cur_caps = Hashtbl.find captures_map lf.l_name in
+      let new_caps = ref cur_caps in
+      List.iter (fun called_lifted_name ->
+        let other_caps = Hashtbl.find captures_map called_lifted_name in
+        List.iter (fun (cap_n, cap_t) ->
+          (* cap_n が lf の param と一致するなら skip (param は capture 不要)
+             cap_n が他の inner-lifted fn 名なら skip (transitive で別 path
+             から拾われる)
+             cap_n が既に new_caps にあれば skip *)
+          if cap_n = lf.l_param then ()
+          else if Hashtbl.mem mere_to_lifted cap_n then ()
+          else if List.mem_assoc cap_n !new_caps then ()
+          else begin
+            new_caps := !new_caps @ [(cap_n, cap_t)];
+            changed := true
+          end
+        ) other_caps
+      ) !called_inner;
+      Hashtbl.replace captures_map lf.l_name !new_caps
+    ) all_lifted
+  done;
+  (* 拡張済 captures を all_lifted + inner_lifts_by_host に反映 *)
+  let updated_lifted = List.map (fun lf ->
+    let new_caps = Hashtbl.find captures_map lf.l_name in
+    { lf with l_captures = new_caps }) all_lifted
+  in
+  Hashtbl.iter (fun _host tbl ->
+    Hashtbl.iter (fun mere_n entry ->
+      let new_caps = Hashtbl.find captures_map entry.lifted_name in
+      Hashtbl.replace tbl mere_n { entry with captures = new_caps }
+    ) tbl) inner_lifts_by_host;
+  (* 旧 inner_lifts (last-write) も同期 — emit_expr が直接見るので *)
+  Hashtbl.iter (fun mere_n entry ->
+    let new_caps = Hashtbl.find captures_map entry.lifted_name in
+    Hashtbl.replace inner_lifts mere_n { entry with captures = new_caps }
+  ) inner_lifts;
+  updated_lifted
 
 
 (* Walk the AST for `App (Var "show", arg)` calls and add each arg's

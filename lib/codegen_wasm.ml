@@ -957,7 +957,90 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
   in
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
-    walk f.param [f.param] f.body) fns
+    walk f.param [f.param] f.body) fns;
+  (* Phase 45 (DEFERRED §8): transitive capture closure for mutually-called
+     inner-lifted fns。 詳細は codegen_c.ml の同 phase コメント参照 *)
+  let all_lifted = !lifted_fns_wasm in
+  let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  Hashtbl.iter (fun mname entry ->
+    Hashtbl.replace mere_to_lifted mname entry.lifted_name) inner_lifts_wasm;
+  (* Wasm の captures は string list なので型が違う点に注意 *)
+  let captures_map : (string, string list) Hashtbl.t =
+    Hashtbl.create 8
+  in
+  List.iter (fun lf ->
+    let filtered = List.filter (fun n ->
+      not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
+    Hashtbl.replace captures_map lf.l_name filtered) all_lifted;
+  let rec scan_for_called called_acc (e : Ast.expr) cur_name =
+    let acc = ref called_acc in
+    (match e.Ast.node with
+     | Ast.Var n when Hashtbl.mem mere_to_lifted n
+                   && Hashtbl.find mere_to_lifted n <> cur_name ->
+       let cl_name = Hashtbl.find mere_to_lifted n in
+       if not (List.mem cl_name !acc) then acc := cl_name :: !acc
+     | _ -> ());
+    let recurse sub = acc := scan_for_called !acc sub cur_name in
+    (match e.Ast.node with
+     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+     | Ast.Unit_lit | Ast.Var _ -> ()
+     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+     | Ast.App (a, b) -> recurse a; recurse b
+     | Ast.Neg a | Ast.Annot (a, _) -> recurse a
+     | Ast.Let (_, v, b) -> recurse v; recurse b
+     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> recurse v) bs; recurse b
+     | Ast.With (_, v, b) -> recurse v; recurse b
+     | Ast.If (c, t, e_) -> recurse c; recurse t; recurse e_
+     | Ast.Fun (_, _, b) -> recurse b
+     | Ast.Constr (_, Some a) -> recurse a
+     | Ast.Constr (_, None) -> ()
+     | Ast.Match (s, arms) ->
+       recurse s;
+       List.iter (fun (_, g, b) ->
+         (match g with Some ge -> recurse ge | None -> ()); recurse b) arms
+     | Ast.Tuple es -> List.iter recurse es
+     | Ast.Region_block (_, b) -> recurse b
+     | Ast.Ref (_, _, a) -> recurse a
+     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> recurse e) fs
+     | Ast.Field_get (a, _) -> recurse a
+     | Ast.Record_update (a, fs) -> recurse a;
+       List.iter (fun (_, e) -> recurse e) fs);
+    !acc
+  in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun lf ->
+      let called_inner = scan_for_called [] lf.l_body lf.l_name in
+      let cur_caps = Hashtbl.find captures_map lf.l_name in
+      let new_caps = ref cur_caps in
+      List.iter (fun called_lifted_name ->
+        let other_caps = Hashtbl.find captures_map called_lifted_name in
+        List.iter (fun cap_n ->
+          if cap_n = lf.l_param then ()
+          else if Hashtbl.mem mere_to_lifted cap_n then ()
+          else if List.mem cap_n !new_caps then ()
+          else begin
+            new_caps := !new_caps @ [cap_n];
+            changed := true
+          end
+        ) other_caps
+      ) called_inner;
+      Hashtbl.replace captures_map lf.l_name !new_caps
+    ) all_lifted
+  done;
+  lifted_fns_wasm := List.map (fun lf ->
+    let new_caps = Hashtbl.find captures_map lf.l_name in
+    { lf with l_captures = new_caps }) all_lifted;
+  Hashtbl.iter (fun _host tbl ->
+    Hashtbl.iter (fun mere_n entry ->
+      let new_caps = Hashtbl.find captures_map entry.lifted_name in
+      Hashtbl.replace tbl mere_n { entry with captures = new_caps }
+    ) tbl) inner_lifts_by_host_wasm;
+  Hashtbl.iter (fun mere_n entry ->
+    let new_caps = Hashtbl.find captures_map entry.lifted_name in
+    Hashtbl.replace inner_lifts_wasm mere_n { entry with captures = new_caps }
+  ) inner_lifts_wasm
 
 (* Map Lang binop / cmp / logic to Wasm opcodes. All operands are i32
    (bool also widens to i32). *)

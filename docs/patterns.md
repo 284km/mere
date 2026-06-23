@@ -514,21 +514,26 @@ ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必
 3 引数。 公開時に user の最初の躓きどころなので、 patterns / tutorial に
 明記しておく。
 
-### 8. inner-lifted fn の closure capture が anonymous Fun 経由で漏れる
+### 8. ~~inner-lifted fn の closure capture が anonymous Fun 経由で漏れる~~ ✅
 
-⚠️ **2026-06-23 Phase 39.A2 で部分的に解決**: `list_iter (...) visit` のように
-inner-lifted fn を value 位置で「外側の anonymous Fun でない場所」で使う case は
-3 backend で動くようになった (env を default region に alloc + adapter 経由で
-lifted fn を呼ぶ closure value)。 dfs_bfs.mere は iterative stack 版から
-natural recursive 版に戻した。
+✅ **2026-06-23 Phase 39.A2 + Phase 45 で完全解決**:
 
-⚠️ **依然 unsupported**: **inner-lifted fn 同士の相互参照** —
-`let rec go = ... go body uses find_double ...` で find_double も inner-lifted
-の場合、 go の lift 時に find_double を capture として記録してしまい、 call
-site で raw な find_double を C 識別子として参照しようとする。 markdown_to_html
-の find_double / find_single はこのため依然 top-level fn として書く必要あり。
-将来 lift_inner_fns で「他の inner-lifted fn の捕獲を closure value にする」
-処理を追加すれば解消可能。
+- Phase 39.A2: `list_iter (...) visit` のように inner-lifted fn を value 位置で
+  「外側の anonymous Fun でない場所」 で使う case を 3 backend で動くように
+  (env を default region に alloc + adapter 経由で lifted fn を呼ぶ closure value)
+- Phase 45: **inner-lifted fn 同士の相互参照** を解決 — `lift_inner_fns` の末尾に
+  **transitive capture closure** 算出 step を追加。 lifted fn A が B を call し
+  B が `base` を capture する場合、 A も `base` を transitive に capture して
+  env に乗せる。 また、 direct captures から inner-lifted fn 名を除外し
+  (runtime value ではないため)、 emit_expr 側の既存 dispatch (App (Var n, arg)
+  で `__lifted_X(caps, arg)` を直接 emit) と整合させる。 C / LLVM / Wasm 3
+  backend に同じアルゴリズムを実装。
+
+これで `let rec helper = fn x -> ... let rec caller = fn y -> helper y ...`
+のような pattern が 4 backend で動く。 markdown_to_html の `find_double` /
+`find_single` を module 外側 top-level fn として書く workaround は **不要に
+なった** (ただし既存 code はそのまま残置、 module-internal に戻す refactor は
+future)。
 
 
 

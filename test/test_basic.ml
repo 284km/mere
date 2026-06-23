@@ -6572,6 +6572,35 @@ let () =
      if String.length ll > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 45 (DEFERRED §8): inner-lifted fn 同士の相互参照を transitive capture
+     で解決。 helper が base を capture し、 caller が helper を呼ぶ場合、 caller
+     も base を transitive 経由で capture する。 *)
+  check "§45: inner-lifted mutual reference (interp)"
+    (Pipeline.process
+       "let outer = fn (n: int) ->\n\
+       \  let base = n * 10 in\n\
+       \  let rec helper = fn (x: int) ->\n\
+       \    if x <= 0 then base else helper (x - 1) + 1 in\n\
+       \  let rec caller = fn (y: int) ->\n\
+       \    if y <= 0 then 0 else helper y + caller (y - 1) in\n\
+       \  caller 3 in\n\
+        outer 2") "66";
+  (* Phase 45 (DEFERRED §8) for `let rec ... and ...` mutual recursion *)
+  check "§45: inner-lifted let-rec and-mutual recursion (interp)"
+    (Pipeline.process
+       "let scanner = fn (s: str) ->\n\
+       \  let n = str_len s in\n\
+       \  let rec find_a = fn (i: int) ->\n\
+       \    if i >= n then -1\n\
+       \    else if char_at s i == \"a\" then i\n\
+       \    else find_b (i + 1)\n\
+       \  and find_b = fn (i: int) ->\n\
+       \    if i >= n then -1\n\
+       \    else if char_at s i == \"b\" then i\n\
+       \    else find_a (i + 1) in\n\
+       \  find_a 0 in\n\
+        scanner \"xyzbabc\"") "3";
+
   (* Phase 25.4: LLVM str_unescape runtime helper + show_<variant> の
      Phase 25.0 boxed payload load bug fix。show fn が payload field を
      2-step load (load ptr, then load value) するように修正。 *)
