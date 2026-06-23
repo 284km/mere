@@ -469,8 +469,10 @@ C codegen は top-level fn を C 関数として直接 emit するため、 macO
 **回避策**: 1-2 文字短くする (`mergesort` → `msort`、 `div` → `divi`、
 `short` → `small_doc`)、 動詞句にする (`sort_list` / `power_int`)、 接頭辞
 (`mere_sort`) など。 interpreter は影響を受けないので動作確認はできるが、
-codegen を試した時に発覚する。 公開前にこの list を `linter` 的に検査する
-script を入れると user の摩擦が一段下がる。
+codegen を試した時に発覚する。 **Phase 38.A3 で linter が parser 通過時点で
+warning を出す** ように対応済 ([lib/pipeline.ml:42-82](../lib/pipeline.ml))。
+
+**完全な reserved name 一覧 (約 110 名前) は [docs/reserved-names.md](reserved-names.md) を参照**。
 
 ### 6. 空 list literal `[]` は polymorphic `'a list` で codegen NG
 

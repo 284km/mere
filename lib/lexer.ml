@@ -256,8 +256,12 @@ let rec tokenize s =
                   if depth = 0 then k else find_end (k + 1) (depth - 1)
                 else if s.[k] = '"' then
                   raise (Lex_error (pos,
-                    "nested string literal inside `{...}` not supported \
-                     (Phase 36 MVP) — bind the value to a let first"))
+                    "unexpected `\"` inside `{...}` string interpolation. \
+                     If you intended a literal `{` (e.g. JSON / HTML / \
+                     template syntax), escape it as `\\{` instead. \
+                     If you intended interpolation with a nested string, \
+                     bind it to a `let` first (Phase 36 MVP doesn't support \
+                     nested string literals)."))
                 else find_end (k + 1) depth
               in
               let end_brace = find_end (j + 1) 0 in

@@ -19,8 +19,15 @@ stage 2 → 3 の graduation 条件:
 
 ## 使い方 (pkg manager 完成前)
 
-Mere にはまだ module / import が無いため、 contrib の lib を使うには
-**copy-paste** する。
+Mere は **`module M { ... }` + `import "path";` を既に持っている** が、
+contrib lib は **当面 module wrap せず top-level の `type` / `let` のまま**
+で配布する。 理由は、 4 backend codegen で `match v with | M.JNull -> ...` の
+ような **qualified constructor pattern が未対応** (DEFERRED §4.1) で、 module
+wrap すると interp でしか pattern match が書けなくなるため。 詳細は
+internal design notes §1。
+
+そのため、 contrib の lib を使う方法は **copy-paste** か、 `import` でも構わない
+(import すると top-level に splice される、 名前空間化はされない)。
 
 ```sh
 # 例: JSON を使いたい

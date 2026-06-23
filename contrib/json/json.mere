@@ -8,7 +8,7 @@
 //
 // 使い方: このファイルをユーザ project にコピーすると、 top-level に
 // `type json` と `parse_json: str -> json` が available になる。 末尾の
-// self-test ブロック (`let case_v = ...` 以下) は実 use 時に削除して構わない。
+// self-test ブロック (`let run_case = ...` 以下) は実 use 時に削除して構わない。
 
 type json =
   | JNull
@@ -152,29 +152,29 @@ let parse_json = fn (s: str) ->
 
 // === Self-tests ===
 
-let case_v = fn (name: str, s: str) ->
+let run_case = fn (name: str, s: str) ->
   let result = try_or (fn () -> show (parse_json s)) "<error>" in
   print (name ++ " | " ++ s ++ " => " ++ result);
 
-let _ = case_v "null"     "null";
-let _ = case_v "true"     "true";
-let _ = case_v "int"      "42";
-let _ = case_v "neg"      "-17";
-let _ = case_v "str"      "\"hello\"";
-let _ = case_v "arr-empty" "[]";
-let _ = case_v "arr-flat"  "[1, 2, 3]";
-let _ = case_v "arr-mix"   "[true, \"x\", -5, null]";
+let _ = run_case "null"     "null";
+let _ = run_case "true"     "true";
+let _ = run_case "int"      "42";
+let _ = run_case "neg"      "-17";
+let _ = run_case "str"      "\"hello\"";
+let _ = run_case "arr-empty" "[]";
+let _ = run_case "arr-flat"  "[1, 2, 3]";
+let _ = run_case "arr-mix"   "[true, \"x\", -5, null]";
 // Phase 36 lex 制約 workaround: `"{...}"` は補間として解釈されるので `\{` で escape
-let _ = case_v "obj-empty" "\{}";
-let _ = case_v "obj-flat"  "\{\"a\": 1, \"b\": 2}";
-let _ = case_v "nested"    "\{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
-let _ = case_v "ws"        "  [  1 ,  2  ]  ";
-let _ = case_v "deep"      "[[1, 2], [3, [4, 5]], []]";
-let _ = case_v "escape-quote" "\"a\\\"b\"";
-let _ = case_v "escape-newline" "\"line1\\nline2\"";
-let _ = case_v "escape-mixed"   "\{\"msg\": \"hello\\nworld\"}";
-let _ = case_v "bad-trailing" "1 2";
-let _ = case_v "bad-token"   "xxx";
-let _ = case_v "bad-arr"     "[1, 2,";
+let _ = run_case "obj-empty" "\{}";
+let _ = run_case "obj-flat"  "\{\"a\": 1, \"b\": 2}";
+let _ = run_case "nested"    "\{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
+let _ = run_case "ws"        "  [  1 ,  2  ]  ";
+let _ = run_case "deep"      "[[1, 2], [3, [4, 5]], []]";
+let _ = run_case "escape-quote" "\"a\\\"b\"";
+let _ = run_case "escape-newline" "\"line1\\nline2\"";
+let _ = run_case "escape-mixed"   "\{\"msg\": \"hello\\nworld\"}";
+let _ = run_case "bad-trailing" "1 2";
+let _ = run_case "bad-token"   "xxx";
+let _ = run_case "bad-arr"     "[1, 2,";
 
 0
