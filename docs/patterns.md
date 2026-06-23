@@ -254,7 +254,7 @@ let (b, i) = parse_num s (i + 1) in
 a + b
 ```
 
-`examples/json_parser.mere` で実際にこのパターンを使っている。
+`contrib/json/json.mere` で実際にこのパターンを使っている。
 
 ---
 

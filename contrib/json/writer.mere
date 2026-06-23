@@ -76,7 +76,9 @@ let rec write_json = fn (sb) -> fn (v) ->
       let __ = write_join sb items "," (fn sb2 -> fn item -> write_json sb2 item) in
       strbuf_push sb "]"
   | JObj pairs ->
-      let __ = strbuf_push sb "{" in
+      // Phase 36 lex 制約 workaround: `"{"` は文字列補間開始と解釈されるので
+      // `"\{"` (= 1 文字 `{`) でエスケープ。 `}` は plain で OK。
+      let __ = strbuf_push sb "\{" in
       let __ = write_join sb pairs "," (fn sb2 -> fn p ->
         let __ = strbuf_push sb2 "\"" in
         let __ = strbuf_push sb2 (escape_str (fst p)) in
@@ -99,7 +101,7 @@ let rec write_pretty = fn (sb) -> fn (v) ->
       let __ = write_join sb items ", " (fn sb2 -> fn item -> write_pretty sb2 item) in
       strbuf_push sb "]"
   | JObj pairs ->
-      let __ = strbuf_push sb "{\n" in
+      let __ = strbuf_push sb "\{\n" in   // Phase 36 lex 制約 workaround
       let __ = write_join sb pairs ",\n" (fn sb2 -> fn p ->
         let __ = strbuf_push sb2 "  \"" in
         let __ = strbuf_push sb2 (escape_str (fst p)) in

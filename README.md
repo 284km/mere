@@ -79,8 +79,8 @@ $ dune exec ./bin/mere.exe -- examples/module_basic.mere
 $ dune exec ./bin/mere.exe -- examples/import_demo.mere
 # import "examples/lib_list_ops.mere"; ListOps.sum [1..5] を計算
 
-$ dune exec ./bin/mere.exe -- examples/json_parser.mere
-# JSON パーサ in Mere (140 行) のセルフテストが走る
+$ dune exec ./bin/mere.exe -- contrib/json/json.mere
+# JSON パーサ in Mere (140 行、 Phase 40 で contrib/ に格上げ) のセルフテストが走る
 
 $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 # region/view/effect/with の全機能を組合せた realistic example
@@ -106,20 +106,23 @@ $ dune exec ./bin/mere.exe -- examples/maze_solver.mere
 - **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
 - **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く `.mere` ファイル群 (118 本、[examples/README.md](examples/README.md) で
-  カテゴリ別索引)。基本的な FizzBuzz / JSON parser / word count から、
+- `examples/` — 動く `.mere` ファイル群 ([examples/README.md](examples/README.md) で
+  カテゴリ別索引)。基本的な FizzBuzz / word count から、
   Q-010 collection の codegen demo (`vec_codegen_*.mere` /
   `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`)、
-  realistic application (16 examples が 4 backend で PERFECT 一致): `json_parser` /
-  `template_engine` / `word_freq` / `mini_shell` / `json_writer` / `chained_parse` /
-  `state_machine` / `ini_parser` / `regex_lite` まで、**1165 行の `toy_sql`**
-  (toy SQL engine — Phase 29 dogfood で書いた 59 tests、4 backend PERFECT)、
-  そして Phase 36 で追加した 47 本の sugar dogfood example: `calc` (recursive
-  descent arithmetic parser + `?!` Result chain) / `maze_solver` (BFS) /
-  `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` /
-  `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` /
-  `csv_summary` / `markdown_to_text` / `comprehension` / `if_let_demo` /
-  `for_loop_demo` / `while_loop_demo` / `sugar_showcase` ほか
+  realistic application (4 backend で PERFECT 一致): `template_engine` / `word_freq` /
+  `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`
+  まで、**1165 行の `toy_sql`** (toy SQL engine — Phase 29 dogfood で書いた
+  59 tests、4 backend PERFECT)、そして Phase 36 で追加した 47 本の sugar
+  dogfood example: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` /
+  `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` /
+  `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` /
+  `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` ほか
+- `contrib/` — **lib 候補** ([contrib/README.md](contrib/README.md))。 `examples/`
+  より一段「再利用前提」 の Mere code。 現在 `contrib/json/` (parser + writer) と
+  `contrib/markdown/` (HTML / text / TOC converter)。 pkg manager 完成後に
+  graduate して別 repo へ。 詳細は
+  internal design notes §3
 
 ## ビルド・実行
 

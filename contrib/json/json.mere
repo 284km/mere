@@ -1,8 +1,14 @@
-// JSON パーサ in Lang
+// contrib/json/json.mere — JSON parser
+//
 // stdlib (str ops + is_digit + try_or + fail) と user-defined sum types
 // + 多相 list / pattern matching + 相互再帰 fn の組み合わせで実装。
-
-type 'a list = Nil | Cons of 'a * 'a list;
+//
+// Phase 40 (contrib stage 2): examples/json_parser.mere から移設。 prelude が
+// `type 'a list` を提供するようになったため、 redundant な再宣言を削除。
+//
+// 使い方: このファイルをユーザ project にコピーすると、 top-level に
+// `type json` と `parse_json: str -> json` が available になる。 末尾の
+// self-test ブロック (`let case_v = ...` 以下) は実 use 時に削除して構わない。
 
 type json =
   | JNull
@@ -146,28 +152,29 @@ let parse_json = fn (s: str) ->
 
 // === Self-tests ===
 
-let case = fn (name: str, s: str) ->
+let case_v = fn (name: str, s: str) ->
   let result = try_or (fn () -> show (parse_json s)) "<error>" in
   print (name ++ " | " ++ s ++ " => " ++ result);
 
-let _ = case "null"     "null";
-let _ = case "true"     "true";
-let _ = case "int"      "42";
-let _ = case "neg"      "-17";
-let _ = case "str"      "\"hello\"";
-let _ = case "arr-empty" "[]";
-let _ = case "arr-flat"  "[1, 2, 3]";
-let _ = case "arr-mix"   "[true, \"x\", -5, null]";
-let _ = case "obj-empty" "{}";
-let _ = case "obj-flat"  "{\"a\": 1, \"b\": 2}";
-let _ = case "nested"    "{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
-let _ = case "ws"        "  [  1 ,  2  ]  ";
-let _ = case "deep"      "[[1, 2], [3, [4, 5]], []]";
-let _ = case "escape-quote" "\"a\\\"b\"";
-let _ = case "escape-newline" "\"line1\\nline2\"";
-let _ = case "escape-mixed"   "{\"msg\": \"hello\\nworld\"}";
-let _ = case "bad-trailing" "1 2";
-let _ = case "bad-token"   "xxx";
-let _ = case "bad-arr"     "[1, 2,";
+let _ = case_v "null"     "null";
+let _ = case_v "true"     "true";
+let _ = case_v "int"      "42";
+let _ = case_v "neg"      "-17";
+let _ = case_v "str"      "\"hello\"";
+let _ = case_v "arr-empty" "[]";
+let _ = case_v "arr-flat"  "[1, 2, 3]";
+let _ = case_v "arr-mix"   "[true, \"x\", -5, null]";
+// Phase 36 lex 制約 workaround: `"{...}"` は補間として解釈されるので `\{` で escape
+let _ = case_v "obj-empty" "\{}";
+let _ = case_v "obj-flat"  "\{\"a\": 1, \"b\": 2}";
+let _ = case_v "nested"    "\{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
+let _ = case_v "ws"        "  [  1 ,  2  ]  ";
+let _ = case_v "deep"      "[[1, 2], [3, [4, 5]], []]";
+let _ = case_v "escape-quote" "\"a\\\"b\"";
+let _ = case_v "escape-newline" "\"line1\\nline2\"";
+let _ = case_v "escape-mixed"   "\{\"msg\": \"hello\\nworld\"}";
+let _ = case_v "bad-trailing" "1 2";
+let _ = case_v "bad-token"   "xxx";
+let _ = case_v "bad-arr"     "[1, 2,";
 
 0

@@ -366,4 +366,4 @@ Map[R, K, V] -> (K -> V -> unit) -> unit`** を追加 (4 backend 全部で動く
 
 - 演算子 (`+ * == ++ |> << >>` 等) は **builtin ではなく言語構文** で、参照は [language-reference.md](language-reference.md)
 - 使用イディオムは [patterns.md](patterns.md)
-- 実例: `examples/json_parser.mere` で stdlib 多数を組み合わせて 140 行の JSON パーサを書いている
+- 実例: `contrib/json/json.mere` で stdlib 多数を組み合わせて 140 行の JSON パーサを書いている (Phase 40 で `examples/` から `contrib/` に格上げ)
