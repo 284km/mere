@@ -28,9 +28,14 @@ cp contrib/markdown/to_html.mere  my_project/
 | **bold** (`**…**`) | ✓ | ✓ | ✗ |
 | *italic* (`*…*` / `_…_`) | ✓ | ✓ | ✗ |
 | inline code `` `…` `` | ✓ | ✓ | ✗ |
-| blockquote `> …` | ✗ | ✓ | ✗ |
+| blockquote `> …` | ✓ | ✓ | ✗ |
+| fenced code block `` ``` `` | ✓ | ✗ | ✗ |
+| link `[X](Y)` (`.md` → `.html` 自動 rewrite) | ✓ | ✗ | ✗ |
+| image `![alt](url)` | ✓ | ✗ | ✗ |
+| horizontal rule `---` / `***` / `___` | ✓ | ✗ | ✗ |
+| table `\| col \| col \|` + separator row | ✓ | ✗ | ✗ |
 | paragraph (空行区切り) | ✓ | ✓ | ✗ |
-| **非対応** (将来拡張): table / fenced code / link / image / nested list | | | |
+| **非対応** (将来拡張): nested list / numbered list / footnote / definition list | | | |
 
 ## 位置付け
 

@@ -72,6 +72,23 @@ let render_inline = fn (s: str) ->
         let _ = strbuf_push out (substring s (i + 1) e) in
         let _ = strbuf_push out "</code>" in
         go (e + 1)
+      else if c == "!" && i + 1 < n && char_at s (i + 1) == "[" then
+        // ![alt](url) を <img alt="alt" src="url"> に
+        let close_bracket = __md_find_single s n "]" (i + 2) in
+        if close_bracket >= n then
+          let _ = strbuf_push out c in go (i + 1)
+        else if close_bracket + 1 >= n || char_at s (close_bracket + 1) != "(" then
+          let _ = strbuf_push out c in go (i + 1)
+        else
+          let close_paren = __md_find_single s n ")" (close_bracket + 2) in
+          if close_paren >= n then
+            let _ = strbuf_push out c in go (i + 1)
+          else
+            let alt = substring s (i + 2) close_bracket in
+            let url = substring s (close_bracket + 2) close_paren in
+            let _ = strbuf_push out ("<img alt=\"" ++ alt ++ "\" src=\""
+                                     ++ url ++ "\">") in
+            go (close_paren + 1)
       else if c == "[" then
         // [text](url) を <a href="url">text</a> に。 url の `.md` は `.html` に rewrite
         let close_bracket = __md_find_single s n "]" (i + 1) in
@@ -101,11 +118,56 @@ let render_inline = fn (s: str) ->
   let _ = go 0 in
   strbuf_to_str out;
 
+// 行が `|` で始まる table row か
+let is_table_row = fn (line: str) ->
+  let n = str_len line in
+  if n < 1 then false
+  else char_at line 0 == "|";
+
+// 行が table の separator row (`|----|----|` 等) か。
+// `|`, `-`, `:`, ` ` のみで構成され、 少なくとも 1 個の `-` を含む
+let is_table_sep = fn (line: str) ->
+  let n = str_len line in
+  if n < 3 then false
+  else if char_at line 0 != "|" then false
+  else
+    let rec check = fn i -> fn has_dash ->
+      if i >= n then has_dash
+      else
+        let c = char_at line i in
+        if c == "|" || c == ":" || c == " " then check (i + 1) has_dash
+        else if c == "-" then check (i + 1) true
+        else false
+    in check 0 false;
+
+// table row を cell list に分解 (`| a | b |` → ["a", "b"])
+// 各 cell は前後の空白を trim
+let parse_cells = fn (line: str) ->
+  let parts = str_split line "|" in
+  // str_split が leading `|` で empty string を返すので filter
+  let nonempty = list_filter parts (fn s -> str_len (str_trim s) > 0) in
+  list_map nonempty str_trim;
+
+// 行が `---` / `***` / `___` のみで構成されているか (HR 判定)
+let is_hr = fn (line: str) ->
+  let n = str_len line in
+  if n < 3 then false
+  else
+    let c = char_at line 0 in
+    if c != "-" && c != "*" && c != "_" then false
+    else
+      let rec check = fn i ->
+        if i >= n then true
+        else if char_at line i == c then check (i + 1)
+        else false
+      in check 0;
+
 // substring s start end (end は exclusive)
-// 行を HTML 1 ブロックに変換 (見出し / リスト / 段落 / 空)
+// 行を HTML 1 ブロックに変換 (見出し / リスト / 段落 / 空 / 引用 / HR)
 let render_line = fn (line: str) ->
   let n = str_len line in
   if n == 0 then ""
+  else if is_hr line then "<hr>"
   else if starts_with line "### " then
     "<h3>" ++ render_inline (substring line 4 n) ++ "</h3>"
   else if starts_with line "## " then
@@ -114,6 +176,8 @@ let render_line = fn (line: str) ->
     "<h1>" ++ render_inline (substring line 2 n) ++ "</h1>"
   else if starts_with line "- " then
     "<li>" ++ render_inline (substring line 2 n) ++ "</li>"
+  else if starts_with line "> " then
+    "<blockquote>" ++ render_inline (substring line 2 n) ++ "</blockquote>"
   else
     "<p>" ++ render_inline line ++ "</p>";
 
@@ -133,14 +197,43 @@ let escape_html = fn (s: str) ->
   let _ = loop 0 in
   strbuf_to_str buf;
 
+// 1 行を cell list として `<tr><CELL_TAG>...</CELL_TAG></tr>` の row HTML に
+// (CELL_TAG = "th" / "td"。 separator row は呼出側で skip 済前提)
+let render_table_row = fn (line: str) -> fn (cell_tag: str) ->
+  let cells = parse_cells line in
+  let buf = strbuf_new () in
+  let _ = strbuf_push buf "<tr>" in
+  let _ = list_iter cells (fn cell ->
+    let _ = strbuf_push buf ("<" ++ cell_tag ++ ">") in
+    let _ = strbuf_push buf (render_inline cell) in
+    let _ = strbuf_push buf ("</" ++ cell_tag ++ ">") in
+    ()) in
+  let _ = strbuf_push buf "</tr>" in
+  strbuf_to_str buf;
+
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // fenced code block の state を Map で保持 (`in_code` = 1/0)
+  // state Map: in_code / table_phase
+  //   table_phase: 0 = not in table、 1 = thead written (待 separator)、
+  //                2 = tbody (本体 row)
   let state = map_new () in
   let _ = map_set state "in_code" 0 in
+  let _ = map_set state "table_phase" 0 in
+  // 非 table 行に来た時、 table を閉じる helper
+  let close_table_if_open = fn () ->
+    let phase = map_get state "table_phase" in
+    if phase == 2 then
+      let _ = strbuf_push out "</tbody></table>\n" in
+      let _ = map_set state "table_phase" 0 in ()
+    else if phase == 1 then
+      // 単 row だけで終わった table — `</thead></table>` で閉じる
+      let _ = strbuf_push out "</thead></table>\n" in
+      let _ = map_set state "table_phase" 0 in ()
+    else () in
   let _ = list_iter lines (fn line ->
     let in_code = map_get state "in_code" in
     if starts_with line "```" then
+      let _ = close_table_if_open () in
       // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
       if in_code == 0 then
         let _ = map_set state "in_code" 1 in
@@ -157,13 +250,38 @@ let render = fn (lines: str list) ->
       let _ = strbuf_push out (escape_html line) in
       let _ = strbuf_push out "\n" in
       ()
+    else if is_table_row line then
+      let phase = map_get state "table_phase" in
+      if phase == 0 then
+        // 新しい table 開始 — header row
+        let _ = strbuf_push out "<table>\n<thead>" in
+        let _ = strbuf_push out (render_table_row line "th") in
+        let _ = strbuf_push out "</thead>\n" in
+        let _ = map_set state "table_phase" 1 in
+        ()
+      else if phase == 1 && is_table_sep line then
+        // separator row — tbody 開始
+        let _ = strbuf_push out "<tbody>" in
+        let _ = map_set state "table_phase" 2 in
+        ()
+      else
+        // body row (phase 2、 または phase 1 で separator がなかった case も body 扱い)
+        let _ = if phase == 1 then
+                  let _ = strbuf_push out "<tbody>" in
+                  let _ = map_set state "table_phase" 2 in ()
+                else () in
+        let _ = strbuf_push out (render_table_row line "td") in
+        let _ = strbuf_push out "\n" in
+        ()
     else
+      let _ = close_table_if_open () in
       let html = render_line line in
       if str_len html > 0 then
         let _ = strbuf_push out html in
         let _ = strbuf_push out "\n" in
         ()
       else ()) in
+  let _ = close_table_if_open () in
   strbuf_to_str out;
 
 };   // end of `module MarkdownHtml`
@@ -190,6 +308,25 @@ let doc = [
   "let x = 1 + 2 in",
   "print (show x)",
   "```",
+  "",
+  "### Quote and HR",
+  "",
+  "> This is a blockquote line.",
+  "",
+  "---",
+  "",
+  "### Table",
+  "",
+  "| Backend | Status |",
+  "|---------|--------|",
+  "| interp  | ✓      |",
+  "| C       | ✓      |",
+  "| LLVM    | ✓      |",
+  "| Wasm    | ✓      |",
+  "",
+  "### Image",
+  "",
+  "![Mere logo](logo.png)",
   "",
   "### Subsection",
   "",
