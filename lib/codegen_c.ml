@@ -1680,6 +1680,12 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "mkdir_p" ->
        (* Phase 44: mkdir -p 相当、 既存ならスキップ *)
        Printf.sprintf "__lang_mkdir_p(%s)" (emit_expr arg)
+     | Ast.Var "file_mtime" ->
+       (* Phase 44.6: stat(path).st_mtime を float (秒) で返す *)
+       Printf.sprintf "__lang_file_mtime(%s)" (emit_expr arg)
+     | Ast.Var "sleep_ms" ->
+       (* Phase 44.6: usleep(ms * 1000) を unit (0) で返す *)
+       Printf.sprintf "__lang_sleep_ms(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
        (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
        Printf.sprintf "__lang_char_at(%s, %s)"
@@ -3529,6 +3535,17 @@ let str_concat_helper =
       (* Phase 44: mkdir_p は list_str に依存しないので header に置ける *)
       "#include <sys/stat.h>";
       "#include <errno.h>";
+      "#include <unistd.h>";   (* Phase 44.6: usleep *)
+      "static double __lang_file_mtime(const char* path) {";
+      "  struct stat st;";
+      "  if (stat(path, &st) != 0) __lang_fail_impl(path);";
+      "  return (double)st.st_mtime;";
+      "}";
+      "static int __lang_sleep_ms(int ms) {";
+      "  if (ms <= 0) return 0;";
+      "  usleep((useconds_t)ms * 1000);";
+      "  return 0;";
+      "}";
       "static int __lang_mkdir_p(const char* path) {";
       "  /* recursive mkdir -p: 既存ならスキップ、 失敗時は __lang_fail_impl */";
       "  size_t n = strlen(path);";

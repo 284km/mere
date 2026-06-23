@@ -238,6 +238,25 @@ let builtin_list_dir =
          raise (Eval_error (Loc.dummy, "list_dir: " ^ msg)))
     | _ -> failwith "list_dir: expected str")
 
+(* Phase 44.6: file_mtime / sleep_ms — dev server / watch 用 *)
+let builtin_file_mtime =
+  V_builtin ("file_mtime", fun v ->
+    match v with
+    | V_str path ->
+      (try V_float (Unix.stat path).Unix.st_mtime
+       with Unix.Unix_error (e, _, _) ->
+         raise (Eval_error (Loc.dummy,
+           "file_mtime: " ^ Unix.error_message e ^ ": " ^ path)))
+    | _ -> failwith "file_mtime: expected str")
+
+let builtin_sleep_ms =
+  V_builtin ("sleep_ms", fun v ->
+    match v with
+    | V_int ms ->
+      Unix.sleepf (float_of_int ms /. 1000.0);
+      V_unit
+    | _ -> failwith "sleep_ms: expected int")
+
 let builtin_mkdir_p =
   V_builtin ("mkdir_p", fun v ->
     match v with
@@ -1571,6 +1590,8 @@ let initial_env : env =
     ("read_lines", ref builtin_read_lines);
     ("list_dir", ref builtin_list_dir);
     ("mkdir_p", ref builtin_mkdir_p);
+    ("file_mtime", ref builtin_file_mtime);
+    ("sleep_ms", ref builtin_sleep_ms);
     ("file_exists", ref builtin_file_exists);
     ("env_var", ref builtin_env_var);
     ("args", ref builtin_args);

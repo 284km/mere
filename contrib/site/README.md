@@ -13,10 +13,15 @@ Mere 自身で書かれた docs site builder。 markdown 集合 → HTML pages +
 ## 使い方
 
 ```sh
-dune exec mere -- contrib/site/build.mere <input_dir> <output_dir>
-# 例:
+# 1 回 build
 dune exec mere -- contrib/site/build.mere docs _site
-# → docs/ 配下の *.md を _site/*.html に変換 + _site/index.html 生成
+
+# dev mode: HTML に <meta refresh content="2"> を inject (browser 2 秒毎に reload)
+dune exec mere -- contrib/site/build.mere --dev docs _site
+
+# watch mode: dev mode + 500ms polling で docs/ の mtime 変化を検知して自動 rebuild
+dune exec mere -- contrib/site/build.mere --watch docs _site
+# 別 terminal で `python -m http.server -d _site 8000` → http://localhost:8000/
 ```
 
 引数省略時は `docs/` → `_site/` がデフォルト。

@@ -133,13 +133,19 @@ let style_css =
   "}\n";
 
 // 共通 page template (header + nav + content + footer)
-//   外部 style.css を <link> で参照、 active class は render_nav が付ける
-let html_template = fn (title: str) -> fn (nav_html: str) -> fn (body_html: str) ->
+//   dev_mode が true なら `<meta http-equiv="refresh" content="2">` を inject し、
+//   browser が 2 秒ごとに re-fetch する形で auto-reload (watch.mere との組合せ用)
+let html_template = fn (dev_mode: bool) -> fn (title: str) ->
+                    fn (nav_html: str) -> fn (body_html: str) ->
+  let dev_meta = if dev_mode then
+                   "  <meta http-equiv=\"refresh\" content=\"2\">\n"
+                 else "" in
   "<!DOCTYPE html>\n" ++
   "<html lang=\"ja\">\n" ++
   "<head>\n" ++
   "  <meta charset=\"utf-8\">\n" ++
   "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" ++
+  dev_meta ++
   "  <title>" ++ title ++ " — Mere docs</title>\n" ++
   "  <link rel=\"stylesheet\" href=\"style.css\">\n" ++
   "</head>\n" ++
@@ -169,8 +175,8 @@ let render_nav = fn (pages: str list) -> fn (current_name: str) ->
 
 // 1 file を変換: input_dir/name.md → output_dir/name.html
 //   nav は per-page で render (current page を active にするため)
-let process_page = fn (input_dir: str) -> fn (output_dir: str) ->
-                   fn (pages: str list) -> fn (name: str) ->
+let process_page = fn (dev_mode: bool) -> fn (input_dir: str) ->
+                   fn (output_dir: str) -> fn (pages: str list) -> fn (name: str) ->
   let in_path = Path.join input_dir name in
   let out_name = Path.drop_ext name ++ ".html" in
   let out_path = Path.join output_dir out_name in
@@ -180,12 +186,13 @@ let process_page = fn (input_dir: str) -> fn (output_dir: str) ->
   let body = MarkdownHtml.render lines in
   let body = rewrite_links body in
   let nav_html = render_nav pages (Path.drop_ext name) in
-  let html = html_template title nav_html body in
+  let html = html_template dev_mode title nav_html body in
   let _ = write_file out_path html in
   print ("  " ++ name ++ " -> " ++ out_path);
 
 // index.html を生成 (page list を箇条書きで、 nav の index は active)
-let render_index = fn (output_dir: str) -> fn (pages: str list) ->
+let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
+                   fn (pages: str list) ->
   let nav_html = render_nav pages "index" in
   let buf = strbuf_new () in
   let _ = strbuf_push buf "<h1>Mere Documentation</h1>\n<p>Generated index of all pages.</p>\n<ul>\n" in
@@ -196,43 +203,91 @@ let render_index = fn (output_dir: str) -> fn (pages: str list) ->
     ()) in
   let _ = strbuf_push buf "</ul>\n" in
   let body = strbuf_to_str buf in
-  let html = html_template "Index" nav_html body in
+  let html = html_template dev_mode "Index" nav_html body in
   let _ = write_file (Path.join output_dir "index.html") html in
   print ("  index.html -> " ++ Path.join output_dir "index.html");
 
+// 1 回 build (一連の page conversion + style.css + index.html を実行)
+let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str) ->
+  let _ = mkdir_p output_dir in
+  let all_entries = list_dir input_dir in
+  let pages = list_filter all_entries is_md_file in
+  let _ = write_file (Path.join output_dir "style.css") style_css in
+  let _ = list_iter pages (process_page dev_mode input_dir output_dir pages) in
+  let _ = render_index dev_mode output_dir pages in
+  print ("Done. " ++ show (list_len pages) ++ " pages converted.");
+
+// 全 .md の mtime を str に集約 (snapshot signature)
+let snapshot = fn (input_dir: str) ->
+  let all_entries = list_dir input_dir in
+  let pages = list_filter all_entries is_md_file in
+  let buf = strbuf_new () in
+  let _ = list_iter pages (fn name ->
+    let p = Path.join input_dir name in
+    let mt = file_mtime p in
+    let _ = strbuf_push buf (name ++ ":" ++ str_of_float mt ++ ";") in
+    ()) in
+  strbuf_to_str buf;
+
+// watch loop: 500ms polling、 mtime 変化があれば rebuild
+let rec watch_loop = fn (input_dir: str) -> fn (output_dir: str) ->
+                     fn (last_sig: str) ->
+  let _ = sleep_ms 500 in
+  let cur_sig = snapshot input_dir in
+  if cur_sig == last_sig then
+    watch_loop input_dir output_dir last_sig
+  else
+    let _ = print "Change detected — rebuilding..." in
+    let _ = do_build true input_dir output_dir in
+    let new_sig = snapshot input_dir in
+    watch_loop input_dir output_dir new_sig;
+
 // ===== main =====
 
-// argv[0] は script path、 argv[1] = input dir、 argv[2] = output dir
-//   省略時は docs/ → _site/ の default
+// CLI: `mere contrib/site/build.mere [--dev] [--watch] [input_dir] [output_dir]`
+//   --dev:   html template に `<meta refresh content="2">` を inject、 browser
+//            が 2 秒ごとに re-fetch して auto reload
+//   --watch: polling-based file watch + auto rebuild。 --dev を自動 implies
+//            (`python -m http.server -d _site/` を別 terminal で起動して使う)
+
 let argv = args ();
 
+let rec has_flag = fn xs -> fn flag ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == flag then true else has_flag t flag;
+
+let watch_mode = has_flag argv "--watch";
+let dev_mode = watch_mode || has_flag argv "--dev";
+
+let rec strip_flags = fn xs ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if str_len h >= 2 && substring h 0 2 == "--" then strip_flags t
+    else Cons (h, strip_flags t);
+
+let positional = strip_flags argv;
+
 let input_dir =
-  match argv with
+  match positional with
   | Cons (_, Cons (d, _)) -> d
   | _ -> "docs";
 
 let output_dir =
-  match argv with
+  match positional with
   | Cons (_, Cons (_, Cons (d, _))) -> d
   | _ -> "_site";
 
-let _ = print ("=== Mere SSG: " ++ input_dir ++ " -> " ++ output_dir ++ " ===");
+let mode_tag = if watch_mode then " [watch]"
+               else if dev_mode then " [dev]" else "";
 
-let _ = mkdir_p output_dir;
+let _ = print ("=== Mere SSG: " ++ input_dir ++ " -> " ++ output_dir ++ mode_tag ++ " ===");
+let _ = print "Building:";
+let _ = do_build dev_mode input_dir output_dir;
 
-let all_entries = list_dir input_dir;
-let pages = list_filter all_entries is_md_file;
-
-let _ = print "Writing assets:";
-let _ = write_file (Path.join output_dir "style.css") style_css;
-let _ = print ("  style.css -> " ++ Path.join output_dir "style.css");
-
-let _ = print "Converting pages:";
-let _ = list_iter pages (process_page input_dir output_dir pages);
-
-let _ = print "Writing index:";
-let _ = render_index output_dir pages;
-
-let _ = print ("Done. " ++ show (list_len pages) ++ " pages converted.");
-
-0
+if watch_mode then
+  let _ = print "Watching for changes (Ctrl-C to quit, 500ms polling)..." in
+  let initial_sig = snapshot input_dir in
+  watch_loop input_dir output_dir initial_sig
+else 0

@@ -1004,6 +1004,11 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("mkdir_p",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
+    (* Phase 44.6: dev server / watch 用 *)
+    ("file_mtime",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyFloat)));
+    ("sleep_ms",
+       mono (Ast.TyArrow (Ast.TyInt, Ast.TyUnit)));
     ("file_exists",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
     ("env_var",
