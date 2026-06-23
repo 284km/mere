@@ -514,12 +514,20 @@ ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必
 
 ### 8. inner-lifted fn の closure capture が anonymous Fun 経由で漏れる
 
-⚠️ **2026-06-23 Phase 38 セッション時点で defer**: 3 backend で per-use-site の
-adapter generation + env allocation を実装する必要があり、 Phase 38.C の
-synthesize approach では captures が free_vars に上がらないため不十分。
-patterns §8 の workaround (iterative / explicit state-passing / mutual
-recursion) で十分に書けるため、 dogfood で痛みが顕在化するまで defer。
-DEFERRED に Phase 39.A2 として追跡。
+⚠️ **2026-06-23 Phase 39.A2 で部分的に解決**: `list_iter (...) visit` のように
+inner-lifted fn を value 位置で「外側の anonymous Fun でない場所」で使う case は
+3 backend で動くようになった (env を default region に alloc + adapter 経由で
+lifted fn を呼ぶ closure value)。 dfs_bfs.mere は iterative stack 版から
+natural recursive 版に戻した。
+
+⚠️ **依然 unsupported**: **inner-lifted fn 同士の相互参照** —
+`let rec go = ... go body uses find_double ...` で find_double も inner-lifted
+の場合、 go の lift 時に find_double を capture として記録してしまい、 call
+site で raw な find_double を C 識別子として参照しようとする。 markdown_to_html
+の find_double / find_single はこのため依然 top-level fn として書く必要あり。
+将来 lift_inner_fns で「他の inner-lifted fn の捕獲を closure value にする」
+処理を追加すれば解消可能。
+
 
 
 関数の中で `let rec foo = fn ...` を定義し、 そこから outer scope の変数を
