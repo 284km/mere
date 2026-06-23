@@ -258,6 +258,8 @@ region R {
 }
 ```
 
+**`Trivial[R]` は暗黙的にデフォルト**: 通常の型 (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure 等) は **自動的に `Trivial[R]`** として扱われる。 user が `impl Trivial[R] for X { }` のような構文で明示宣言する必要は **無い** (将来の trait システム導入時に検討、 internal design notes §3 参照)。 唯一の例外が `drop type` で宣言された型で、 これらは構造的に含まれる位置すべてで Trivial[R] を破る (`contains_drop_type` walker、 `lib/typer.ml`)。 つまり判定アルゴリズムは "default-Trivial + drop-blacklist" の単純な scheme。 trait システム本格導入 (DEFERRED §3.1) と explicit `impl Trivial[R]` 構文 (同 §6.1) は連動する設計だが、 現状実装には影響しない。
+
 ### view (Phase 2.4: 宣言 + region 強制 + 型 tag 伝播)
 
 ```
