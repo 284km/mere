@@ -1,640 +1,2865 @@
 # Changelog (mere)
 
-実装の主要なマイルストーンを slice 単位で記録 (新しいもの順)。詳細な commit メッセージは `git log` 参照。
+Major implementation milestones recorded per-slice (newest first). See `git log` for detailed commit messages.
 
 ---
 
-## 2026-06-22 (続き — Phase 38.G-1 OwnedVec auto scope-bound Drop)
+## 2026-06-22 (cont. — Phase 38.G-1 OwnedVec auto scope-bound Drop)
 
-Phase 38.C 完了後、 公開準備セッションの中で DEFERRED §1.3 の **Level 1** を消化。
-**1515 → 1526 tests**。 設計 doc (`39_nll_linear_design.md`) で paper-validated
-されていた N1/N2/N3 分解の N1 を実装。
+After Phase 38.C finished, during the public-release prep session we consumed
+**Level 1** of DEFERRED §1.3. **1515 → 1526 tests**. Implements N1 of the
+N1/N2/N3 decomposition that was paper-validated in the design doc
+(`39_nll_linear_design.md`).
 
-- **動作**: `let v = owned_vec_new () in body` で body が v を **lexical に
-  escape させない** ことを静的解析で確認できた場合、 scope 末で
-  `free(v->data)` を auto-emit (Phase 15.13 `with` と同じ shape)
-- **静的解析** (codegen_c.ml の新 helpers):
-  - `no_value_leak v body`: Var v が Tuple / Constr payload / Record_lit /
-    Record_update / Fun body の値位置に出現しないか
-  - `tail_does_not_return_v v body`: body の tail expression の型に
-    OwnedVec が transitively 含まれないか
-  - 両方 pass で auto-Drop、 一方でも fail なら既存の registry +
-    main-end sweep にフォールバック (safe-by-default、 conservative)
-- **対応 backend**: C + LLVM。 Wasm は bump-arena 方式で per-allocation
-  free が無いため Phase 38.G-1 では no-op (将来 GC / linear-memory free
-  が入ったら enable)
-- **escape pattern (auto-Drop しない)**: body's tail が v を返す / v を
-  tuple に stash / closure が v を capture / tail 型が OwnedVec を含む
-- **auto-Drop pattern**: build → query → return scalar / if 各 arm が scalar /
-  nested let chain で tail が scalar / Phase 38.C partial app との両立
-- **Level 2/3 (N2 NLL Light、 N3 Full Linear、 ~5-15 slice) は依然 defer** —
-  dogfood で痛みが顕在化するまで保留
-- **対応 commit**: `76f00f8`
+- **Behavior**: for `let v = owned_vec_new () in body`, if static analysis
+  can confirm that `body` does **not lexically escape** `v`, we auto-emit
+  `free(v->data)` at scope end (same shape as Phase 15.13 `with`).
+- **Static analysis** (new helpers in codegen_c.ml):
+  - `no_value_leak v body`: checks that `Var v` does not appear in value
+    position of Tuple / Constr payload / Record_lit / Record_update / Fun body.
+  - `tail_does_not_return_v v body`: checks that the tail expression's type
+    does not transitively contain OwnedVec.
+  - Both pass → auto-Drop; either fails → fall back to existing registry +
+    main-end sweep (safe-by-default, conservative).
+- **Supported backends**: C + LLVM. Wasm uses bump-arena and has no
+  per-allocation free, so Phase 38.G-1 is a no-op there (will enable if
+  GC / linear-memory free arrives).
+- **Escape patterns (no auto-Drop)**: tail of body returns `v` / `v`
+  stashed in a tuple / closure captures `v` / tail type contains OwnedVec.
+- **Auto-Drop patterns**: build → query → return scalar / each `if` arm is
+  scalar / nested let chains whose tail is scalar / compatible with Phase
+  38.C partial application.
+- **Levels 2/3 (N2 NLL Light, N3 Full Linear, ~5–15 slices) remain
+  deferred** — held back until dogfood actually hurts.
+- **Relevant commit**: `76f00f8`
 
 ---
 
-## 2026-06-22 (続き — Phase 38.C multi-arg curried builtin first-class)
+## 2026-06-22 (cont. — Phase 38.C multi-arg curried builtin first-class)
 
-Phase 37 完了後、 公開準備セッションのまま **DEFERRED §1.2 A2 を消化**。
-3 backend で multi-arg curried builtin が value 位置 / partial app 位置で
-動くように。 **1511 → 1515 tests**。
+After Phase 37 finished, the public-release sprint **consumed DEFERRED §1.2
+A2**. Multi-arg curried builtins now work in value / partial-app position on
+all 3 backends. **1511 → 1515 tests**.
 
-- **設計判断**: 当初想定の per-builtin × per-arity な closure adapter テンプレ
-  生成 (Phase 35.1 nullary の延長線) は **廃案**。 boilerplate が builtin × 段
-  数 × backend で爆発するため。 代わりに各 codegen に **AST 局所 synthesize**
-  helper (`synthesize_curried_eta` / `_llvm` / `_wasm`) を導入し、 Var handler
-  で multi-arg curried builtin が value 位置にあるのを検出したら、 その場で
-  `fn __arg0 -> fn __arg1 -> ... -> builtin __arg0 ... __argN` という fully
-  eta-expanded Fun chain を生成して emit_expr に再投入。 既存の anonymous
-  Fun adapter machinery (Phase 5.7-b) が closure 構築を担当、 inner の
-  nested App は各 builtin の direct-call fast path に乗る。
-- **対応 builtin (9 個)**: `owned_vec_push` / `owned_vec_get` / `vec_push` /
-  `vec_get` / `vec_set` / `strbuf_push` / `map_get` / `map_has` / `map_set`
-- **使用例**:
+- **Design call**: the originally envisioned per-builtin × per-arity closure
+  adapter template (extension of Phase 35.1 nullary) was **scrapped** —
+  boilerplate would explode as builtin × arity × backend. Instead each
+  codegen got an **AST-local synthesize** helper (`synthesize_curried_eta` /
+  `_llvm` / `_wasm`); the Var handler detects a multi-arg curried builtin in
+  value position and synthesizes a fully eta-expanded `fn __arg0 -> fn
+  __arg1 -> ... -> builtin __arg0 ... __argN` Fun chain on the spot, then
+  re-feeds it to `emit_expr`. The existing anonymous-Fun adapter machinery
+  (Phase 5.7-b) builds the closure; the nested inner App hits each
+  builtin's direct-call fast path.
+- **Supported builtins (9)**: `owned_vec_push` / `owned_vec_get` /
+  `vec_push` / `vec_get` / `vec_set` / `strbuf_push` / `map_get` /
+  `map_has` / `map_set`.
+- **Examples**:
   ```
   let push_v = owned_vec_push v in
   let _ = push_v 1 in
   let _ = push_v 2 in ...
 
-  let set_in_m = map_set m in            // 3-arg の 1-arg partial
+  let set_in_m = map_set m in            // 1-arg partial of a 3-arg
   let _ = set_in_m "a" 1 in ...
   ```
-- **制限事項**: fully unapplied (`let push = owned_vec_push`) は let-poly
-  後の型が polymorphic になるため、 use 側で `Annot` か concrete arg 渡しで
-  型を固定する必要あり (Phase 35 nullary と同じ制約)
-- **slice 構成**: `46b2704` Phase 38.C-1 spike (C / owned_vec_push) /
-  `24ff513` 38.C-2 (C / 残り 2-arg) / `a6fb4bf` 38.C-3 (C / 3-arg) /
-  `8265992` 38.C-4/5 (LLVM + Wasm port)
+- **Limitation**: fully unapplied (`let push = owned_vec_push`) becomes
+  polymorphic after let-poly, so the use site must pin the type with `Annot`
+  or a concrete argument (same constraint as Phase 35 nullary).
+- **Slice layout**: `46b2704` Phase 38.C-1 spike (C / owned_vec_push) /
+  `24ff513` 38.C-2 (C / remaining 2-arg) / `a6fb4bf` 38.C-3 (C / 3-arg) /
+  `8265992` 38.C-4/5 (LLVM + Wasm port).
 
 ---
 
-## 2026-06-22 (続き — Phase 37 公開準備)
+## 2026-06-22 (cont. — Phase 37 public-release prep)
 
-Phase 36 syntactic sugar 完了後、 mere を public 化するための準備スプリント。
-**LICENSE 採択 + CI 整備 + 実装 polish B/A 完了**。 1488 → **1498 tests**。
+A prep sprint to public-ize mere after Phase 36 syntactic sugar.
+**LICENSE adopted + CI set up + B/A implementation polish complete**.
+1488 → **1498 tests**.
 
-- **LICENSE 採択 (MIT 単独)**: `LICENSE` (MIT) + `CONTRIBUTING.md` で
-  future MIT OR Apache-2.0 dual の余地を contributor に予告。 OCaml lang 系
-  (Lua / Zig / Julia / Nim / F#) の主流 license と一致。 戦略経緯は
-  `internal design notes` Section F
-- **GitHub Actions CI**: ubuntu + macos × OCaml 5.1/5.4 で
-  `dune build` + `dune runtest`。 README に CI / License バッジ追加
-- **Phase 37.B 網羅性検査 Phase 2**: `is_total_pattern` を tuple / record に
-  再帰 (`(a, b)` や `{ x = a, y = b }` は total として認識)、 int / str /
-  float / tuple / record の wildcard 警告に type hint を付与
-  (`"no wildcard arm for int"` 等)。 1488 → 1494 tests
-- **Phase 37.A `while` at top-level (3 backend)**: `let _ = while cond do
-  body;` が main 直下でも動くよう、 C / LLVM / Wasm の `lift_fn_skels` を
-  拡張。 `Let (P_*, Let_rec (bs, lr_body), rest)` を見つけたら bs を
-  top-level fn skel に lift して value を lr_body に置換。 1494 → 1498 tests
-- **Phase 37.C multi-arg curried builtin first-class**: DEFERRED §1.2 A2
-  残り。 実装規模を再見積もりして **Phase 38.C へ defer** (2-arg curried
-  builtin の closure-form 化は outer / inner adapter の 2 段生成が必要、
-  vec_push / map_set 等 10+ builtin × 3 backend で boilerplate が大きい)
-- **`.gitignore` / `.gitattributes`**: editor / OS / codegen 出力を ignore、
-  `*.mere linguist-language=OCaml` で Linguist 登録までの暫定ハイライト
-- **CLI ergonomics polish**: `--version` / `-v` flag 追加、 unknown flag に
-  明示エラー、 help を 4 backend feature parity 反映 (旧
-  "Phase N prep, int subset" 表記を削除)、 help 末尾に docs / examples の
-  場所を追記
-- **opam package 化**: `dune-project` に `(package mere)` 宣言 + `bin/dune`
-  に `(public_name mere)`。 `generate_opam_files true` で `mere.opam`
-  auto-generate。 `opam install .` が動くように
+- **LICENSE (MIT alone)**: `LICENSE` (MIT) + `CONTRIBUTING.md`, with a
+  contributor heads-up that we may go MIT OR Apache-2.0 dual in the future.
+  Matches the mainstream license of OCaml-family languages
+  (Lua / Zig / Julia / Nim / F#). Strategy notes are in `internal design
+  notes` Section F.
+- **GitHub Actions CI**: ubuntu + macos × OCaml 5.1/5.4 running `dune build`
+  + `dune runtest`. CI / License badges added to README.
+- **Phase 37.B exhaustiveness Phase 2**: `is_total_pattern` recurses into
+  tuple / record (`(a, b)` and `{ x = a, y = b }` count as total),
+  type hints attached to wildcard warnings for int / str / float / tuple /
+  record (`"no wildcard arm for int"` etc.). 1488 → 1494 tests.
+- **Phase 37.A `while` at top-level (3 backends)**: extended C / LLVM / Wasm
+  `lift_fn_skels` so `let _ = while cond do body;` works directly under
+  `main`. When `Let (P_*, Let_rec (bs, lr_body), rest)` is seen, `bs` is
+  lifted to a top-level fn skel and the value is replaced with `lr_body`.
+  1494 → 1498 tests.
+- **Phase 37.C multi-arg curried builtin first-class**: the remainder of
+  DEFERRED §1.2 A2. Re-estimated implementation size and **deferred to
+  Phase 38.C** (closure-form for 2-arg curried builtins requires
+  outer/inner adapter generation in two stages, with boilerplate piling up
+  across 10+ builtins like vec_push / map_set × 3 backends).
+- **`.gitignore` / `.gitattributes`**: ignore editor / OS / codegen output;
+  `*.mere linguist-language=OCaml` as interim highlighting until Linguist
+  registration.
+- **CLI ergonomics polish**: `--version` / `-v` flag, explicit error for
+  unknown flags, help text updated to reflect 4-backend feature parity
+  (dropped legacy "Phase N prep, int subset" wording), added pointer to
+  docs / examples at the end of help.
+- **opam packaging**: `(package mere)` in `dune-project` + `(public_name
+  mere)` in `bin/dune`. `generate_opam_files true` auto-generates
+  `mere.opam`. `opam install .` works.
 
 ---
 
-## 2026-06-22 (続き — Phase 36 syntactic sugar + dogfood examples)
+## 2026-06-22 (cont. — Phase 36 syntactic sugar + dogfood examples)
 
-Phase 32 (FFI) 完了後、Phase 33 (dogfood example バッチ + did-you-mean
-expansion)、Phase 34 (float 3 backend + libm dispatch)、Phase 35 (DEFERRED
-§1.2 A1: nullary factory builtin first-class value)、Phase 36 (13 syntactic
-sugar + 16 prelude entry + 47 example + 8 DEFERRED fix) を連続走破。
-**1486 → 1488 tests**、example 61 → 118 本 (47 本追加)、syntactic surface が
-ML 系として実用域に到達。
+After Phase 32 (FFI), ran straight through Phase 33 (dogfood example batch
++ did-you-mean expansion), Phase 34 (float on 3 backends + libm dispatch),
+Phase 35 (DEFERRED §1.2 A1: nullary factory builtin first-class value), and
+Phase 36 (13 syntactic sugars + 16 prelude entries + 47 examples + 8
+DEFERRED fixes). **1486 → 1488 tests**, examples 61 → 118 (47 new), the
+syntactic surface reached practical territory for an ML-family language.
 
-- **Phase 36 sugars (13 種)**: range `a..b` / operator section `(+ 1)` /
-  cons `1 :: xs` / reverse pipe `f <| x` / apply `f @@ x` / lambda shorthand
-  `\x -> ...` / string interpolation `"x = {show n}"` (lexer で再帰的に
-  tokenize、`\{` で escape、ネスト string 拒否) / `?` (Option early-return) /
-  `?!` (Result early-return) / list comprehension multi-gen
-  `[f x | x <- xs, p x]` / `if let pat = e then ... else ...` /
-  `for x in xs do body` (→ `list_iter`) / `while cond do body`
-  (→ `let rec __while_N = fn () -> if cond then body; __while_N () in
-  __while_N ()`)
-- **Phase 36 prelude (16 entry)**: `range` / `list_filter` / `list_take` /
-  `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` /
-  `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` /
-  `list_product` / `list_max` / `list_min` (累計 34 entry)。`sum`/`product`/
-  `max`/`min` は `let rec` で定義 (test helper の `codegen_with_decls` が
-  `Top_let_rec` を skip するため一見複雑)
-- **Phase 36 DEFERRED fix (8 件)**: §1.13 narrow value restriction
-  (mutable container を含む型を let-bind した時は generalize しない) /
-  §1.14 lifted closure capture が global を `load`/`global.get` 経由 /
-  §1.15 C codegen の深い list literal で O(2^N) 遅い (Constr 内
-  `emit_expr arg` 二重呼び出し → 単回キャッシュ) / §1.16 region 内
-  `strbuf_to_str` が region escape 時に dangling pointer (C/LLVM で
-  `__lang_default_region` alloc に切替) / §1.17 C codegen の `type result`
-  shadow が `List.combine` で落ちる (polymorphic_variants から remove +
-  variant_decls dedupe last-wins) / §1.18 Phase 30.2 top-level global の
-  初期化順 (source-order inline init) / §1.19 nested lambda が top-level
-  fn 参照で unbound (C/LLVM/Wasm に `closure_wrapper_forward_decls` 追加、
-  Wasm は `fn_closure_table_idx` を `emit_fn_def` 前に populate) /
-  §1.20 C codegen の polymorphic variant 内 user record forward decl
-  (unified topo sort に mono variant/record bodies を含める)
-- **Phase 36 examples (47 本)**: 基本 dogfood (histogram / traffic_light /
+- **Phase 36 sugars (13 kinds)**: range `a..b` / operator section `(+ 1)` /
+  cons `1 :: xs` / reverse pipe `f <| x` / apply `f @@ x` / lambda
+  shorthand `\x -> ...` / string interpolation `"x = {show n}"` (lexer
+  re-tokenizes recursively, `\{` to escape, nested strings rejected) /
+  `?` (Option early-return) / `?!` (Result early-return) / list
+  comprehension multi-gen `[f x | x <- xs, p x]` / `if let pat = e then
+  ... else ...` / `for x in xs do body` (→ `list_iter`) / `while cond do
+  body` (→ `let rec __while_N = fn () -> if cond then body; __while_N ()
+  in __while_N ()`).
+- **Phase 36 prelude (16 entries)**: `range` / `list_filter` / `list_take` /
+  `list_drop` / `list_find` / `list_append` / `list_concat` /
+  `list_flat_map` / `list_zip` / `list_for_all` / `list_any` /
+  `list_member` / `list_sum` / `list_product` / `list_max` / `list_min`
+  (cumulative 34 entries). `sum` / `product` / `max` / `min` are defined
+  with `let rec` (looks complex because the test helper
+  `codegen_with_decls` skips `Top_let_rec`).
+- **Phase 36 DEFERRED fixes (8)**: §1.13 narrowed value restriction (do
+  not generalize types containing mutable containers) / §1.14 lifted
+  closure capture goes through `load` / `global.get` for globals / §1.15
+  C codegen O(2^N) slowdown on deep list literals (double `emit_expr arg`
+  inside Constr → cache once) / §1.16 `strbuf_to_str` inside a region had
+  dangling pointer on region escape (C/LLVM switched to
+  `__lang_default_region` alloc) / §1.17 C codegen `type result` shadow
+  blew up `List.combine` (remove from `polymorphic_variants` + dedupe
+  variant_decls last-wins) / §1.18 Phase 30.2 top-level global init order
+  (source-order inline init) / §1.19 nested lambda unbound on top-level fn
+  reference (added `closure_wrapper_forward_decls` in C/LLVM/Wasm; Wasm
+  populates `fn_closure_table_idx` before `emit_fn_def`) / §1.20 C codegen
+  forward decl for user record inside polymorphic variant (include mono
+  variant/record bodies in the unified topo sort).
+- **Phase 36 examples (47)**: basic dogfood (histogram / traffic_light /
   event_counter / html_builder / fallible_lookup / config_loader /
-  csv_writer / markdown_to_text / calendar_lite / matrix_2d / borrow_chain /
-  cache_sim / simple_query / caesar_cipher / fraction / roman_numerals /
+  csv_writer / markdown_to_text / calendar_lite / matrix_2d / borrow_chain
+  / cache_sim / simple_query / caesar_cipher / fraction / roman_numerals /
   password_strength / brackets_balance / morse_code / luhn_check /
   tic_tac_toe / palindrome / anagram / base_conv / rps_game / scoreboard /
-  eight_queens / collatz / bin_tree_traversal / knapsack / factory_value) +
-  sugar showcase (range_demo / sections / cons_pipe_demo / sugar_demo /
-  question_demo / sugar_showcase / comprehension / statistics / if_let_demo /
-  for_loop_demo / while_loop_demo) + 大物 4 本 (csv_summary / game_of_life /
-  sudoku_check / calc 138 行 / maze_solver BFS)
-- **Phase 35**: DEFERRED §1.2 A1 (first-class factory builtin eta-wrap) を
-  3 backend に展開。`let mk = map_new` のような unapplied builtin が
-  value として正しく動くように eta_adapters を C/LLVM/Wasm に追加。
-- **Phase 34**: float MVP を 3 backend に展開。Phase 34.1 = C、Phase 34.2 =
-  LLVM (`fadd`/`fsub`/`fcmp` + `@llvm.fabs.f64` + `__lang_str_of_float`)、
-  Phase 34.3 = Wasm (i32 ptr to heap-alloc f64 slot + host import で format)、
-  Phase 34.4/34.5 = libm dispatch (sqrt/sin/cos/tan/f_pow/atan2) を 3 backend
-  + math_demo example
-- **Phase 33**: dogfood example バッチ + did-you-mean expansion。Phase 33.0
-  did-you-mean を multi-candidate top-3 listing に拡張 (DEFERRED §5.1 部分
-  解消)、Phase 33.1-33.7 で D3 option_pipeline / H1 prime_sieve / G5
-  rate_limiter / C4 stack_calc / G6 markdown_toc / G4 bank_account / H3
-  graph_bfs を 4 backend で diff = 0
+  eight_queens / collatz / bin_tree_traversal / knapsack / factory_value)
+  + sugar showcase (range_demo / sections / cons_pipe_demo / sugar_demo /
+  question_demo / sugar_showcase / comprehension / statistics /
+  if_let_demo / for_loop_demo / while_loop_demo) + 4 big ones (csv_summary
+  / game_of_life / sudoku_check / calc 138 lines / maze_solver BFS).
+- **Phase 35**: extended DEFERRED §1.2 A1 (first-class factory builtin
+  eta-wrap) to all 3 backends. Added eta_adapters to C/LLVM/Wasm so that
+  unapplied builtins like `let mk = map_new` work correctly as values.
+- **Phase 34**: float MVP rolled out to 3 backends. Phase 34.1 = C,
+  Phase 34.2 = LLVM (`fadd` / `fsub` / `fcmp` + `@llvm.fabs.f64` +
+  `__lang_str_of_float`), Phase 34.3 = Wasm (i32 ptr to heap-alloc f64
+  slot + host import for formatting), Phase 34.4/34.5 = libm dispatch
+  (sqrt/sin/cos/tan/f_pow/atan2) on 3 backends + `math_demo` example.
+- **Phase 33**: dogfood example batch + did-you-mean expansion. Phase
+  33.0 expanded did-you-mean to multi-candidate top-3 listing (partially
+  closes DEFERRED §5.1). Phases 33.1–33.7 added D3 option_pipeline / H1
+  prime_sieve / G5 rate_limiter / C4 stack_calc / G6 markdown_toc / G4
+  bank_account / H3 graph_bfs working with diff = 0 on 4 backends.
 
 ---
 
-## 2026-06-22 (続き — Phase 32 C1 FFI)
+## 2026-06-22 (cont. — Phase 32 C1 FFI)
 
-Phase 31 直後、Outlook §C1 (FFI = 外部 C 関数呼出) を 5 slice + 1 polish で
-連続走破。**1480 → 1486 tests**、`extern fn <name>: <ty>;` 構文で libc
-関数を 4 backend から直接呼べるようになった。Mere を「単独で動く実験
-言語」から「外と話せる実用言語」へ進化させる第一歩。
+Right after Phase 31, ran Outlook §C1 (FFI = calling external C functions)
+through 5 slices + 1 polish back-to-back. **1480 → 1486 tests**, the
+`extern fn <name>: <ty>;` syntax lets libc functions be called directly
+from all 4 backends. A step that takes Mere from "an experimental
+language that runs by itself" to "a practical language that can talk to
+the outside world".
 
 - **Phase 32.6**: multi-arg curried extern (`extern fn setenv: str -> str
-  -> int -> int;`) を 3 backend で動かす。collect_extern helper で App
-  chain を walk して全 args を集める。getenv / setenv / system も
-  scripts/run_wasm.js に default JS impl 追加。`examples/ffi_demo.mere`
-  に 3-arg setenv example を追加、4 backend で diff = 0
-- **Phase 32.5**: §32.1-32.4 + §32.6 の test を 4 + 2 件追加 (1484 → 1486)
-  + `examples/ffi_demo.mere` 作成
-- **Phase 32.4**: Wasm codegen で `(import "env" <name> ...)` env host
-  import + `call $<name>`、scripts/run_wasm.js に getpid/getppid 等の
-  default JS impl 注入
-- **Phase 32.3**: LLVM codegen で `declare <ret> @<name>(<args>)` + call
-- **Phase 32.2**: C codegen で `extern <ret> <name>(<args>);` 宣言 +
-  direct call。unit 引数 → ()、unit return → (call, 0) で int 化
-- **Phase 32.1**: lexer (T_extern) + AST (Top_extern) + parser + typer
-  + pipeline + repl + bin + eval.ml の lookup_extern で 9 mock
-  (getpid / getppid / getenv / setenv / system / sleep / srand / rand
-  / unix_time)
-- **Phase 32.0**: `40_ffi_design.md` paper trial — 構文 / 型 / ABI /
-  per-backend 戦略を確定。MVP 型範囲は int / bool / str / unit のみ、
-  float / tuple / record / variant / callback は defer
+  -> int -> int;`) working on 3 backends. The `collect_extern` helper
+  walks the App chain to gather all args. Added default JS impls for
+  getenv / setenv / system to `scripts/run_wasm.js`. Added a 3-arg setenv
+  example in `examples/ffi_demo.mere`; diff = 0 on 4 backends.
+- **Phase 32.5**: added 4 + 2 tests for §32.1–32.4 + §32.6 (1484 → 1486),
+  created `examples/ffi_demo.mere`.
+- **Phase 32.4**: Wasm codegen emits `(import "env" <name> ...)` host
+  import + `call $<name>`; default JS impls for getpid/getppid etc.
+  injected into `scripts/run_wasm.js`.
+- **Phase 32.3**: LLVM codegen emits `declare <ret> @<name>(<args>)` + call.
+- **Phase 32.2**: C codegen emits `extern <ret> <name>(<args>);` decl +
+  direct call. unit arg → `()`; unit return → `(call, 0)` for int-ification.
+- **Phase 32.1**: lexer (T_extern) + AST (Top_extern) + parser + typer +
+  pipeline + repl + bin + 9 mocks via `lookup_extern` in eval.ml (getpid /
+  getppid / getenv / setenv / system / sleep / srand / rand / unix_time).
+- **Phase 32.0**: `40_ffi_design.md` paper trial — fixed syntax / typing /
+  ABI / per-backend strategy. MVP type range is int / bool / str / unit
+  only; float / tuple / record / variant / callback deferred.
 
 ## 2026-06-22
 
-Phase 29-31 を深夜跨ぎで 11 slice。**4 backend で 16 examples PERFECT** を
-出発点に、dogfood (toy_sql 1165 LoC) → bug 発掘 → 全 fix → README polish
-を 1 日で完結。1469 → 1480 tests、DEFERRED §1.10 / §1.11 / §1.12 を完全解決、
-mere が外向け説明に耐える状態に。
+Ran 11 slices of Phase 29-31 across the night. Starting from **16 examples
+PERFECT on 4 backends**, finished dogfood (toy_sql 1165 LoC) → bug hunt →
+all fixes → README polish in one day. 1469 → 1480 tests; DEFERRED §1.10 /
+§1.11 / §1.12 fully resolved; mere reached a state presentable to
+outsiders.
 
-- **Phase 31.1**: README を Phase 22-31 まで反映 (1268 → 1480 tests、3 → 4
-  backend feature parity、toy_sql 1165 LoC、signature spread / Result helpers
-  / inner-fn lifting / top-level global 化 / Wasm runtime 実行 / str_compare
-  3 backend)。
-- **Phase 31.0**: `str_compare` を 3 backend (C / LLVM / Wasm) に移植。interp
-  の OCaml `compare s t` (-1/0/1) と完全一致するよう sign-normalize。
-  C は inline strcmp、LLVM は strcmp + select、Wasm は専用 runtime helper。
-- **Phase 30.2c** ⭐: Wasm codegen で top-level 非-fn let を `(global $name
-  (mut i32))` として宣言、main 開始時に `global.set $name` で初期化。
-  Var emit は `global.get $name`。値が全 i32 で uniform に動く。
-- **Phase 30.2b**: LLVM codegen で `@<name> = internal global <ll_type>
-  zeroinitializer` として宣言、main 開始時に `store <ll_type> <init>, ptr
-  @<name>`、Var 参照は load。
-- **Phase 30.2a**: C codegen で top-level 非-fn let を file-scope の
-  `static <type> <name>;` として宣言、main 開始時に `<name> = <init>;` で
-  初期化。**skels の free_vars に名前が出る let だけ**を global 化する
-  heuristic で既存 test を保護。**DEFERRED §1.10 を 3 backend 全部で
-  完全解決**。
-- **Phase 30.1** ⭐: closure 内で captured 名を let で shadow した時、body
-  emission で `current_env_subst` から shadow 名を一時的に除外。bug の
-  root cause は P_tuple 特有ではなく **env_subst が shadow を尊重して
-  いなかった** こと。Let P_var / Let P_tuple 両方で適用。**DEFERRED §1.11
-  完全解決**。
-- **Phase 30.0** ⭐: builtin (`is_alpha` / `is_digit` / `is_space`) の
-  hardcoded dispatch に `when not (Hashtbl.mem toplevel_fn_names ...)` guard
-  を追加。user-defined fn が同名で存在する場合 builtin dispatch を skip。
-  C / LLVM / Wasm の 3 backend で同パターンを適用。**DEFERRED §1.12 完全解決**。
-- **Phase 29.3** ⭐: toy_sql に nested-loop JOIN 実装 + qualify_row +
-  project_join + 7 JOIN tests。**toy_sql 全体で 1165 LoC、4 backend で
-  diff = 0 PERFECT、59 tests** (tokenizer 22 + parser 13 + executor 17
-  + JOIN 7)。N1/N2/N3 dogfood の最終評価: 1165 LoC では需要が顕在化せず、
-  痛みは codegen の足回り (DEFERRED §1.10-§1.12) に集中。
-- **Phase 29.2**: toy_sql executor (Catalog Map[str, table_meta] + Storage
-  OwnedVec[tagged_row] + WHERE filter + project + 17 tests)。Map[K, V=variant]
-  と OwnedVec[variant] codegen が一発動作 (Phase 15.16 と対称)。
-- **Phase 29.1**: toy_sql SQL parser (AST + continuation 流 + 13 tests)。
-  **dogfood 発掘**: C codegen の tuple destructure rebind バグ (DEFERRED
-  §1.11)、Wasm memory 1 page (64KB) を 16 pages (1MB) に拡張 (string-heavy
-  app 対応)。
-- **Phase 29.0**: toy_sql foundation (Value variant + Token variant + 手書き
-  tokenizer + 22 self-tests)。**dogfood 発掘**: C codegen の record field
-  × nested lambda capture バグ (DEFERRED §1.10)、C codegen が builtin で
-  user-defined fn を shadow (DEFERRED §1.12)。
+- **Phase 31.1**: README updated to reflect Phase 22-31 (1268 → 1480 tests;
+  3 → 4 backend feature parity; toy_sql 1165 LoC; signature spread /
+  Result helpers / inner-fn lifting / top-level globalization / Wasm
+  runtime execution / str_compare on 3 backends).
+- **Phase 31.0**: ported `str_compare` to 3 backends (C / LLVM / Wasm).
+  Sign-normalized to match interp's OCaml `compare s t` (-1/0/1) exactly.
+  C uses inline strcmp, LLVM uses strcmp + select, Wasm uses a dedicated
+  runtime helper.
+- **Phase 30.2c** ⭐: Wasm codegen declares non-fn top-level lets as
+  `(global $name (mut i32))`, initializes them with `global.set $name` at
+  main entry. Var emits `global.get $name`. Works uniformly since all
+  values are i32.
+- **Phase 30.2b**: LLVM codegen declares them as `@<name> = internal
+  global <ll_type> zeroinitializer`, stores init at main entry, Var
+  reference is `load`.
+- **Phase 30.2a**: C codegen declares non-fn top-level lets as file-scope
+  `static <type> <name>;`, initializes at main entry. The heuristic
+  **only globalizes lets whose name shows up in skels' free_vars**,
+  protecting existing tests. **DEFERRED §1.10 fully resolved on all 3
+  backends**.
+- **Phase 30.1** ⭐: when a captured name in a closure was shadowed by
+  let, body emission now temporarily removes the shadowed name from
+  `current_env_subst`. Root cause was not specific to P_tuple — it was
+  **env_subst not respecting shadowing**. Applied to both Let P_var and
+  Let P_tuple. **DEFERRED §1.11 fully resolved**.
+- **Phase 30.0** ⭐: added `when not (Hashtbl.mem toplevel_fn_names ...)`
+  guard to the hardcoded dispatch of builtins (`is_alpha` / `is_digit` /
+  `is_space`). If a user-defined fn shadows them, builtin dispatch is
+  skipped. Same pattern applied to C / LLVM / Wasm. **DEFERRED §1.12
+  fully resolved**.
+- **Phase 29.3** ⭐: implemented nested-loop JOIN in toy_sql + qualify_row
+  + project_join + 7 JOIN tests. **toy_sql total 1165 LoC, diff = 0
+  PERFECT on 4 backends, 59 tests** (tokenizer 22 + parser 13 + executor
+  17 + JOIN 7). Final assessment of N1/N2/N3 dogfood: at 1165 LoC the
+  demand never materialized; pain concentrated in codegen plumbing
+  (DEFERRED §1.10–§1.12).
+- **Phase 29.2**: toy_sql executor (Catalog Map[str, table_meta] +
+  Storage OwnedVec[tagged_row] + WHERE filter + project + 17 tests).
+  Map[K, V=variant] and OwnedVec[variant] codegen worked first try
+  (symmetric to Phase 15.16).
+- **Phase 29.1**: toy_sql SQL parser (AST + continuation flow + 13 tests).
+  **Dogfood findings**: C codegen tuple destructure rebind bug
+  (DEFERRED §1.11), Wasm memory expanded from 1 page (64KB) to 16 pages
+  (1MB) for string-heavy apps.
+- **Phase 29.0**: toy_sql foundation (Value variant + Token variant +
+  hand-written tokenizer + 22 self-tests). **Dogfood findings**: C
+  codegen record-field × nested-lambda capture bug (DEFERRED §1.10), C
+  codegen shadowing user-defined fn with builtin (DEFERRED §1.12).
 
 ---
 
 ## 2026-06-21
 
-Phase 21 で deferred を 1 件閉じた後、Phase 22 → 23 → **Phase 24-27 (29
-slice 連続)** で 4 backend feature parity を完成、Phase 28 で dogfood
-examples を 4 本追加。**1268 → 1469 tests passing**、DEFERRED §1.7 /
-§1.8 / §1.9 を解決、4 backend で 16 examples が diff = 0 PERFECT 一致。
+After closing one deferred item in Phase 21, ran Phase 22 → 23 → **Phase
+24-27 (29 slices straight)** to complete 4-backend feature parity, then
+added 4 dogfood examples in Phase 28. **1268 → 1469 tests passing**,
+DEFERRED §1.7 / §1.8 / §1.9 resolved, 16 examples match diff = 0 PERFECT
+on all 4 backends.
 
-- **Phase 28.1**: C codegen の deep nested lambda capture bug を fix
-  (DEFERRED §1.9)。`pattern_vars_with_types` helper を追加、Match emit_arms
-  で arm body / guard を with_pat スコープに包んで pattern bindings を
-  current_var_types に prepend。これで arm body 内 nested closure の
-  free_vars filter が pattern-bound names を pick up、closure env に
-  書き込まれる。LLVM Phase 25.3 と同形 (2 件目の N+1 → N 逆移植)。
-- **Phase 28.0**: 新規 examples 4 本を 4 backend で動作確認:
-  - D2 `chained_parse.mere`: Result chain idiom (result_and_then / result_map
-    / result_or_else)
-  - C1 `state_machine.mere`: variant + match transition
-  - I1 `ini_parser.mere`: line parser + Map (Phase 27.1 insertion order
+- **Phase 28.1**: fix deep nested lambda capture bug in C codegen
+  (DEFERRED §1.9). Added `pattern_vars_with_types` helper; Match
+  emit_arms wraps arm body / guard in with_pat scope and prepends
+  pattern bindings to current_var_types. Nested closures in arm bodies
+  now pick up pattern-bound names in free_vars filter and write them
+  into closure env. Same shape as LLVM Phase 25.3 (second N+1 → N
+  backport).
+- **Phase 28.0**: 4 new examples verified on 4 backends:
+  - D2 `chained_parse.mere`: Result chain idiom (result_and_then /
+    result_map / result_or_else)
+  - C1 `state_machine.mere`: variant + match transitions
+  - I1 `ini_parser.mere`: line parser + Map (Phase 27.1 insertion-order
     dogfood)
   - C5 `regex_lite.mere`: recursive AST + backtracking matcher
-  **12 → 16 examples が 4 backend で PERFECT 一致**。chained_parse で
-  C codegen `undeclared identifier 'rest'` を発掘 (DEFERRED §1.9)。
-- **Phase 27.3** ⭐: Wasm ty_tag が StrBuf を許可 (Phase 15.9 実装済の
-  mere_strbuf_* runtime が StrBuf in tuple/variant payload で使えなかった
-  blocker を解除)。**json_writer が Wasm runtime PERFECT 一致 → Wasm 12/12
-  PERFECT 達成 → 4 backend feature parity 完全達成**。
-- **Phase 27.2** ⭐: Wasm runtime 実行検証。`scripts/run_wasm.js` (Node.js
-  host harness with puts / read_file / write_file imports) を追加、Wasm
-  main 末尾に show_<main_ty> + puts を emit、add_show_type main_ty で
-  main_ty 用 show を強制 emit。**11/11 examples が Wasm runtime で interp
-  と PERFECT 一致**。
-- **Phase 27.1** ⭐: interp Map iter order を insertion order に固定。
-  V_map を `(Hashtbl, value list ref)` に変更、map_set で新規 key を
-  append、map_iter は list 経由で iterate。**全 3 backend で 12/12 PERFECT
-  達成** (C/LLVM 10 → 12、word_freq + mini_shell の Map order cosmetic
-  diff 解消)。
-- **Phase 27.0**: C codegen が unit main_ty で `"()"` を print するように
-  (LLVM Phase 25.11 の C 逆移植)。template_engine / json_writer / inventory
-  / cap_handler が C で trailing `()` 解消、C PERFECT が 6 → 10 に。
-- **Phase 26 (7 slice)**: Wasm codegen で 11/12 examples が EMIT+wat2wasm
-  成功。Phase 22-25 の累積機能 (variant boxed payload / stdlib builtins /
-  try_or / inner let-rec lifting / multi-instantiation specialization /
-  str_split / str_join / read_file / write_file / lift_fn_skels non-Fun
-  walk / 各種 polishing) を Wasm に逐次移植。
-- **Phase 25 (13 slice)**: LLVM codegen で 12/12 examples が動作 (PERFECT
-  10)。Phase 24.x の C 機能と並列に、LLVM 側で boxed payload / stdlib /
-  try_or / inner let-rec lifting / multi-instantiation specialization /
-  show_str escape / fn dedup / nested P_constr / 不足 builtin / 各種
-  polishing を実装。
-- **Phase 24 (5 slice)**: C codegen で 12/12 example 動作 (template_engine
-  / json_writer / inventory / cap_handler / word_freq / mini_shell)。
-  variant payload を `{ tag, payload_ptr }` の boxed 表現に変更し
-  ポリモーフィックな variant コンテナを 3 backend で統一。
-- **Phase 23 (5 slice)**: json_parser が C codegen で interp と 100%
-  一致 (Phase 23.2 で prelude に result_map / result_and_then /
-  result_or_else 追加、Phase 23.3 で多相 user let-rec の per-instantiation
-  specialization、Phase 23.5 で show_str escape — **DEFERRED §1.7 完全解決**)。
-- **Phase 22 (5 slice)**: try_or + str ops (str_split / str_join /
-  str_count / str_index_of) を全 backend で動作。
-- **Phase 21 (1 slice)**: DEFERRED §1.7 部分解決 (poly user let-rec の
-  C codegen monomorphization の第一段階)。
+
+  **12 → 16 examples PERFECT-matching on 4 backends**. chained_parse
+  surfaced C codegen `undeclared identifier 'rest'` (DEFERRED §1.9).
+- **Phase 27.3** ⭐: Wasm ty_tag accepts StrBuf (releases blocker where
+  Phase 15.9-implemented `mere_strbuf_*` runtime couldn't be used with
+  StrBuf inside tuple/variant payload). **json_writer matches PERFECT on
+  Wasm runtime → 12/12 PERFECT on Wasm → full 4-backend feature parity
+  achieved**.
+- **Phase 27.2** ⭐: Wasm runtime execution verification. Added
+  `scripts/run_wasm.js` (Node.js host harness with puts / read_file /
+  write_file imports). Wasm main tail emits `show_<main_ty> + puts`;
+  `add_show_type main_ty` forces show emission for main_ty.
+  **11/11 examples match PERFECT vs interp on Wasm runtime**.
+- **Phase 27.1** ⭐: pinned interp Map iter order to insertion order.
+  V_map changed to `(Hashtbl, value list ref)`; map_set appends new
+  keys; map_iter iterates via the list. **All 3 backends now 12/12
+  PERFECT** (C/LLVM 10 → 12; word_freq + mini_shell Map-order cosmetic
+  diff gone).
+- **Phase 27.0**: C codegen prints `"()"` for unit main_ty (backport of
+  LLVM Phase 25.11). template_engine / json_writer / inventory /
+  cap_handler no longer trail `()` on C; C PERFECT 6 → 10.
+- **Phase 26 (7 slices)**: 11/12 examples EMIT + wat2wasm successful on
+  Wasm codegen. Ported the cumulative Phase 22-25 features (variant
+  boxed payload / stdlib builtins / try_or / inner let-rec lifting /
+  multi-instantiation specialization / str_split / str_join / read_file
+  / write_file / lift_fn_skels non-Fun walk / various polishing) to Wasm
+  one slice at a time.
+- **Phase 25 (13 slices)**: LLVM codegen runs 12/12 examples (PERFECT 10).
+  In parallel with Phase 24.x C features, implemented boxed payload /
+  stdlib / try_or / inner let-rec lifting / multi-instantiation
+  specialization / show_str escape / fn dedup / nested P_constr /
+  missing builtins / various polishing on LLVM side.
+- **Phase 24 (5 slices)**: 12/12 examples working on C codegen
+  (template_engine / json_writer / inventory / cap_handler / word_freq /
+  mini_shell). Variant payload switched to `{ tag, payload_ptr }` boxed
+  representation, unifying polymorphic variant containers across all 3
+  backends.
+- **Phase 23 (5 slices)**: json_parser matches interp 100% on C codegen
+  (Phase 23.2 added result_map / result_and_then / result_or_else to
+  prelude; Phase 23.3 per-instantiation specialization of polymorphic
+  user let-rec; Phase 23.5 show_str escape — **DEFERRED §1.7 fully
+  resolved**).
+- **Phase 22 (5 slices)**: try_or + str ops (str_split / str_join /
+  str_count / str_index_of) working on all backends.
+- **Phase 21 (1 slice)**: partial resolution of DEFERRED §1.7 (first
+  stage of polymorphic user let-rec monomorphization on C codegen).
 
 ---
 
 ## 2026-06-20
 
-Phase 15 第 16 から始まり、Phase 16 / 17 / 18 を一気に走った 1 日。
-1268 → 1304 tests、DEFERRED §1.4 / §1.5 / §1.6 / §2.1 / §2.5 / §4.1 の
-6 件を解決。**4 backend が non-trivial プログラム (todo_app) で完全
-一致 + borrow checker conflict matrix 全 10 ペア網羅 + module の
-proper scoping (M.Red qualified + open A.B; nested path)** という状態
-に到達。
+Started from Phase 15.16, then sprinted through Phase 16 / 17 / 18 in one
+day. 1268 → 1304 tests, resolved 6 items: DEFERRED §1.4 / §1.5 / §1.6 /
+§2.1 / §2.5 / §4.1. Reached a state with **4 backends matching exactly on
+a non-trivial program (todo_app), full coverage of the 10-pair borrow
+checker conflict matrix, and proper module scoping (M.Red qualified +
+open A.B; nested paths)**.
 
-- **Phase 18.2: `open A.B;` (nested module path への open)** — DEFERRED
-  §4.1 完全完了。`module_bindings` を short-name key に加えて full-path
-  key (`A.B`) でも登録、parser の `T_open` を path parser に refactor。
-  既存 `open M;` は同一 code path で動く (1304 passing)。
-- **Phase 18.1: module 内 ctor / record の M-prefix scoping** — DEFERRED
-  §4.1 残。`module M { type T = Red | Blue; }` 後に `M.Red` qualified
-  access、`M.Pt { ... }` qualified record literal、`match v with | M.Red
-  -> ...` qualified pattern が動く。2 module 間で同名 ctor の collision
-  も qualified 形式で disambiguate 可能。実装は疎結合: 新 AST decl
-  `Top_ctor_alias` / `Top_record_alias` + 共有 alias table (`Ast.ctor_aliases`)
-  + typer.alias_ctor + eval が V_constr 構築時に canonical 名へ正規化。
-  bare 名は backward compat で動く (1301 passing)。
-- **Phase 17.2: 借用 conflict matrix を全 10 ペア網羅 + tuple 内部衝突**
-  — DEFERRED §2.5 解決。4 mode × 4 mode = 10 ペアの conflict matrix の
-  うち未テスト 4 ペア (SW×ER, SW×EW, ER×ER, ER×EW) を test 追加、
-  `check_borrows` の Tuple 分岐を sequential threading に変更、設計
-  doc 08 に「Conflict matrix と拡張履歴」節を追加 (1295 passing)。
-- **Phase 17.1: 関数返り値の borrow を let-bind 名で追跡** — DEFERRED
-  §2.1 完全解決。`let r = f x in let r2 = &mut R r` で f が `&R T` を
-  返すとき、let-bind した name を place として synthetic borrow を
-  active に追加して衝突検出 (1287 passing)。
-- **Phase 16 仕上げ**: 摩擦点 #1/#2/#3/#4 を tutorial / patterns に
-  反映 (`{ t | f = v }` の差分更新、同名 rebinding、closure 引数の
-  型注釈イディオム)。Phase 16 retrospective を新規作成。
-- **Phase 16.4: Wasm の Region_block bump restore を撤去** — DEFERRED
-  §1.6。`let v = region R { vec_to_owned ... } in ...` のように region
-  内 alloc して外に escape させる OwnedVec があると、region 終了で
-  bump が巻き戻り後続 alloc が escape 値を上書きする bug を fix。
-  Wasm region semantics を arena-leak に揃えた (1283 passing)。
-- **Phase 16.3: mk_logger / mk_metrics の 3 backend codegen 対応** —
-  DEFERRED §1.5。interpreter only だった Logger / Metrics cap builtin
-  を C / LLVM / Wasm に揃える。Logger = `{ closure_str_unit info / warn
-  / error }`、Metrics = `{ inc, record (curried str→int→unit) }`。副次
-  変更: `collect_arrow_types` (C/LLVM) が既知 record の field 型を再帰
-  traverse → Logger 経由でしか使われない closure typedef も自動 emit
-  (1281 passing)。
-- **Phase 16.2: C codegen `let x = f x` 同名 rebinding bug を fix** —
-  DEFERRED §1.4。`__auto_type x = ...x...` は C 規則「変数を自身の
-  初期化子で参照してはならない」に該当して clang error。`codegen_c.ml`
-  の Let を一律 2-step 形 `({ __auto_type __let_tmp_<name> = <value>;
-  __auto_type <name> = __let_tmp_<name>; <body>; })` に展開、右辺評価
-  時点ではまだ新 binding が宣言されていないので旧 binding が見える
-  (1269 passing)。
-- **Phase 16.1: 実用 example todo_app.mere で摩擦点 6 件を炙り出す** —
-  OwnedVec[Task] + Logger + vec_map + region を組合せた 110 行の TODO
-  アプリ。設計通り 2 件 (#1/#2 immutable record 更新)、HM 限界 2 件
-  (#3/#4 field access 推論)、真のバグ 2 件 (#5 rebinding, #6 mk_logger
-  codegen)、Wasm bug 1 件 (§1.6) を documentation 化 (1268 passing)。
-- **Phase 15 第十六**: 3 backend で Map[R, K, V] の K を payload 付き
-  variant に拡張 (Mere の全 concrete 型を Map key にできる状態へ)。
+- **Phase 18.2: `open A.B;` (open on nested module path)** — DEFERRED
+  §4.1 fully closed. `module_bindings` registers under both short-name
+  key and full-path key (`A.B`); parser's `T_open` refactored to a path
+  parser. Existing `open M;` follows the same code path (1304 passing).
+- **Phase 18.1: M-prefix scoping for ctors / records inside modules** —
+  remainder of DEFERRED §4.1. After `module M { type T = Red | Blue; }`,
+  qualified access `M.Red`, qualified record literal `M.Pt { ... }`, and
+  qualified patterns `match v with | M.Red -> ...` all work. Same-named
+  ctors across two modules can be disambiguated by qualified form. Loose
+  coupling: new AST decls `Top_ctor_alias` / `Top_record_alias` + shared
+  alias table (`Ast.ctor_aliases`) + typer.alias_ctor + eval normalizes
+  to canonical name when constructing V_constr. Bare names still work
+  for backward compat (1301 passing).
+- **Phase 17.2: full 10-pair borrow conflict matrix + intra-tuple
+  conflict** — resolves DEFERRED §2.5. Of the 4×4=10 conflict pairs,
+  added tests for the 4 untested ones (SW×ER, SW×EW, ER×ER, ER×EW);
+  changed `check_borrows` Tuple branch to sequential threading; added a
+  "Conflict matrix and extension history" section to design doc 08
+  (1295 passing).
+- **Phase 17.1: track function-return borrow by let-bound name** —
+  DEFERRED §2.1 fully resolved. For `let r = f x in let r2 = &mut R r`
+  where `f` returns `&R T`, the let-bound name is used as a place and
+  a synthetic borrow is added to active for conflict detection
+  (1287 passing).
+- **Phase 16 polish**: reflected friction points #1/#2/#3/#4 in tutorial
+  / patterns (`{ t | f = v }` partial update, same-name rebinding, type
+  annotation idiom for closure parameters). Phase 16 retrospective
+  document created.
+- **Phase 16.4: Wasm Region_block bump restore removed** — DEFERRED
+  §1.6. Fixed bug where `let v = region R { vec_to_owned ... } in ...`
+  allocates inside a region and escapes, but the region exit rewinds
+  bump so subsequent allocations overwrite the escaped value. Aligned
+  Wasm region semantics with arena-leak (1283 passing).
+- **Phase 16.3: mk_logger / mk_metrics codegen on 3 backends** —
+  DEFERRED §1.5. Brought interpreter-only Logger / Metrics cap builtins
+  to C / LLVM / Wasm parity. Logger = `{ closure_str_unit info / warn /
+  error }`; Metrics = `{ inc, record (curried str→int→unit) }`. Side
+  change: `collect_arrow_types` (C/LLVM) recursively traverses known
+  record field types → closure typedefs used only via Logger are also
+  auto-emitted (1281 passing).
+- **Phase 16.2: fix C codegen `let x = f x` same-name rebinding bug** —
+  DEFERRED §1.4. `__auto_type x = ...x...` hits the C rule "a variable
+  may not reference itself in its initializer" and triggers a clang
+  error. `codegen_c.ml` Let uniformly expanded to 2-step form
+  `({ __auto_type __let_tmp_<name> = <value>; __auto_type <name> =
+  __let_tmp_<name>; <body>; })`; at rhs evaluation the new binding is
+  not yet declared so the old binding is visible (1269 passing).
+- **Phase 16.1: surface 6 friction points via practical example
+  todo_app.mere** — 110-line TODO app combining OwnedVec[Task] + Logger
+  + vec_map + region. Documented 2 by-design (#1/#2 immutable record
+  update), 2 HM limits (#3/#4 field access inference), 2 real bugs (#5
+  rebinding, #6 mk_logger codegen), 1 Wasm bug (§1.6) (1268 passing).
+- **Phase 15 #16**: extended Map[R, K, V] K to payload-bearing variants
+  across 3 backends (Mere's full concrete type set is now usable as a
+  Map key).
 
 ---
 
 ## 2026-06-19
 
-- **Phase 15 第十六スライス: 3 backend で Map[R, K, V] の K を payload 付き variant に拡張** — Phase 15.15 の nullary variant の延長で、ctor が payload を持つ variant も K として使えるように。Mere のすべての concrete 型を Map key にできる状態へ到達。**(a) C codegen**: `key_eq_for` の variant 分岐を拡張 — `(a.tag == b.tag) && (a.tag == TAG_X ? eq_payload_X : a.tag == TAG_Y ? eq_payload_Y : ... : 0)` のネストした三項演算で per-tag dispatch、nullary ctor は `1` (true) で短絡。payload は再帰的に `key_eq_for` を呼んで比較。C codegen は ctor 間で payload 型が異なっても OK (variant の union 表現を活用)。**(b) LLVM IR**: `emit_map_key_eq_helper_llvm` の variant 分岐を拡張 — extractvalue で tag を取得、tag が一致しない時は 0、一致したら payload を抽出して比較。**LLVM MVP 制約**: ctor 間で payload 型が同一であることが必要 (MVP の variant codegen が単一 payload type を要求するため)。nullary ctor 用の "tag が nullary 集合に含まれるか" check を OR で重ね、payload eq と組み合わせ。**(c) Wasm**: `emit_map_key_eq_wasm` の variant 分岐を拡張 — `i32.load offset=0` で tag 取得後、各 payload-ctor について `if (tag == TAG_X) then eq_payload_X else ...` のネスト if/else 連鎖。最後の else は 1 (nullary or covered)。Wasm も LLVM 同様、MVP 制約で uniform payload type が前提。`is_key_supported` も 3 backend それぞれで payload variant を許可、再帰的に payload 型をチェック。test 5 件追加 (1268 passing) — C は mixed-payload (A int / B str) も accept、LLVM / Wasm は uniform-payload (A int / B int / C nullary) を accept + interpreter parity (1502, 603)。**副次的に test helper refactor**: `vec_codegen_c` / `_llvm` / `_wasm` の test helper を `typed_prog` 経由に変更し、`Pipeline.process_decls` で Top_type 等を先に登録するようにした (これまでは type 宣言を含む program は test helper で typer error していた)。これで Mere の Map key support は **すべての concrete 型** (int / bool / str / tuple / record / nullary variant / payload variant) を網羅。残: first-class value 用法、自動 Drop。
+- **Phase 15 #16: extended Map[R, K, V] K to payload-bearing variants on 3
+  backends** — extends Phase 15.15 nullary-variant K to also accept ctors
+  carrying payloads. Now Mere's full concrete type set works as Map key.
+  **(a) C codegen**: extended the variant branch of `key_eq_for` —
+  `(a.tag == b.tag) && (a.tag == TAG_X ? eq_payload_X : a.tag == TAG_Y ?
+  eq_payload_Y : ... : 0)` nested ternaries for per-tag dispatch; nullary
+  ctors short-circuit to `1` (true). Payload recursively calls
+  `key_eq_for`. C codegen accepts different payload types across ctors
+  (leveraging variant's union representation). **(b) LLVM IR**:
+  extended `emit_map_key_eq_helper_llvm` variant branch — extract tag
+  with `extractvalue`, 0 if tags differ, otherwise extract payload and
+  compare. **LLVM MVP restriction**: ctors must share the same payload
+  type (MVP variant codegen requires a single payload type). Layered OR
+  of "tag-in-nullary-set" checks for nullary ctors, combined with
+  payload eq. **(c) Wasm**: extended `emit_map_key_eq_wasm` variant
+  branch — load tag with `i32.load offset=0`, then a nested if/else
+  chain `if (tag == TAG_X) then eq_payload_X else ...`. Last else is `1`
+  (nullary or covered). Wasm also assumes uniform payload type under
+  MVP, like LLVM. `is_key_supported` accepts payload variants on each
+  of the 3 backends, recursively checking payload types. Added 5 tests
+  (1268 passing) — C accepts mixed payload (A int / B str), LLVM/Wasm
+  accept uniform payload (A int / B int / C nullary) + interpreter
+  parity (1502, 603). **Side test-helper refactor**: changed
+  `vec_codegen_c` / `_llvm` / `_wasm` test helpers to go through
+  `typed_prog` and `Pipeline.process_decls` so Top_type etc. are
+  registered first (programs with type decls used to typer-error in
+  test helpers). Mere's Map key support now covers **all concrete
+  types** (int / bool / str / tuple / record / nullary variant /
+  payload variant). Remaining: first-class value usage; auto-Drop.
 
-- **Phase 15 第十五スライス: 3 backend で Map[R, K, V] の K を record / nullary variant に拡張** — Phase 15.14 (tuple) の延長で、record と nullary variant も K として使えるように。複合キーで意味のある map (例: `Pt { x, y }` → 値、`Color = Red | Green | Blue` → 値) を扱える。payload を持つ variant は scope 外 (per-tag union アクセスが複雑、別 slice 候補)。**(a) C codegen**: `key_eq_for` を拡張 — record は `(a).field_name` でフィールド直接アクセスして再帰比較、nullary variant は `(a).tag == (b).tag` で tag のみ比較。`is_key_supported` を 2 つの位置 (Map type 登録時と `map_kv_tags_of`) でそれぞれ record / variant を許可、判定は `Typer.records` / `Exhaustive.type_variants` を参照。**(b) LLVM IR**: `emit_map_key_eq_helper_llvm` 内の `go` 関数で record は `extractvalue %RecName %r, i` で field 取得、nullary variant は `extractvalue %VarName %v, 0` で tag を取得 + `icmp eq i32`。**(c) Wasm**: `emit_map_key_eq_wasm` の `build` で record は `i32.load offset=4*i` で field 取得 (memory offset 経由)、nullary variant は `i32.load offset=0` で tag 取得 + `i32.eq`。エラーメッセージも "int / bool / str / tuple / record / nullary variant" に更新。test 8 件追加 (1263 passing) — 3 backend × (variant key Color: 9、record key Pt: 1000) accept + interpreter parity。payload 付き variant は依然 reject (DEFERRED §1.1 別途)。
+- **Phase 15 #15: extended Map[R, K, V] K to record / nullary variant on 3
+  backends** — extends Phase 15.14 (tuple) so records and nullary
+  variants also work as K. Enables meaningful maps with compound keys
+  (e.g. `Pt { x, y } → value`, `Color = Red | Green | Blue → value`).
+  Payload-bearing variants out of scope (per-tag union access is
+  complex, candidate for separate slice). **(a) C codegen**: extended
+  `key_eq_for` — records use `(a).field_name` for direct field access
+  and recursive compare; nullary variants compare tags only with
+  `(a).tag == (b).tag`. `is_key_supported` allows record / variant in
+  both spots (Map type registration and `map_kv_tags_of`); judgment via
+  `Typer.records` / `Exhaustive.type_variants`. **(b) LLVM IR**: inside
+  `emit_map_key_eq_helper_llvm` `go` function, records get field via
+  `extractvalue %RecName %r, i`; nullary variants get tag via
+  `extractvalue %VarName %v, 0` + `icmp eq i32`. **(c) Wasm**: in
+  `emit_map_key_eq_wasm` `build`, records get field via
+  `i32.load offset=4*i` (memory-offset based); nullary variants get tag
+  via `i32.load offset=0` + `i32.eq`. Error messages updated to
+  "int / bool / str / tuple / record / nullary variant". Added 8 tests
+  (1263 passing) — 3 backends × (variant key Color: 9, record key Pt:
+  1000) accept + interpreter parity. Payload-bearing variants still
+  rejected (DEFERRED §1.1 separately).
 
-- **Phase 15 第十四スライス: 3 backend で Map[R, K, V] の K を bool / tuple に拡張** — Phase 15.10 で int / str だけだった Map key 型を、bool / tuple (再帰的に) も受け入れるよう拡張。tuple キーで複合 key (例: 座標 `(x, y) → ...`) を扱える。key equality は K の構造に応じて再帰的に展開。**(a) C codegen**: `key_eq_expr` を再帰関数 `key_eq_for k a b` に refactor — int/bool は `==`、str は `strcmp`、tuple は各フィールドに `(a).f0`, `(a).f1` ... でアクセスして AND で連結。tuple は C で value type (struct) なので field 直接アクセス可。**(b) LLVM IR**: 新しい helper `@mere_map_key_eq_<K>` を per-K で 1 つ emit (`map_set / get / has` から call)。tuple は `extractvalue` でフィールド分解 → 再帰的に icmp eq + `and i1` で組合せ。`map_instances` から K の集合を取り出し、unique な K につき 1 helper を emit_program で出力。**(c) Wasm**: 全 i32 値だが tuple は memory offset を介してフィールドアクセス。`emit_map_runtime_wasm k_ty` 関数を新規追加し、per-K で 5 ヘルパ (new/set/get/has/len) + `$mere_map_key_eq_<K>` を生成。Phase 15.10 の hardcoded `map_int_runtime_wasm` / `map_str_runtime_wasm` を撤廃し、`map_key_types : (string, Ast.ty) Hashtbl.t` で K 型を登録 → emit_program で iterate。tuple key の equality は WAT で block-scoped local.set + i32.load offset=4*i + recursive call_eq。test 8 件追加 (1255 passing) — 3 backend × (bool, tuple key) accept + interpreter parity (bool: 302, tuple: 121)。残: Map K の record / variant 拡張 (per-K eq の generic ロジックは既にあるので拡張は容易だが、別 slice の方が clean)。
+- **Phase 15 #14: extended Map[R, K, V] K to bool / tuple on 3
+  backends** — extends Phase 15.10 (which had int / str only) to also
+  accept bool / tuple (recursively). Enables compound keys (e.g.
+  coordinates `(x, y) → ...`) with tuples. Key equality expands
+  recursively per K structure. **(a) C codegen**: refactored
+  `key_eq_expr` into recursive `key_eq_for k a b` — int/bool via `==`,
+  str via `strcmp`, tuples access each field via `(a).f0, (a).f1, ...`
+  and AND them. Tuples are C value types (struct), so direct field
+  access works. **(b) LLVM IR**: emit one `@mere_map_key_eq_<K>` helper
+  per K (called from `map_set / get / has`). Tuples are decomposed via
+  `extractvalue` and recursively combined with `icmp eq + and i1`.
+  `map_instances` is iterated for unique K and a helper is emitted per
+  unique K in emit_program. **(c) Wasm**: all values are i32 but tuples
+  access fields via memory offset. Added new `emit_map_runtime_wasm
+  k_ty` function that generates 5 helpers per K (new/set/get/has/len)
+  + `$mere_map_key_eq_<K>`. Phase 15.10 hardcoded `map_int_runtime_wasm`
+  / `map_str_runtime_wasm` removed; `map_key_types : (string, Ast.ty)
+  Hashtbl.t` registers K types → emit_program iterates. Tuple key
+  equality in WAT uses block-scoped local.set + i32.load offset=4*i +
+  recursive call_eq. Added 8 tests (1255 passing) — 3 backends × (bool,
+  tuple key) accept + interpreter parity (bool: 302, tuple: 121).
+  Remaining: extending Map K to record / variant (per-K eq logic is
+  generic so extension is easy, but a separate slice is cleaner).
 
-- **Phase 15 第十三スライス: `with v = owned_vec_new () in body` で OwnedVec の scope-bound Drop** — Phase 15.8 で導入した process-wide registry (`__mere_owned_vec_free_all` at main 末) を補強する形で、`with` 構文に OwnedVec を組み込んだ。`with v = owned_vec_new () in body` と明示的に書いたとき、body 評価後に v->data を free して struct の data フィールドを NULL に書き換える。registry の `free_all` (main 末) は `free(NULL)` (C 標準で no-op) を許容しつつ struct 本体を最後に解放する設計。**Mere の "明示性 > 簡潔性" 哲学**に合致 — ユーザが必要なときだけ scope-Drop を選択でき、Rust 風の move semantics や ownership analysis なしに安全 (with 内で v の alias を作って scope 外で使うのは依然 UB だが、typer の Drop type rule が一部抑制している)。**(a) C codegen**: `Ast.With (name, value, body)` の emit に `value.ty` が `OwnedVec` の場合の分岐を追加、`free(((__mere_owned_vec_base*)name)->data); ((__mere_owned_vec_base*)name)->data = NULL;` を body 評価後に挿入。`__mere_owned_vec_base` は既存 registry の `{ void* data; int len; int cap; }` 構造体で、全 `mere_owned_vec_<T>` が同一の先頭 layout を持つことを利用した generic free。**(b) LLVM IR**: `getelementptr {ptr, i32, i32}, ptr v, i32 0, i32 0` で struct field 0 (data ptr) にアクセス、`load → @free → store null` を emit。LLVM の opaque pointer + 共通先頭 layout のおかげで型タグなしで動く。**(c) Wasm**: malloc/free が無く linear memory bump アロケータなので **構造的に no-op** (process exit で OS 一括解放)。コード変更は不要だが、resolve_vec_let_types pre-pass を With にも拡張して typer の type info が正しく流れるようにした (3 backend 共通の変更)。test 3 件追加 (1247 passing) — C / LLVM の scope-end free emit + interpreter parity (30)。残: scope-bound Drop は **with 明示時のみ**、デフォルト let は依然 main 末 registry sweep。Rust 風の自動 Drop には NLL + move semantics が必要 (DEFERRED §1.1 別途記載)。
+- **Phase 15 #13: scope-bound OwnedVec Drop via `with v = owned_vec_new
+  () in body`** — complements Phase 15.8 process-wide registry
+  (`__mere_owned_vec_free_all` at main end) by wiring OwnedVec into the
+  `with` syntax. When written explicitly as `with v = owned_vec_new ()
+  in body`, after body evaluation v->data is freed and the struct's
+  data field is rewritten to NULL. The registry's `free_all` (at main
+  end) tolerates `free(NULL)` (C standard no-op) while finally freeing
+  the struct itself. Fits Mere's **"explicit > concise" philosophy** —
+  the user opts into scope-Drop only when needed, safe without Rust-like
+  move semantics or ownership analysis (creating an alias inside `with`
+  and using it outside is still UB, but typer's Drop-type rule
+  suppresses some of it). **(a) C codegen**: added branch to `Ast.With
+  (name, value, body)` emission for `value.ty = OwnedVec`, inserting
+  `free(((__mere_owned_vec_base*)name)->data);
+  ((__mere_owned_vec_base*)name)->data = NULL;` after body. The
+  `__mere_owned_vec_base` is the existing registry `{ void* data; int
+  len; int cap; }` struct — generic free leveraging that all
+  `mere_owned_vec_<T>` share the same leading layout. **(b) LLVM IR**:
+  emit `getelementptr {ptr, i32, i32}, ptr v, i32 0, i32 0` to access
+  struct field 0 (data ptr), then `load → @free → store null`. LLVM's
+  opaque pointers + shared leading layout means it works without type
+  tags. **(c) Wasm**: no malloc/free, just a linear-memory bump
+  allocator, so **structurally a no-op** (process exit collects). No
+  code change, but extended `resolve_vec_let_types` pre-pass to also
+  walk With so typer type info flows correctly (shared across 3
+  backends). Added 3 tests (1247 passing) — C/LLVM scope-end free
+  emission + interpreter parity (30). Remaining: scope-bound Drop is
+  **only on explicit `with`**; default `let` still relies on main-end
+  registry sweep. Rust-style auto-Drop requires NLL + move semantics
+  (DEFERRED §1.1).
 
-- **Phase 15 第十二スライス: 3 backend に `vec_to_list` と `len` on list 対応を追加** — 残っていた recursive variant (Nil/Cons chain) 構築 + traversal を codegen に実装。Phase 15.7 の `vec_to_owned` と並列で、`vec_to_list v` は region Vec を `T list` に変換 (Cons chain を bottom-up に構築 — Nil から始めて逆順 prepend)。`len` は Phase 15.11 で他の型は対応済み、今回 list を追加。**(a) C codegen**: vec_to_list は GCC stmt expression でインライン展開、`mere_vec_<T>_get(v, i)` を逆順に呼んで各要素を Cons の payload `tuple_<T>_list_<T>` (`.f0 = elem, .f1 = acc`) に書き込み、新ノードを default region から確保。Cons/Nil の tag 値は `variant_tags` から codegen 時に解決。len on list も同じ手法でインライン (while loop with `__l->tag == cons_tag` 条件、`__l->payload.Cons.f1` で next 取得)。**(b) LLVM IR**: per-T helper `@mere_vec_to_list_<T>` と `@mere_list_<T>_len` を emit、phi で loop counter (i / acc) と list cursor を管理、`%list_<T>_node = type { i32, %tuple_<T>_list_<T> }` の存在を前提に `getelementptr` で payload にアクセス。`vec_to_list_instances : (string, Ast.ty * Ast.ty) Hashtbl.t` で per-T 追跡し emit_program で重複排除。**(c) Wasm**: shared `$mere_vec_to_list` と `$mere_list_len` ヘルパを emit (Wasm では値が全部 i32 で list 構造も統一的に処理できる)。tag 値は variant_tags から codegen 時に取り出して runtime に baked-in、`vec_to_list_used` / `list_len_used` フラグで lazy emit。examples (test 7 件追加、1244 passing) — 3 backend × (vec_to_list / len-on-list) + interpreter parity。`v2l_src` プログラム: `type 'a list = Nil | Cons of 'a * 'a list; ... vec_to_list v ...` で `len l + head` を計算、3 backend + interpreter で 13。残: `Map` の K 拡張 (tuple / record / variant キー)、first-class value 用法 (`let f = vec_new in ...`)、OwnedVec の scope-bound Drop。
+- **Phase 15 #12: added `vec_to_list` + `len` on list to 3 backends** —
+  added the remaining recursive-variant (Nil/Cons chain) construction
+  + traversal in codegen. Parallel to Phase 15.7 `vec_to_owned`,
+  `vec_to_list v` converts region Vec to `T list` (builds Cons chain
+  bottom-up — start from Nil and prepend in reverse). `len` on list
+  added; other types covered in Phase 15.11. **(a) C codegen**:
+  vec_to_list inline-expanded in GCC stmt expression, calling
+  `mere_vec_<T>_get(v, i)` in reverse and writing each into Cons
+  payload `tuple_<T>_list_<T>` (`.f0 = elem, .f1 = acc`); new nodes
+  allocated from default region. Cons/Nil tag values resolved at
+  codegen time from `variant_tags`. Len on list inlined similarly
+  (while loop with `__l->tag == cons_tag` condition,
+  `__l->payload.Cons.f1` for next). **(b) LLVM IR**: per-T helpers
+  `@mere_vec_to_list_<T>` and `@mere_list_<T>_len`, with phi for loop
+  counter (i / acc) and list cursor. Assumes
+  `%list_<T>_node = type { i32, %tuple_<T>_list_<T> }` exists and
+  accesses payload via `getelementptr`. `vec_to_list_instances :
+  (string, Ast.ty * Ast.ty) Hashtbl.t` tracks per-T, deduped in
+  emit_program. **(c) Wasm**: shared `$mere_vec_to_list` and
+  `$mere_list_len` helpers (Wasm values are all i32 and list structure
+  is uniform). Tag values pulled from `variant_tags` at codegen time
+  and baked into runtime; `vec_to_list_used` / `list_len_used` flags
+  for lazy emit. Added 7 example tests (1244 passing) — 3 backends ×
+  (vec_to_list / len-on-list) + interpreter parity. `v2l_src`
+  program: `type 'a list = Nil | Cons of 'a * 'a list; ...
+  vec_to_list v ...` computing `len l + head`; 13 on 3 backends +
+  interp. Remaining: Map K extension (tuple / record / variant key);
+  first-class value usage (`let f = vec_new in ...`); OwnedVec
+  scope-bound Drop.
 
-- **Phase 15 第十一スライス: 3 backend に `len` ad-hoc polymorphic builtin の codegen を追加** — interpreter で runtime dispatch していた `len : 'a -> int` を、codegen ではコンパイル時 dispatch (静的に arg.ty に基づいて対応する `_len` ヘルパに routing) で実装。**(a) C codegen**: `Ast.Var "len"` の App ハンドラに `arg.ty` を walk して dispatch — `Vec[_, T]` → `mere_vec_<T>_len`、`OwnedVec[T]` → `mere_owned_vec_<T>_len`、`StrBuf` → `mere_strbuf_len`、`Map[_, K, V]` → `mere_map_<K>_<V>_len`、`str` → `((int)strlen(...))`、`TyTuple ts` → 静的 arity 定数 (`({ (void)(arg); N; })` で side-effect は評価)。**(b) LLVM IR**: 同じパターン、`call i32 @mere_vec_<T>_len(ptr %a)` 等を fresh_reg で emit、str は `@strlen → trunc i64 to i32`、tuple は emit_expr で side-effect 評価後 string_of_int で定数 register として返す。**(c) Wasm**: Vec / OwnedVec は両方とも `$mere_vec_len` を共有 (Wasm では同じ struct layout)、StrBuf / Map は対応 helper、str は `$__lang_strlen`、tuple は emit_expr + `drop` + `i32.const N`。3 backend それぞれで Var rejection から `len` を外し、first-class value 用法だけ拒否。`len` の dispatch は **arg の static type** に依存するため、arg が `Vec[__heap, 'a]` のような polymorphic な場合は既存の `resolve_vec_let_types` pre-pass で具体化される必要がある (collection 系は Phase 15.2 以降で対応済み)。test 5 件追加 (1237 passing) — 3 backend × (Vec / str / tuple) の dispatch + interpreter parity (vec[3] + "hello"[5] + (1,2,3,4)[4] = 12)。残: `vec_to_list` (recursive variant codegen)、Map の K 拡張、first-class value 用法。
+- **Phase 15 #11: 3 backends got `len` ad-hoc polymorphic builtin
+  codegen** — `len : 'a -> int` had runtime dispatch in the
+  interpreter; codegen now uses compile-time dispatch (statically
+  routes to the corresponding `_len` helper based on arg.ty). **(a) C
+  codegen**: in the `Ast.Var "len"` App handler, walk `arg.ty` for
+  dispatch — `Vec[_, T]` → `mere_vec_<T>_len`, `OwnedVec[T]` →
+  `mere_owned_vec_<T>_len`, `StrBuf` → `mere_strbuf_len`,
+  `Map[_, K, V]` → `mere_map_<K>_<V>_len`, `str` →
+  `((int)strlen(...))`, `TyTuple ts` → static arity constant
+  (`({ (void)(arg); N; })` evaluates side effects). **(b) LLVM IR**:
+  same pattern; emit `call i32 @mere_vec_<T>_len(ptr %a)` etc. via
+  fresh_reg; str via `@strlen → trunc i64 to i32`; tuple evaluates
+  side effects via emit_expr then returns as constant register via
+  string_of_int. **(c) Wasm**: Vec / OwnedVec share `$mere_vec_len`
+  (same struct layout in Wasm); StrBuf / Map use their helpers; str
+  via `$__lang_strlen`; tuple via emit_expr + `drop` + `i32.const N`.
+  On each backend, `len` is removed from Var rejection — only
+  first-class value usage is rejected. `len` dispatch depends on
+  arg's **static type**; if arg is polymorphic like `Vec[__heap, 'a]`
+  the existing `resolve_vec_let_types` pre-pass concretizes it
+  (collection-type support since Phase 15.2). Added 5 tests (1237
+  passing) — 3 backends × (Vec / str / tuple) dispatch + interpreter
+  parity (vec[3] + "hello"[5] + (1,2,3,4)[4] = 12). Remaining:
+  `vec_to_list` (recursive variant codegen); Map K extension;
+  first-class value usage.
 
-- **Phase 15 第十スライス: 3 backend に `Map[R, K, V]` codegen を追加** — interpreter にしか無かった region-aware mutable hashmap を 3 backend に揃える。スコープ: **K = int / str + V = 任意 concrete 型**、線形スキャン (O(n) lookup)、cap 到達時は新配列を region に確保 (arena semantics)。Phase 12.8 で interpreter に追加された 5 builtin (`map_new` / `map_set` / `map_get` / `map_has` / `map_len`) を codegen に揃える。**(a) C codegen**: per-(K, V) で `mere_map_<K>_<V>` struct `{ K* keys; V* values; int len; int cap; __lang_region* region; }` + 5 helpers。key 比較は K に応じて `==` (int) または `strcmp(...) == 0` (str)、set は線形スキャンで既存 key を見つけたら value を上書き、無ければ末尾 append (cap 到達時は配列を 2 倍に拡張、新領域に memcpy で移行)。**(b) LLVM IR**: per-(K, V) で `%mere_map_<K>_<V> = type { ptr, ptr, i32, i32, ptr }` + 5 helpers。SSA phi で scan loop、key 比較は `icmp eq i32` (int) または `@strcmp` (str)、grow path は `getelementptr ... null, i32 1 → ptrtoint` で sizeof(K) / sizeof(V) を取得、@memcpy で並列配列を移行。get/has は `not_found` ラベルから `abort` / `ret i1 0`。**(c) Wasm**: 値が i32 共通なので **per-K のみ** (per-V 不要)。`$mere_map_int_*` と `$mere_map_str_*` の 2 セット (それぞれ 5 関数)、key 比較は `i32.eq` または `$__lang_streq`。`map_int_used` / `map_str_used` の 2 flag で lazy emit、片方しか使わなければ片方の runtime のみ emit。3 backend それぞれの App handler で curried App を unwrap、`map_new` の region は `e.ty` の TyRef marker から取り出す (Vec / StrBuf と同パターン)。既存 "map: codegen rejection (C)" テストを accept テストに書き換え + 3 backend × (str/int) accept + interpreter parity の計 8 件追加 (1232 passing)。examples/map_codegen.mere を新規追加 (str→int / int→str / region 内 Map を組合せて 640 を返す demo、interpreter + 3 backend 全部で 640)。残: `vec_to_list` / `len` / first-class value 用法。
+- **Phase 15 #10: 3 backends got `Map[R, K, V]` codegen** — brought
+  the region-aware mutable hashmap to 3 backend parity. Scope: **K =
+  int / str + V = any concrete type**, linear scan (O(n) lookup), on
+  cap-hit allocate new array in region (arena semantics). Brings the
+  5 interpreter builtins from Phase 12.8 (`map_new` / `map_set` /
+  `map_get` / `map_has` / `map_len`) to codegen. **(a) C codegen**:
+  per-(K, V) `mere_map_<K>_<V>` struct `{ K* keys; V* values; int len;
+  int cap; __lang_region* region; }` + 5 helpers. Key compare via `==`
+  (int) or `strcmp(...) == 0` (str); set linear-scans for existing
+  key and overwrites value, else appends to tail (on cap-hit, doubles
+  array, memcpy to new region area). **(b) LLVM IR**: per-(K, V)
+  `%mere_map_<K>_<V> = type { ptr, ptr, i32, i32, ptr }` + 5
+  helpers. SSA phi for scan loop; key compare via `icmp eq i32` (int)
+  or `@strcmp` (str). Grow path uses `getelementptr ... null, i32 1
+  → ptrtoint` for sizeof(K) / sizeof(V), then @memcpy to migrate
+  parallel arrays. get/has return `abort` / `ret i1 0` from
+  `not_found` label. **(c) Wasm**: all values are i32, so **per-K
+  only** (per-V not needed). 2 sets `$mere_map_int_*` and
+  `$mere_map_str_*` (5 fns each); key compare via `i32.eq` or
+  `$__lang_streq`. `map_int_used` / `map_str_used` flags for lazy
+  emit — only one runtime is emitted if only one K is used. On each
+  backend the App handler unwraps curried Apps; `map_new`'s region
+  pulled from `e.ty` TyRef marker (same pattern as Vec / StrBuf).
+  Rewrote existing "map: codegen rejection (C)" test to accept; added
+  3 backends × (str/int) accept + interpreter parity, 8 tests total
+  (1232 passing). Added `examples/map_codegen.mere`
+  (str→int / int→str / Map inside region combined to return 640;
+  interpreter + 3 backends all 640). Remaining: `vec_to_list` / `len`
+  / first-class value usage.
 
-- **Phase 15 第九スライス: 3 backend に `StrBuf[R]` codegen を追加** — interpreter にしか無かった region 内 mutable 文字列バッファを 3 backend に揃える。StrBuf は単一非多相型 (要素型パラメータなし) なので per-T monomorphization は不要、単一の runtime helper セット (`new` / `push` / `to_str` / `len`) で済む。**(a) C codegen**: `mere_strbuf` struct `{ char* data; int len; int cap; __lang_region* region; }` + 4 helpers、push の realloc は同 region で確保 (arena semantics)、to_str は null-terminated copy を region に確保。`strbuf_used : bool ref` flag で lazy emit (使われない program ではゼロ overhead)、forward typedef を追加。**(b) LLVM IR**: `%mere_strbuf = type { ptr, i32, i32, ptr }` + 4 helpers、push は `@__lang_region_alloc` + `@memcpy` で文字列コピー、push の resize loop は br back の形 (容量が足りるまで cap を 2 倍する)、to_str は `len+1` バイト確保 + memcpy + null terminator。**(c) Wasm**: `$mere_strbuf_new / push / to_str / len` を独立 runtime ブロックに追加 (vec_higher_order とは別、closure dispatch を使わないので独立)。`$__lang_bump` 共有、文字列は i8 store/load で逐次コピー、resize 時の memcpy も loop で手書き。3 backend それぞれの App handler で `App ({ Var "strbuf_push" }, sb)` の curried 形を unwrap、`strbuf_new` の region は `e.ty` の TyRef marker から取り出す (Vec と同パターン)。既存 "strbuf: codegen rejection (C)" テストを accept テストに書き換え + 3 backend × accept + interpreter parity の合計 4 件追加 (1225 passing)。examples/strbuf_codegen.mere を新規追加 (interpreter + 3 backend で 48 を返す: `"hello, world!"` の len + 別 region で組み立てた文字列 len + sb1 len)。残: `Map[R, K, V]` / `vec_to_list` / `len` / first-class value 用法。
+- **Phase 15 #9: 3 backends got `StrBuf[R]` codegen** — brought the
+  region-internal mutable string buffer to 3-backend parity. StrBuf
+  is a single non-polymorphic type (no element-type parameter), so
+  per-T monomorphization is not needed; a single runtime helper set
+  (`new` / `push` / `to_str` / `len`) suffices. **(a) C codegen**:
+  `mere_strbuf` struct `{ char* data; int len; int cap;
+  __lang_region* region; }` + 4 helpers; push's realloc within same
+  region (arena semantics); to_str copies null-terminated to region.
+  `strbuf_used : bool ref` flag for lazy emit (zero overhead in
+  programs that don't use it); added forward typedef. **(b) LLVM
+  IR**: `%mere_strbuf = type { ptr, i32, i32, ptr }` + 4 helpers;
+  push calls `@__lang_region_alloc` + `@memcpy`; push's resize loop
+  is br-back form (double cap until enough capacity); to_str
+  allocates `len+1` bytes + memcpy + null terminator. **(c) Wasm**:
+  `$mere_strbuf_new / push / to_str / len` added as an independent
+  runtime block (no closure dispatch, separated from
+  vec_higher_order). `$__lang_bump` shared; strings copied byte by
+  byte with i8 store/load; resize-time memcpy also hand-written
+  loop. On each backend, App handler unwraps curried form `App ({
+  Var "strbuf_push" }, sb)`; `strbuf_new`'s region pulled from
+  `e.ty` TyRef marker (same pattern as Vec). Rewrote "strbuf:
+  codegen rejection (C)" to accept; added 3 backends × accept +
+  interpreter parity, 4 tests total (1225 passing). Added
+  `examples/strbuf_codegen.mere` (interpreter + 3 backends return
+  48: len of `"hello, world!"` + len of string built in another
+  region + sb1 len). Remaining: `Map[R, K, V]` / `vec_to_list` /
+  `len` / first-class value usage.
 
-- **Phase 15 第八スライス: OwnedVec の main 末一括 free (ナイーブ Drop)** — Phase 15.7 で「process exit に任せた」状態だった heap-allocated な OwnedVec の解放を、明示的な「main 関数末で一括 free」に置き換える。valgrind / leak sanitizer 等のメモリ解析ツールでクリーンに見える状態。**設計**: 全 `mere_owned_vec_<T>` struct は `{ T* data; int len; int cap; }` という同一の先頭 layout なので、最初の field を `void* data` として汎用 cast すれば free を統一できる (`free(v->data); free(v);`)。process-wide な registry (`void** items; int count; int cap;`) を file-scope global に持ち、各 `_new` ヘルパが struct ptr を register、`main` 末で `__mere_owned_vec_free_all` が iterate して全部 free。**(a) C codegen**: `owned_vec_registry_runtime` ブロックを追加 (`__mere_owned_vec_register` / `__mere_owned_vec_free_all` + 3 file-scope globals)、`emit_owned_vec_runtime_for` の `_new` 末で `__mere_owned_vec_register(v)` を call、`main` 末で `__mere_owned_vec_free_all()` を call (OwnedVec が 1 つ以上ある時のみ)。**(b) LLVM IR**: `owned_vec_registry_runtime_llvm` を同等に emit、global ptr / i32 で registry を表現、`@realloc` で配列拡張、free_all は phi loop で iterate。各 `@mere_owned_vec_<T>_new` の末で `@__mere_owned_vec_register` を call、`@main` 末で `@__mere_owned_vec_free_all` を call。**(c) Wasm**: Wasm では malloc が無く `$__lang_bump` (linear memory) で確保しており、process exit で WebAssembly instance ごと OS が解放するので **明示的な free は不要 / 不可能** — registry / free_all は emit しない (現状の挙動を維持)。**残る限界**: scope-bound Drop ではなく process-wide なので、長時間動く program で大量の OwnedVec を作る場合は依然メモリ使用量が単調増加。NLL / move semantics を入れた本格的な scope-Drop は今後。test 4 件追加 (1222 passing) — C / LLVM の registry + free_all 呼び出しを assertContains、Wasm が registry を emit しないことを negative test。
+- **Phase 15 #8: main-end batch free for OwnedVec (naive Drop)** —
+  replaces the "leave it to process exit" approach of Phase 15.7 with
+  explicit "batch free at end of main" for heap-allocated OwnedVec.
+  Clean under valgrind / leak sanitizer. **Design**: all
+  `mere_owned_vec_<T>` structs share the leading layout `{ T* data;
+  int len; int cap; }`, so generic free works by casting the first
+  field as `void* data` (`free(v->data); free(v);`). A process-wide
+  registry (`void** items; int count; int cap;`) is a file-scope
+  global; each `_new` helper registers the struct ptr, then `main`
+  end's `__mere_owned_vec_free_all` iterates and frees all. **(a) C
+  codegen**: added `owned_vec_registry_runtime` block
+  (`__mere_owned_vec_register` / `__mere_owned_vec_free_all` + 3
+  file-scope globals); `emit_owned_vec_runtime_for` calls
+  `__mere_owned_vec_register(v)` at end of `_new`; `main` end calls
+  `__mere_owned_vec_free_all()` (only when ≥1 OwnedVec is present).
+  **(b) LLVM IR**: emit `owned_vec_registry_runtime_llvm`
+  equivalently; registry expressed via global ptr / i32; `@realloc`
+  to grow; free_all iterates via phi loop. Each
+  `@mere_owned_vec_<T>_new` end calls `@__mere_owned_vec_register`;
+  `@main` end calls `@__mere_owned_vec_free_all`. **(c) Wasm**: no
+  malloc, allocation via `$__lang_bump` (linear memory); process
+  exit hands the entire WebAssembly instance back to OS, so
+  **explicit free is unnecessary / impossible** — registry /
+  free_all not emitted (preserves current behavior). **Remaining
+  limit**: process-wide, not scope-bound, so memory grows
+  monotonically for long-running programs that create many
+  OwnedVecs. Real scope-Drop with NLL / move semantics is future
+  work. Added 4 tests (1222 passing) — C / LLVM assertContains for
+  registry + free_all calls; Wasm negative test confirms no registry
+  emitted.
 
-- **Phase 15 第七スライス: 3 backend に `OwnedVec[T]` + `vec_to_owned` / `owned_vec_to_vec` を追加** — interpreter にしか無かった heap-allocated な OwnedVec を 3 backend に揃え、region Vec との往復 (deep copy) もセットで動かす。Drop 処理は最小スコープでは省略 (process exit で OS 回収)。**(a) C codegen**: per-T `mere_owned_vec_<tag>` struct + 4 helpers (new/push/get/len) を `emit_owned_vec_runtime_for` で生成、`malloc / realloc` で確保。vec_to_owned / owned_vec_to_vec は GCC stmt expression でインライン展開、後者は active region (e.ty の TyRef marker) から target region を取り出す。`c_type_of` で `OwnedVec[T]` → `mere_owned_vec_<tag>*` を Vec と並列に走らせ、forward typedef も追加。**(b) LLVM IR**: per-T `%mere_owned_vec_<tag> = type { ptr, i32, i32 }` + 4 helpers を emit、`getelementptr ... null, i32 1 → ptrtoint` で sizeof(T)、push の realloc は `@realloc(ptr, i64)` を declare して使う。変換 helper は per-T `@mere_vec_to_owned_<tag>` / `@mere_owned_vec_to_vec_<tag>` を SSA phi loop で実装。**(c) Wasm**: Wasm では値が全部 i32 で `$__lang_bump` 共有なので **OwnedVec の runtime は Vec と物理的に同じ** — owned_vec_new / push / get / len は `$mere_vec_*` に thin alias で routing、変換は新規追加した `$mere_vec_clone` helper で deep copy (新 vec を作って loop で要素 push)。Wasm の owned_vec は drop_types での region 配置拒否を保つだけで、runtime 表現の区別は不要。`resolve_vec_let_types` pre-pass を C / LLVM で `Ast.TyCon ("OwnedVec", _)` も対象に拡張。examples/owned_vec_codegen.mere を新規追加 — vec → owned → vec の往復 + fold で 67 を返す (interpreter + 3 backend 全部で 67)。test 12 件追加 (1218 passing) — 3 backend × (owned_vec / vec_to_owned / owned_vec_to_vec) の codegen シンボル emit + interpreter parity 3 件。残: Drop の本格処理 (個別 free)、`vec_to_list` (recursive variant 構築)、`StrBuf` / `Map` / `len` / first-class value 用法。
+- **Phase 15 #7: 3 backends got `OwnedVec[T]` + `vec_to_owned` /
+  `owned_vec_to_vec`** — brought interpreter-only heap-allocated
+  OwnedVec to 3-backend parity, including round-trip (deep copy)
+  with region Vec. Drop processing omitted in this minimum scope
+  (process exit collects). **(a) C codegen**: generates per-T
+  `mere_owned_vec_<tag>` struct + 4 helpers (new/push/get/len) via
+  `emit_owned_vec_runtime_for`; allocates with `malloc / realloc`.
+  vec_to_owned / owned_vec_to_vec inlined in GCC stmt expression;
+  the latter extracts the target region from e.ty TyRef marker
+  (active region). `c_type_of` walks `OwnedVec[T]` →
+  `mere_owned_vec_<tag>*` in parallel with Vec; forward typedefs
+  added. **(b) LLVM IR**: per-T `%mere_owned_vec_<tag> = type { ptr,
+  i32, i32 }` + 4 helpers; `getelementptr ... null, i32 1 →
+  ptrtoint` for sizeof(T); push's realloc uses declared `@realloc(ptr,
+  i64)`. Conversion helpers per-T `@mere_vec_to_owned_<tag>` /
+  `@mere_owned_vec_to_vec_<tag>` implemented with SSA phi loops.
+  **(c) Wasm**: values are all i32 and `$__lang_bump` is shared,
+  so **OwnedVec runtime is physically the same as Vec** —
+  owned_vec_new / push / get / len thin-alias-routed to
+  `$mere_vec_*`; conversions use newly added `$mere_vec_clone`
+  helper for deep copy (allocate new vec, loop element-push). Wasm
+  owned_vec only retains drop_types' region-placement rejection;
+  runtime representation distinction not needed. Extended
+  `resolve_vec_let_types` pre-pass to also handle `Ast.TyCon
+  ("OwnedVec", _)` on C / LLVM. Added
+  `examples/owned_vec_codegen.mere` — vec → owned → vec round trip
+  + fold returning 67 (interpreter + 3 backends all 67). Added 12
+  tests (1218 passing) — 3 backends × (owned_vec / vec_to_owned /
+  owned_vec_to_vec) codegen-symbol emit + 3 interpreter parity.
+  Remaining: real Drop (per-instance free); `vec_to_list` (recursive
+  variant construction); `StrBuf` / `Map` / `len` / first-class
+  value usage.
 
-- **Phase 15 第六スライス: 3 backend に `vec_map` / `vec_filter` を追加 — Vec 高階 API の主要全 5 つが揃う** — Phase 15.5 (vec_set / iter / fold) に続いて region-preserving な 2 つを追加。両 API とも入力 Vec と同じ region に新 Vec を作って返す (vec_map は要素型 T → U 変換、vec_filter は predicate true の要素のみ残す)。**(a) C codegen**: GCC/Clang の statement expression でインライン展開、`__vc->region` から元 Vec の region を取り出して `mere_vec_<U>_new(__vc->region)` で新 Vec を作成、closure dispatch を直書きで loop に展開。vec_filter は `__auto_type __x = mere_vec_<T>_get(...)` で C 型を compiler に推論させ、predicate の if 分岐で `mere_vec_<T>_push` を条件 push。**(b) LLVM IR**: vec_map は per-(T, U) helper (`@mere_vec_<T>_map_<U>`)、vec_filter は per-T helper (`@mere_vec_<T>_filter`)。両者とも入力 Vec の region field (offset 12 = idx 3) を `getelementptr + load` で取り出し、対応する `@mere_vec_<U>_new` / `@mere_vec_<T>_new` を call して新 Vec を作成。phi で loop counter を管理、vec_filter は predicate の i1 を `br i1` で条件 push。`vec_map_instances` / `vec_filter_instances` テーブルで重複排除。**(c) Wasm**: 値が i32 共通なので `$mere_vec_map` / `$mere_vec_filter` を `vec_higher_order_runtime` に追加。両者とも `$mere_vec_new` を call (Wasm では region パラメータなし)、要素を `call_indirect` で closure 適用、新 Vec に `call $mere_vec_push`。examples/vec_map_filter_codegen.mere を新規追加 (interpreter + 3 backend で 226)。テスト 9 件追加 (1206 passing) — 3 backend × (vec_map / vec_filter) の codegen シンボル emit、LLVM の per-(T, U) per-T 分岐確認、interpreter parity。**これで Vec 高階 API の主要 5 つ (set / iter / fold / map / filter) が 3 backend ですべて動作**、interpreter とのギャップはほぼ無くなった。残: `vec_to_list` / `vec_to_owned` / `OwnedVec` / `StrBuf` / `Map` / first-class value 用法。
+- **Phase 15 #6: 3 backends got `vec_map` / `vec_filter` — all 5 main
+  Vec higher-order APIs are present** — follows Phase 15.5 (vec_set
+  / iter / fold) with the two region-preserving ones. Both APIs
+  build a new Vec in the same region as the input (vec_map converts
+  element type T → U; vec_filter keeps only elements where predicate
+  is true). **(a) C codegen**: GCC/Clang stmt expression inlining;
+  pull the original Vec's region from `__vc->region` to create new
+  Vec via `mere_vec_<U>_new(__vc->region)`; expand closure dispatch
+  in-line into a loop. vec_filter uses `__auto_type __x =
+  mere_vec_<T>_get(...)` (compiler infers C type) and conditionally
+  pushes via `mere_vec_<T>_push` based on predicate's if branch.
+  **(b) LLVM IR**: vec_map per-(T, U) helper
+  (`@mere_vec_<T>_map_<U>`); vec_filter per-T helper
+  (`@mere_vec_<T>_filter`). Both pull the input Vec's region field
+  (offset 12 = idx 3) via `getelementptr + load` and call
+  corresponding `@mere_vec_<U>_new` / `@mere_vec_<T>_new` to make
+  new Vec. phi manages loop counter; vec_filter conditional-pushes
+  via `br i1` on predicate's i1. `vec_map_instances` /
+  `vec_filter_instances` tables dedupe. **(c) Wasm**: all values
+  are i32, so `$mere_vec_map` / `$mere_vec_filter` added to
+  `vec_higher_order_runtime`. Both call `$mere_vec_new` (no region
+  parameter in Wasm); apply closure to elements via
+  `call_indirect`; push to new Vec via `call $mere_vec_push`. Added
+  `examples/vec_map_filter_codegen.mere` (interpreter + 3 backends
+  return 226). Added 9 tests (1206 passing) — 3 backends ×
+  (vec_map / vec_filter) codegen-symbol emit + LLVM's per-(T, U)
+  per-T branch confirmation + interpreter parity. **Now all 5 main
+  Vec higher-order APIs (set / iter / fold / map / filter) work on
+  3 backends**, with almost no gap to the interpreter. Remaining:
+  `vec_to_list` / `vec_to_owned` / `OwnedVec` / `StrBuf` / `Map` /
+  first-class value usage.
 
-- **Phase 15 第五スライス: 3 backend に Vec の高階 API (`vec_set` / `vec_iter` / `vec_fold`) を追加** — Phase 15.2 / 15.3 / 15.4 で 3 backend の Vec[R, T] が動くようになった上で、interpreter にしか無かった主要な高階 API を 3 backend に揃える。**(a) C codegen**: vec_set は per-T runtime helper (`mere_vec_<T>_set`)、vec_iter / vec_fold は call site でインライン展開 (GCC/Clang の statement expression `({ ... })` で local 確保 + for ループ + closure dispatch を直接書く)。**副次的に Anonymous Fun in main_body の closure adapter が drain されていなかったバグを修正** — emit_program で `let main_body = emit_expr body_expr in` の後に `drain ()` を追加して `pending_closures` を再回収。**(b) LLVM IR**: vec_set は per-T helper、vec_iter は per-T helper (`@mere_vec_<T>_iter`)、vec_fold は per-(T, U) helper (`@mere_vec_<T>_fold_<U>`)。phi で loop 状態 (i, acc) を管理する basic-block 構成の SSA を直書き。**(c) Wasm**: 値が全て i32 なので 3 つの helper を全部単一 runtime (`$mere_vec_set / $mere_vec_iter / $mere_vec_fold`) で共有。`vec_iter / vec_fold` の helper は `(type $cl)` + `call_indirect` を参照するため、closure 値が table に無い program でも `(table 0 funcref)` を空 declare する必要があり `vec_higher_order_used : bool ref` フラグ + 別 runtime ブロックで分離。3 backend それぞれの App handler で curried App を unwrap (vec_set / vec_fold は 3-arg なので 2 段 unwrap、vec_iter は 2-arg なので 1 段)。examples/vec_higher_order_codegen.mere (interpreter + 3 backend で 1234 を返す demo) を追加。test 12 件追加 (1197 passing) — vec_set / vec_iter / vec_fold の 3 backend codegen + interpreter parity を確認。残: `vec_map` (region-preserving の new Vec 作成) / `vec_filter` (動的サイズ計算) / `vec_to_list` / `vec_to_owned` / `OwnedVec` / `StrBuf` / `Map` / first-class value 用法。
+- **Phase 15 #5: 3 backends got Vec higher-order APIs (`vec_set` /
+  `vec_iter` / `vec_fold`)** — Vec[R, T] working on 3 backends since
+  Phase 15.2 / 15.3 / 15.4; this slice brings interpreter-only main
+  higher-order APIs to parity. **(a) C codegen**: vec_set is a per-T
+  runtime helper (`mere_vec_<T>_set`); vec_iter / vec_fold are
+  inlined at call site (GCC/Clang stmt expression `({ ... })` writes
+  local + for loop + closure dispatch directly). **Side bug fix:
+  anonymous Fun in main_body wasn't draining closure adapter** —
+  added `drain ()` after `let main_body = emit_expr body_expr in` in
+  emit_program to re-collect `pending_closures`. **(b) LLVM IR**:
+  vec_set is per-T helper; vec_iter is per-T helper
+  (`@mere_vec_<T>_iter`); vec_fold is per-(T, U) helper
+  (`@mere_vec_<T>_fold_<U>`). Hand-written SSA with basic blocks
+  managing loop state (i, acc) via phi. **(c) Wasm**: all values are
+  i32, so all 3 helpers shared single runtime (`$mere_vec_set /
+  $mere_vec_iter / $mere_vec_fold`). `vec_iter / vec_fold` helpers
+  reference `(type $cl)` + `call_indirect`, so even programs whose
+  closure values aren't in the table need `(table 0 funcref)`
+  empty-declared; isolated via `vec_higher_order_used : bool ref`
+  flag + separate runtime block. On each backend, App handler unwraps
+  curried Apps (vec_set / vec_fold are 3-arg = 2-stage unwrap;
+  vec_iter is 2-arg = 1-stage). Added
+  `examples/vec_higher_order_codegen.mere` (interpreter + 3 backends
+  return 1234 demo). Added 12 tests (1197 passing) — 3 backends ×
+  (vec_set / vec_iter / vec_fold) codegen + interpreter parity.
+  Remaining: `vec_map` (region-preserving new Vec creation) /
+  `vec_filter` (dynamic size calc) / `vec_to_list` / `vec_to_owned`
+  / `OwnedVec` / `StrBuf` / `Map` / first-class value usage.
 
-- **Phase 15 第四スライス: Wasm codegen で `Vec[R, T]` 対応 — 3 backend 完全 feature parity** — Phase 15.2 (C) / 15.3 (LLVM) に続き Wasm にも Vec を移植。Wasm では Mere の値がすべて 4-byte i32 (スカラー直値、構造化型は linear memory offset) なので、C / LLVM のような per-T monomorphize は不要。単一の `$mere_vec_new / $mere_vec_push / $mere_vec_get / $mere_vec_len` runtime で全要素型を扱う設計判断。lib/codegen_wasm.ml: (1) `vec_used : bool ref` を追加、emit_expr が vec_* を経由したら true にする lazy emit、(2) WAT で 4 関数 + struct layout `{data:i32, len:i32, cap:i32, _pad:i32}` (16 byte) を `vec_runtime` リテラルに記述、push の realloc は単一 `__lang_bump` から確保 = arena semantics、(3) `ty_tag` の catch-all を緩和して TyRef _ R TyUnit (region marker) を許可、`Vec` への明示拒否は削除、(4) Var ハンドラの vec_* 拒否は first-class value 用法のみに残し、(5) emit_expr に 4 special-case を追加 — `App (App (Var "vec_push", v), x)` を unwrap して runtime call、`vec_new` の region 引数は無視 (Wasm の bump はグローバル)、(6) Phase 15.2 / 15.3 と同じ `resolve_vec_let_types` pre-pass を導入 (binding type の concrete 化は Wasm では型情報が直接コードに影響しないが、整合性のため)。examples/vec_codegen_wasm_typed.mere を新規追加 (int / str / tuple / variant 4 種で 252)。test 4 件追加 + 既存 Wasm rejection テスト書き換え (1185 passing)。これで C / LLVM IR / Wasm の 3 backend すべてで `Vec[R, T]` が動作 — `Vec / OwnedVec / StrBuf / Map は interpreter-only` の制約は Vec[R, T] については完全解消。残: 高階 API / first-class value 用法 / OwnedVec / StrBuf / Map の codegen は引き続き interpreter-only (DEFERRED §1.1 参照)。
+- **Phase 15 #4: Wasm codegen supports `Vec[R, T]` — full 3-backend
+  feature parity** — followed Phase 15.2 (C) / 15.3 (LLVM) and ported
+  Vec to Wasm. In Wasm Mere values are all 4-byte i32 (scalar direct
+  for primitives; structured types are linear-memory offsets), so per-T
+  monomorphization (as in C / LLVM) is not needed. Design call: single
+  `$mere_vec_new / $mere_vec_push / $mere_vec_get / $mere_vec_len`
+  runtime handles all element types. lib/codegen_wasm.ml: (1) added
+  `vec_used : bool ref`, emit_expr sets true when going through
+  vec_*; (2) 4 fns + struct layout `{data:i32, len:i32, cap:i32,
+  _pad:i32}` (16 bytes) written into `vec_runtime` literal in WAT;
+  push's realloc allocates from single `__lang_bump` = arena
+  semantics; (3) `ty_tag` catch-all relaxed to allow TyRef _ R TyUnit
+  (region marker); explicit Vec rejection removed; (4) Var handler's
+  vec_* rejection retained only for first-class value usage; (5)
+  4 special-cases added to emit_expr — `App (App (Var "vec_push", v),
+  x)` unwrapped to runtime call; `vec_new`'s region argument ignored
+  (Wasm bump is global); (6) introduced `resolve_vec_let_types`
+  pre-pass same as Phase 15.2 / 15.3 (concretizing binding type doesn't
+  directly affect Wasm code but maintained for consistency). Added
+  `examples/vec_codegen_wasm_typed.mere` (int / str / tuple / variant
+  4 types = 252). Added 4 tests + rewrote existing Wasm rejection
+  test (1185 passing). Now `Vec[R, T]` works on all 3 backends (C /
+  LLVM IR / Wasm) — the constraint "Vec / OwnedVec / StrBuf / Map are
+  interpreter-only" is fully gone for Vec[R, T]. Remaining: higher-order
+  APIs / first-class value usage / OwnedVec / StrBuf / Map codegen
+  remain interpreter-only (see DEFERRED §1.1).
 
-- **Phase 15 第三スライス: LLVM IR codegen で `Vec[R, T]` 対応 (C と feature parity)** — Phase 15.2 (C 版) と同じ monomorphization パターンを LLVM IR に移植。lib/codegen_llvm.ml: (1) `vec_instances : (string, Ast.ty) Hashtbl.t` を追加、(2) `emit_vec_runtime_for_llvm` で要素型ごとに `%mere_vec_<tag> = type { ptr, i32, i32, ptr }` + 4 helpers (`_new` / `_push` / `_get` / `_len`) を 1 セット emit (LLVM の `getelementptr ... null, i32 1 → ptrtoint` イディオムで sizeof(T) を取得、region 経由でアロケート、push の realloc は同 region で確保 = arena semantics)、(3) `llvm_ty_of` を `TyCon ("Vec", args)` walk 対応に変更し、Vec 値は LLVM opaque ptr (`ptr`) として返しつつ要素型を `vec_instances` に登録、(4) `ty_tag` の catch-all を緩和して `TyRef _ R TyUnit` (region marker) を許可、(5) Var ハンドラの vec_* 拒否は first-class value 用法のみに残し、(6) emit_expr に 4 special-case (`vec_new` / `vec_push` / `vec_get` / `vec_len`) を追加 — `vec_elem_tag_of` で element type を読み、curried App (`App(App(Var "vec_push", v), x)`) を unwrap して `@mere_vec_<tag>_*` を call、`vec_new` は active region を `current_regions` から引いて `@__lang_default_region` or `%__region_R` を渡す、(7) Phase 15.2 と同じ `resolve_vec_let_types` pre-pass を導入 — let-poly で generalize された binding と use の tyvar を `Typer.unify` で繋ぎ、いずれかの use site が解決した時点で全 site にチェイン伝播。examples/vec_codegen_llvm_typed.mere を新規追加 (int / str / tuple / variant 4 種を同一 program で混在、合計 252)。test 5 件追加 (1182 passing) — Vec[R, int] / str / tuple / region R 内 4 パターンで mere_vec_T_new runtime の emit を確認。残: Wasm backend の Vec[R, T] 対応 (Phase 15.4 候補) / 高階 API / first-class value / OwnedVec / StrBuf / Map。
+- **Phase 15 #3: LLVM IR codegen supports `Vec[R, T]` (C feature
+  parity)** — ported the same monomorphization pattern as Phase 15.2
+  (C version) to LLVM IR. lib/codegen_llvm.ml: (1) added
+  `vec_instances : (string, Ast.ty) Hashtbl.t`; (2)
+  `emit_vec_runtime_for_llvm` emits one set per element type of
+  `%mere_vec_<tag> = type { ptr, i32, i32, ptr }` + 4 helpers
+  (`_new` / `_push` / `_get` / `_len`) (using LLVM's `getelementptr
+  ... null, i32 1 → ptrtoint` idiom for sizeof(T), allocates via
+  region; push's realloc within same region = arena semantics); (3)
+  `llvm_ty_of` walks `TyCon ("Vec", args)`, returns Vec value as LLVM
+  opaque ptr (`ptr`) and registers element type in `vec_instances`;
+  (4) `ty_tag` catch-all relaxed to allow `TyRef _ R TyUnit` (region
+  marker); (5) Var handler's vec_* rejection retained only for
+  first-class value usage; (6) 4 special-cases (`vec_new` / `vec_push`
+  / `vec_get` / `vec_len`) in emit_expr — `vec_elem_tag_of` reads
+  element type; unwrap curried App (`App(App(Var "vec_push", v),
+  x)`) and call `@mere_vec_<tag>_*`; `vec_new` pulls active region
+  from `current_regions` and passes `@__lang_default_region` or
+  `%__region_R`; (7) introduced `resolve_vec_let_types` pre-pass same
+  as Phase 15.2 — connect let-poly generalized binding and use tyvars
+  with `Typer.unify`; once any use site resolves, chain-propagates
+  to all sites. Added `examples/vec_codegen_llvm_typed.mere` (mixes
+  int / str / tuple / variant 4 types in one program; total 252).
+  Added 5 tests (1182 passing) — confirms emit of mere_vec_T_new
+  runtime for 4 patterns Vec[R, int] / str / tuple / region R inside.
+  Remaining: Wasm backend Vec[R, T] (Phase 15.4 candidate) /
+  higher-order APIs / first-class value / OwnedVec / StrBuf / Map.
 
-- **Phase 15 第二スライス: C codegen で `Vec[R, T]` の要素型 T を一般化** — Phase 15.1 (`Vec[R, int]` のみ) を拡張し、codegen がサポートする任意の concrete element type に対応: int / bool / str / tuple / record / variant。monomorphize で `mere_vec_<tag>` runtime struct + 4 helpers (`_new` / `_push` / `_get` / `_len`) を要素型ごとに生成 (例: `mere_vec_int` / `mere_vec_str` / `mere_vec_tuple_int_int` / `mere_vec_Tag`)。lib/codegen_c.ml: (1) `vec_instances` table を追加し、c_type_of / emit_expr が出会った Vec[_, T] の T を `ty_tag` でサニタイズして登録、(2) `emit_vec_runtime_for : Ast.ty -> string` で要素型ごとの C runtime ブロックを生成、(3) emit_expr の 4 special-case (`vec_new` / `vec_push` / `vec_get` / `vec_len`) を `vec_elem_tag_of` ヘルパ経由で `mere_vec_<tag>_*` の helper 名に振り分け、(4) `let v = vec_new () in body` の generalized binding (Mere は value restriction なし、forall T. Vec[..., T] に generalize) で App 自体の .ty 中の TyVar が残るため、`resolve_vec_let_types` pre-pass を追加 — 各 `Let(P_var name, value, body)` で value.ty が Vec の場合、body 内の `Var name` 全箇所を `Typer.unify` で binding 側に繋ぎ、いずれかの use site (例: `vec_push v 10`) が解決した時点で全 site にチェイン伝播、(5) 要素型の C struct が後に来る closure typedef 等で先行参照されるため `typedef struct mere_vec_<tag> mere_vec_<tag>;` forward typedef を tuple/record/variant 本体の後に挿入。examples/vec_codegen_c_typed.mere を新規追加 (int / str / tuple / variant の 4 種類を同一 program で混在、合計 252 を返す)。test 2 件追加 + 既存「Vec[R, <非int>] reject」テストを「str / tuple accept」に書き換え (1178 passing)。残る Vec の codegen は §1.1 に列挙 (高階 API / first-class value / LLVM・Wasm / OwnedVec / StrBuf / Map)。
+- **Phase 15 #2: C codegen generalizes element type T of `Vec[R, T]`**
+  — extends Phase 15.1 (`Vec[R, int]` only) to support any concrete
+  element type supported by codegen: int / bool / str / tuple /
+  record / variant. Monomorphize emits `mere_vec_<tag>` runtime struct
+  + 4 helpers (`_new` / `_push` / `_get` / `_len`) per element type
+  (e.g. `mere_vec_int` / `mere_vec_str` / `mere_vec_tuple_int_int` /
+  `mere_vec_Tag`). lib/codegen_c.ml: (1) added `vec_instances` table;
+  c_type_of / emit_expr register T encountered in Vec[_, T] sanitized
+  via `ty_tag`; (2) `emit_vec_runtime_for : Ast.ty -> string` generates
+  C runtime block per element type; (3) emit_expr's 4 special-cases
+  (`vec_new` / `vec_push` / `vec_get` / `vec_len`) routed to
+  `mere_vec_<tag>_*` helper names via `vec_elem_tag_of` helper; (4)
+  `let v = vec_new () in body` generalized binding (Mere has no value
+  restriction; generalized to `forall T. Vec[..., T]`) leaves App's
+  own .ty TyVar unresolved; added `resolve_vec_let_types` pre-pass
+  — for each `Let(P_var name, value, body)` where value.ty is Vec,
+  connect all `Var name` in body to binding side via `Typer.unify`;
+  once any use site (e.g. `vec_push v 10`) resolves, chain-propagates
+  to all sites; (5) element type's C struct may be forward-referenced
+  by later closure typedef etc.; insert `typedef struct mere_vec_<tag>
+  mere_vec_<tag>;` forward typedef after tuple/record/variant bodies.
+  Added `examples/vec_codegen_c_typed.mere` (mixes int / str / tuple /
+  variant in one program; total 252). Added 2 tests + rewrote
+  existing "Vec[R, <non-int>] reject" test to "str / tuple accept"
+  (1178 passing). Remaining Vec codegen listed in §1.1 (higher-order
+  APIs / first-class value / LLVM/Wasm / OwnedVec / StrBuf / Map).
 
-- **Phase 15 第一スライス: C codegen での `Vec[R, int]` 対応 (DEFERRED §1.1 部分解決)** — interpreter-only だった Vec を、まず最小スコープ (要素型 int / C backend のみ) で native 化する第一歩。`lib/codegen_c.ml` の runtime に `mere_vec_int` struct + `mere_vec_int_new / push / get / len` ヘルパを追加 (region-allocated、push 時の realloc は同じ region に新 buffer を確保、古い buffer は region free 時に回収 = arena semantics)。`c_type_of` を `Ast.walk` で TyCon の args も walk するように修正してから `TyCon ("Vec", [_; TyInt])` を `"mere_vec_int*"` に map。`emit_expr` の `App` ハンドラに 4 つの special-case (`vec_new` / `vec_push v x` / `vec_get v i` / `vec_len v`) を追加 — vec_new は active region の binding を `Ast.walk e.ty` で読み (outside なら `__heap` = `__lang_default_region`、region R 内なら `__region_R`)、`mere_vec_int_new(&...)` に展開。残り 3 つは curried 形 (`App (App (Var "vec_push", v), x)`) を inner/outer の組合せで unwrap して runtime helper 呼出に。`ty_tag` のキャッチオール拒否を `TyRef` (region marker) のみ通すように緩和。Var ハンドラの vec_* 拒否は first-class value 用法 (`let f = vec_new in ...`) のみに残し、直接 application は通すように変更。`examples/vec_codegen_c.mere` を新規作成: outside-region で `vec_new () + push×5 + get / len` を計算する 95 を返す program (`clang` で native binary 化して動作確認済み)。test 6 件追加 (1177 passing): C codegen が Vec[R, int] を accept、runtime helpers が emit される、outside で `__lang_default_region` / inside で `__region_R` に bind、Vec[R, str] のような非 int は依然 reject、LLVM / Wasm は引き続き全 Vec を reject。残る Vec の codegen は §1.1 に列挙 (高階 API / first-class value / LLVM・Wasm 対応 / OwnedVec / StrBuf / Map / 要素型 int 以外)。
+- **Phase 15 #1: C codegen for `Vec[R, int]` (DEFERRED §1.1 partial
+  resolution)** — first step toward native-izing interpreter-only Vec
+  in the smallest scope (element type int / C backend only). Added
+  `mere_vec_int` struct + `mere_vec_int_new / push / get / len`
+  helpers to `lib/codegen_c.ml` runtime (region-allocated; push's
+  realloc allocates new buffer in same region; old buffer reclaimed at
+  region free = arena semantics). Fixed `c_type_of` to walk `Ast.walk`
+  TyCon args, then map `TyCon ("Vec", [_; TyInt])` to
+  `"mere_vec_int*"`. Added 4 special-cases to `emit_expr` `App`
+  handler (`vec_new` / `vec_push v x` / `vec_get v i` / `vec_len v`)
+  — vec_new reads active region binding via `Ast.walk e.ty` (outside →
+  `__heap` = `__lang_default_region`; inside region R → `__region_R`)
+  and expands to `mere_vec_int_new(&...)`. Remaining 3 unwrap curried
+  form (`App (App (Var "vec_push", v), x)`) via inner/outer combo to
+  runtime helper calls. Relaxed `ty_tag` catch-all rejection to pass
+  only `TyRef` (region marker). Var handler's vec_* rejection kept
+  only for first-class value usage (`let f = vec_new in ...`); direct
+  application changed to pass. Added `examples/vec_codegen_c.mere`:
+  returns 95 computing `vec_new () + push×5 + get / len` in
+  outside-region (verified working via `clang` native binary). Added
+  6 tests (1177 passing): C codegen accepts Vec[R, int]; runtime
+  helpers emitted; binds to `__lang_default_region` outside / to
+  `__region_R` inside; non-int like Vec[R, str] still rejected; LLVM
+  / Wasm continue rejecting all Vec. Remaining Vec codegen listed in
+  §1.1 (higher-order APIs / first-class value / LLVM·Wasm support /
+  OwnedVec / StrBuf / Map / element types other than int).
 
-- **Phase 14 第二スライス: 仮称 lang-ml → Mere への実コードベースリネーム** — Phase 14.1 の名称確定 (internal design notes) を受けて、コード本体・拡張子・docs を一斉に Mere 表記に変更。dune library `lang_ml` → `mere` (lib/dune)、executable `main` → `mere` (bin/dune)、`bin/main.ml` → `bin/mere.ml` (git mv)、`Lang_ml.*` → `Mere.*` (bin/mere.ml / lib/codegen_llvm.ml / lib/repl.ml / test/test_basic.ml)、examples/*.lang → *.mere (37 files、git mv)、内部の `.lang` 参照を `.mere` に更新 (examples 内コメント / `import "..."` パス / docs / repl_session.md)、CLI usage の `lang-ml` 表記を `mere` に、REPL 起動メッセージも更新。docs/README/CLAUDE.md の Lang / lang-ml / `.lang` 全表記を更新。「Lang プログラム」「Lang の」等の文中の Lang もすべて Mere に。設計コンテキストディレクトリ `internal design notes` は意図的にそのまま (検討の歴史記録)。テスト 1171 件すべて pass。DEFERRED §7.1 (リネーム作業) を完全解決済みに。残り GitHub repo の rename (`lang-ml` → `mere`) は user 手動操作で。
+- **Phase 14 #2: rename codebase from working name lang-ml → Mere** —
+  followed Phase 14.1 name fixation (internal design notes) and
+  changed code body / extensions / docs to Mere across the board. dune
+  library `lang_ml` → `mere` (lib/dune); executable `main` → `mere`
+  (bin/dune); `bin/main.ml` → `bin/mere.ml` (git mv); `Lang_ml.*` →
+  `Mere.*` (bin/mere.ml / lib/codegen_llvm.ml / lib/repl.ml /
+  test/test_basic.ml); examples/*.lang → *.mere (37 files, git mv);
+  updated internal `.lang` references to `.mere` (comments in
+  examples / `import "..."` paths / docs / repl_session.md); CLI
+  usage `lang-ml` → `mere`; REPL startup message updated. Updated all
+  Lang / lang-ml / `.lang` notation in docs / README / CLAUDE.md.
+  Lang in sentences ("Lang program", "of Lang", etc.) also changed to
+  Mere. Intentionally left design context directory `internal design
+  notes` as-is (historical record). All 1171 tests pass. DEFERRED
+  §7.1 (rename work) moved to fully resolved. Remaining GitHub repo
+  rename (`lang-ml` → `mere`) is a user manual operation.
 
-- **Phase 12 第十スライス: 逆向き `owned_vec_to_vec` (DEFERRED §3.6 完全解決)** — Phase 12.11 で片方向 (`vec_to_owned`) を実装したのに続き、逆向きの `owned_vec_to_vec : OwnedVec[T] -> Vec[R, T]` を実装。region R は call site の `active_regions` から `vec_new` / `strbuf_new` / `map_new` と同じ App ハンドラ special-case で inject (outside → `__heap` default)。Eval は `Array.copy` で deep copy (V_vec を共有しているので copy だけで独立化)。3 backend codegen は interpreter-only stub。動作確認: outside で `Vec[__heap, T]`、`region R { owned_vec_to_vec o }` で `Vec[R, T]` (escape check 動作)、deep copy なので owned 側の後続 push は vec に影響なし。テスト 5 件追加 (1171 passing)。これで DEFERRED §3.6 完全解決。
+- **Phase 12 #10: reverse `owned_vec_to_vec` (DEFERRED §3.6 fully
+  resolved)** — follows Phase 12.11 one-way (`vec_to_owned`) with
+  reverse `owned_vec_to_vec : OwnedVec[T] -> Vec[R, T]`. Region R
+  injected from `active_regions` at call site as App-handler
+  special-case same as `vec_new` / `strbuf_new` / `map_new` (outside
+  → `__heap` default). Eval is `Array.copy` for deep copy (V_vec
+  shared, copy alone yields independence). 3-backend codegen
+  interpreter-only stub. Verified: outside → `Vec[__heap, T]`;
+  `region R { owned_vec_to_vec o }` → `Vec[R, T]` (escape check
+  works); deep copy means subsequent owned-side push doesn't affect
+  vec. Added 5 tests (1171 passing). DEFERRED §3.6 fully resolved.
 
-- **Phase 13 第一スライス: 型エラー UX 続編 — record field / view field / qualified name の did-you-mean** — DEFERRED §5.1 を一部消化。`lib/typer.ml` の `Field_get` 系エラー (view / record) と `Record_update` のフィールド不一致エラーを `raise_with_suggestion` 経由に切替: 該当 record / view の declared field 名リストを candidates として渡し、Levenshtein 距離で近い名前を `did you mean \`X\`?` として help: メッセージに付加。**qualified name typo** (例: `Math.factrial` → `Math.factorial`) は実装変更不要 — `Var "Math.factrial"` の env 検索が失敗した時、既存の `Var` ブランチが env 全体 (Module 内で M-prefix された binding 含む) を candidates にして suggest_name するため、自然に動く。動作確認: `Pt { name, value }` で `p.namee` → `did you mean \`name\`?`、view の field でも同じ、`{ p | namee = ... }` の record update でも同じ、`Math.factrial 5` → `did you mean \`Math.factorial\`?`。テスト 4 件追加 (1166 passing)。残る DEFERRED §5.1 (型変数 rename hint / 複数候補 N 件表示) は別 slice。
+- **Phase 13 #1: type error UX continued — did-you-mean for record
+  field / view field / qualified name** — partially consumes DEFERRED
+  §5.1. Switched `Field_get` family errors (view / record) and
+  `Record_update` field mismatch errors in `lib/typer.ml` to go
+  through `raise_with_suggestion`: passes the corresponding record /
+  view's declared field name list as candidates and adds nearby names
+  by Levenshtein distance as `did you mean \`X\`?` in help: message.
+  **Qualified name typo** (e.g. `Math.factrial` → `Math.factorial`)
+  needs no implementation change — when env lookup for `Var
+  "Math.factrial"` fails, existing `Var` branch uses entire env
+  (including M-prefixed bindings inside Module) as candidates and
+  calls suggest_name, which works naturally. Verified: `Pt { name,
+  value }` then `p.namee` → `did you mean \`name\`?`; same for view
+  fields; same for `{ p | namee = ... }` record update;
+  `Math.factrial 5` → `did you mean \`Math.factorial\`?`. Added 4
+  tests (1166 passing). Remaining DEFERRED §5.1 (type variable
+  rename hint / N-best candidate display) in separate slice.
 
-- **Phase 12 第九スライス: `vec_filter` / `vec_to_list` / `vec_to_owned`** — DEFERRED §3.5 残と §3.6 を消化。3 つの builtin を追加: `vec_filter : Vec[R, T] -> (T -> bool) -> Vec[R, T]` (region-preserving、predicate が true な要素のみ残す)、`vec_to_list : Vec[R, T] -> T list` (`'a list = Nil | Cons of 'a * 'a list` への変換、`Array.fold_right` で Cons chain を構築)、`vec_to_owned : Vec[R, T] -> T OwnedVec` (`Array.copy` で deep copy、source から独立した OwnedVec を返す — region 内 Vec を heap に持ち出す手段)。schemes はすべて region-polymorphic、`vec_to_owned` の結果は drop_types 登録された `OwnedVec` 型なので region に置けない (`region R { ... vec_to_owned v ... &R ... }` で Trivial[R] 違反として自動拒否)。3 backend codegen は 3 builtin すべて interpreter-only stub。テスト 10 件追加 (1162 passing): 3 scheme の型推論、filter の動作 / 空結果、list 変換 + 空 Vec → [] 表示、OwnedVec への deep copy + source 改変への独立性、region escape 拒否。DEFERRED §3.5 完全解決、§3.6 を片方向 (Vec→Owned) 解決済みに更新 (逆向き Owned→Vec は region context が要るので別 slice)。
+- **Phase 12 #9: `vec_filter` / `vec_to_list` / `vec_to_owned`** —
+  consumes DEFERRED §3.5 remainder and §3.6. Added 3 builtins:
+  `vec_filter : Vec[R, T] -> (T -> bool) -> Vec[R, T]`
+  (region-preserving, keeps only elements where predicate is true);
+  `vec_to_list : Vec[R, T] -> T list` (converts to `'a list = Nil |
+  Cons of 'a * 'a list`, builds Cons chain via `Array.fold_right`);
+  `vec_to_owned : Vec[R, T] -> T OwnedVec` (`Array.copy` deep copy,
+  returns OwnedVec independent of source — a way to extract
+  region-internal Vec to heap). All schemes region-polymorphic;
+  `vec_to_owned` result is drop_types-registered `OwnedVec` type so
+  cannot be placed in region (`region R { ... vec_to_owned v ...
+  &R ... }` auto-rejected as Trivial[R] violation). 3 backend
+  codegen interpreter-only stubs for all 3 builtins. Added 10 tests
+  (1162 passing): 3-scheme type inference; filter behavior / empty
+  result; list conversion + empty Vec → [] display; deep copy to
+  OwnedVec + independence from source mutations; region escape
+  rejection. DEFERRED §3.5 fully resolved; §3.6 updated to one-way
+  (Vec→Owned) resolved (reverse Owned→Vec needs region context,
+  separate slice).
 
-- **Phase 9 第五スライス: import path の精緻化 (importer-relative + canonicalisation)** — DEFERRED §4.2 を消化。Phase 9.2 で導入した `import "path";` は cwd 相対だったが、これを **importer 相対** に変更 (import 文がいるファイルからの相対パスで解決)。`Parser.current_base_dir : string ref` を追加、`parse_program ?(base_dir = Sys.getcwd ())` で初期値設定。`import` ブランチ: relative path は `Filename.concat !current_base_dir path`、`Unix.realpath` で canonicalize、再帰 parse 中は `current_base_dir := Filename.dirname canonical` に切替 (例外時は restore)。Pipeline.process に `?base_dir` 追加、CLI (bin/main.ml) は file mode で `~base_dir:(Filename.dirname path)` を渡す。canonicalisation により異なる relative form (例: `/tmp/foo.mere` と `./foo.mere`) でも同一ファイル扱い → cycle guard が正確化。動作確認: `import "./sub/inner.mere"` が main.mere のある dir 基準で resolve、nested import (main → middle → sub/inner) も each step の dir 基準で動く、同一ファイルの異なる relative form は 1 度だけ読込み。テスト 3 件追加 (1152 passing)。DEFERRED §4.2 を解決済みに更新。
+- **Phase 9 #5: precise import paths (importer-relative +
+  canonicalisation)** — consumes DEFERRED §4.2. Phase 9.2 introduced
+  cwd-relative `import "path";`; changed to **importer-relative**
+  (resolved from the file containing the import statement). Added
+  `Parser.current_base_dir : string ref`; `parse_program ?(base_dir =
+  Sys.getcwd ())` for initial value. `import` branch: relative path
+  via `Filename.concat !current_base_dir path`; canonicalized via
+  `Unix.realpath`; during recursive parse swap `current_base_dir :=
+  Filename.dirname canonical` (restored on exception). Added
+  `?base_dir` to Pipeline.process; CLI (bin/main.ml) passes
+  `~base_dir:(Filename.dirname path)` in file mode.
+  Canonicalisation makes different relative forms (e.g. `/tmp/foo.mere`
+  vs `./foo.mere`) refer to same file → accurate cycle guard.
+  Verified: `import "./sub/inner.mere"` resolves from main.mere's dir;
+  nested imports (main → middle → sub/inner) work from each step's
+  dir; same file via different relative forms loaded once. Added 3
+  tests (1152 passing). DEFERRED §4.2 updated to resolved.
 
-- **Phase 9 第四スライス: module 内での `type` / `record` declare** — DEFERRED §4.1 の最後の 1/3 を消化。`parse_decls` 内にあった T_type ブランチのロジック (record / variant / alias の disambiguation 含む) を `parse_type_decl_after_keyword` ヘルパに抽出、`parse_module_body` にも T_type ブランチを追加して同じ helper を呼ぶ。slice 1 制約として **type / record / constructor 名は M-prefix されず global registry に入る** — 同名の型を異なる module で declare すると衝突する (subsequent slice で proper scoping)。動作確認: `module M { type Pt = { x: int, y: int }; let mk = fn p -> Pt { ... } };` から `M.mk (3, 4)` で `p.x + p.y` 計算、`module M { type 'a opt = ... }; M.unwrap (S 42)` で variant 経由の dispatch、type と let の混在も OK。テスト 3 件追加 (1149 passing)。これで DEFERRED §4.1 を完全解決 (3/3)。
+- **Phase 9 #4: `type` / `record` declaration inside modules** —
+  consumes last 1/3 of DEFERRED §4.1. Extracted T_type branch logic
+  inside `parse_decls` (including record / variant / alias
+  disambiguation) into helper `parse_type_decl_after_keyword`; added
+  T_type branch to `parse_module_body` calling same helper. As a
+  slice-1 limitation, **type / record / constructor names are not
+  M-prefixed and enter global registry** — declaring same-named type
+  in different modules conflicts (proper scoping in subsequent
+  slice). Verified: `module M { type Pt = { x: int, y: int }; let mk =
+  fn p -> Pt { ... } };` compute `p.x + p.y` from `M.mk (3, 4)`;
+  `module M { type 'a opt = ... }; M.unwrap (S 42)` dispatches via
+  variant; type and let mix OK. Added 3 tests (1149 passing). DEFERRED
+  §4.1 fully resolved (3/3).
 
-- **Phase 9 第三スライス: 入れ子 module + `open M;`** — DEFERRED §4.1 の 2/3 を消化 (残りは module 内 type / record)。`parse_module_body` を `cur_path` パラメータ付きに refactor し、`T_module T_ident inner T_lbrace` を再帰的に処理。`module_names` に short name (`inner`) と full path (`outer.inner`) の両方を登録、内部 / 外部両方からの qualified access が動く。`module_bindings : (string, string list) Hashtbl.t` 登録簿を新規追加 — `prefix_module_decls` 内で direct binding 名 (dot を含まない名前のみ) を記録、`open M;` の expansion に使用。Lexer に `open` keyword + T_open token、parser の `parse_decls` に `T_open T_ident name T_semi` ブランチを追加: `module_bindings[m_name]` を取り出して `Top_let (P_var n, Var "M.n")` の alias 連鎖に展開、未宣言モジュールは parse error。nested module の direct binding name に dot が含まれる場合は `open` の expansion から除外 (例: `module M { module N { ... }; let g = ... }` で `open M;` は `g` のみ取込み、N の export は `M.N.foo` で参照する)。動作確認: `module M { module N { let f = ... }; let g = N.f + 1 }; M.N.f + M.g` が正しく動く、`open M;` 後の短縮 access と `M.foo` の qualified access が共存可。examples/module_nested.mere を新規作成。tutorial 10.5 を更新: 入れ子と `open` の使用例 + 制約。テスト 7 件追加 (1146 passing)。DEFERRED §4.1 を「2/3 解決」に更新 (module 内 type / record は今後)。
+- **Phase 9 #3: nested modules + `open M;`** — consumes 2/3 of
+  DEFERRED §4.1 (remaining: type / record inside module). Refactored
+  `parse_module_body` to take `cur_path` parameter; handles `T_module
+  T_ident inner T_lbrace` recursively. Registers both short name
+  (`inner`) and full path (`outer.inner`) to `module_names`; qualified
+  access from both inside and outside works. Newly added
+  `module_bindings : (string, string list) Hashtbl.t` registry —
+  inside `prefix_module_decls`, records direct binding names (only
+  names without dots); used to expand `open M;`. Added `open` keyword
+  + T_open token to lexer; added `T_open T_ident name T_semi` branch
+  to parser's `parse_decls`: extract `module_bindings[m_name]` and
+  expand to chain of `Top_let (P_var n, Var "M.n")` aliases;
+  unregistered module is parse error. Nested module direct binding
+  names containing dots are excluded from `open` expansion (e.g.
+  `module M { module N { ... }; let g = ... }` with `open M;` brings
+  in only `g`; N exports referenced as `M.N.foo`). Verified: `module M
+  { module N { let f = ... }; let g = N.f + 1 }; M.N.f + M.g` works;
+  shortcut access after `open M;` coexists with `M.foo` qualified
+  access. Added `examples/module_nested.mere`. Tutorial 10.5 updated:
+  nested + `open` usage + constraints. Added 7 tests (1146 passing).
+  DEFERRED §4.1 updated to "2/3 resolved" (type / record inside
+  module is future work).
 
-- **Phase 11 第七スライス: borrow checker 精緻化 (3) — match arm からの borrow 伝播** — DEFERRED §2.2 の続き (match パターン)。`extract_borrows` に Match ケースを追加: 各 arm の body から `extract_borrows` を取り union (どの arm が選ばれるかは runtime 依存なので保守的に全 arm を active と見なす)。guard は side condition なので extraction の対象外。ついでに `Let_rec` / `With` / `Region_block` の body も再帰的に traverse するように拡張 (これらの value を let-bind したときに borrow が漏れ得るため)。動作確認: `let r = match v with | N -> &R x | S _ -> &R x in let m = &mut R x in 0` → conflict、`let r = match v with | N -> &R x | S _ -> &R y in let m = &mut R y in 0` → conflict (else 分岐相当の &R y も active)、関係ない `&mut R z` は OK。テスト 3 件追加 (1139 passing)。残る borrow checker DEFERRED は §2.3 NLL のみ。
+- **Phase 11 #7: borrow checker refinement (3) — borrow propagation
+  from match arms** — continues DEFERRED §2.2 (match patterns).
+  Added Match case to `extract_borrows`: union of `extract_borrows`
+  from each arm body (which arm runs is runtime-dependent, so
+  conservatively treat all arms as active). Guards are side
+  conditions so not subject to extraction. While we're at it,
+  extended `Let_rec` / `With` / `Region_block` bodies to also
+  traverse recursively (these values can leak borrows when
+  let-bound). Verified: `let r = match v with | N -> &R x | S _ -> &R
+  x in let m = &mut R x in 0` → conflict; `let r = match v with | N
+  -> &R x | S _ -> &R y in let m = &mut R y in 0` → conflict (else
+  branch equivalent &R y also active); unrelated `&mut R z` OK.
+  Added 3 tests (1139 passing). Remaining borrow checker DEFERRED:
+  §2.3 NLL only.
 
-- **Phase 11 第六スライス: borrow checker 精緻化 (2) — if 分岐を介した borrow 伝播** — DEFERRED §2.2 を消化する slice。Phase 11.5 までは `Let (P_var _, Ref ..., body)` パターンしか borrow を active set に追加していなかったので、`let r = if cond then &R x else &R y in ...` のように **if expression の結果として borrow が漏れ出すケース** が検出できなかった。`extract_borrows : Ast.expr -> (region * place * mode * loc) list` ヘルパを追加: Ref を 1 要素のリストに、If(cond, t, e) を t/e からの extract の **union** に、Let(_, _, body) は body から再帰、Annot は inner から再帰、それ以外は空リスト。`check_borrows` の `Let` ブランチを refactor: value を `extract_borrows` に通して上に伝播する borrow を取得、各々を active set に conflict check しつつ追加、union を body に渡す。動作確認: `let r = if c then &R x else &R y in let m = &mut R y in 0` → conflict (else 分岐 from y も active 扱い)、`let r = if c then &R x else &R y in let m = &mut R z in 0` → OK (z は無関係)、let-in-if のような nested もちゃんと再帰。テスト 5 件追加 (1136 passing)。次の段階は §2.3 NLL (Non-Lexical Lifetimes) — borrow を 「使われなくなった瞬間」 で解放、libnessanalysis 相当。
+- **Phase 11 #6: borrow checker refinement (2) — borrow propagation
+  through if branches** — consumes DEFERRED §2.2. Up through Phase
+  11.5, only `Let (P_var _, Ref ..., body)` patterns added borrow to
+  active set; couldn't detect cases where **if expression result
+  leaks the borrow**, like `let r = if cond then &R x else &R y in
+  ...`. Added helper `extract_borrows : Ast.expr -> (region * place *
+  mode * loc) list`: Ref to single-element list; If(cond, t, e) to
+  **union** of extracts from t/e; Let(_, _, body) recurse from body;
+  Annot recurse from inner; otherwise empty list. Refactored
+  `check_borrows` `Let` branch: pass value through `extract_borrows`
+  to get borrows propagating up; conflict-check each one and add to
+  active set; pass union to body. Verified: `let r = if c then &R x
+  else &R y in let m = &mut R y in 0` → conflict (else branch from y
+  also active); `let r = if c then &R x else &R y in let m = &mut R
+  z in 0` → OK (z unrelated); nested let-in-if recurses properly.
+  Added 5 tests (1136 passing). Next stage is §2.3 NLL
+  (Non-Lexical Lifetimes) — releasing borrow at "the moment it stops
+  being used", equivalent to liveness analysis.
 
-- **Phase 11 第五スライス: borrow checker 精緻化 (1) — 複雑式 (field chain) の追跡** — DEFERRED §2.1 を消化する slice。Phase 11.4 では `&[mode] R x` の `x` が単純 Var の場合のみ追跡していたが、`p.field` / `p.q.r` のような Field_get chain も識別子として比較できるように拡張。`place_id : Ast.expr -> string option` ヘルパを追加 (Var → Some name, Field_get inner f → Some "<inner>.<f>", それ以外 → None)。`check_borrows` の `Ref` / `Let` 両ブランチで Var-only check を place_id ベースに置換。non-place な式 (function call の結果、literal 等) は引き続き追跡対象外 (None で skip)。エラーメッセージも `&R p.x` のような dotted path を表示。動作確認: `&R p.x + &mut R p.x` → conflict、`&R p.x + &mut R p.y` → OK、`&R p.x + &R p.x` → OK (shared read 同士)、`&R o.inner.v + &mut R o.inner.v` → conflict (nested chain)、`&R p + &mut R p.x` → OK (p 全体と p.x は別 place)。テスト 6 件追加 (1131 passing)。残る borrow checker DEFERRED: §2.2 制御フロー解析 (if 分岐ごとに borrow set 分離) と §2.3 NLL は別 slice。
+- **Phase 11 #5: borrow checker refinement (1) — tracking complex
+  expressions (field chain)** — consumes DEFERRED §2.1. Phase 11.4
+  only tracked simple Var for `x` in `&[mode] R x`; extended to
+  identify field chains like `p.field` / `p.q.r`. Added `place_id :
+  Ast.expr -> string option` helper (Var → Some name, Field_get
+  inner f → Some "<inner>.<f>", otherwise None). Replaced Var-only
+  checks in `check_borrows` `Ref` / `Let` branches with place_id
+  based. Non-place expressions (function call results, literals
+  etc.) continue to be skipped (None). Error messages also display
+  dotted paths like `&R p.x`. Verified: `&R p.x + &mut R p.x` →
+  conflict; `&R p.x + &mut R p.y` → OK; `&R p.x + &R p.x` → OK
+  (shared read each other); `&R o.inner.v + &mut R o.inner.v` →
+  conflict (nested chain); `&R p + &mut R p.x` → OK (whole p and
+  p.x are separate places). Added 6 tests (1131 passing). Remaining
+  borrow checker DEFERRED: §2.2 control flow analysis (separate
+  borrow sets per if branch) and §2.3 NLL in separate slices.
 
-- **Phase 12 第八スライス: `Map[R, K, V]` (region-aware mutable map)** — 設計 doc 13_region_std_types.md §5 の `Map[R, K, V]` 最小ハーネス。Vec[R, T] / StrBuf[R] と同じ construction-time binding パターン。Type は 3-arg `TyCon ("Map", [TyRef BorrowedRead R TyUnit; K; V])`。Eval に `V_map of (value, value) Hashtbl.t` (OCaml の polymorphic hash/eq) + 5 builtin (`map_new` / `map_set` / `map_get` / `map_has` / `map_len`)。`map_get` キー不在は eval error、`map_has` で安全 check。Typer に 5 schemes (region / K / V それぞれ TyVar で polymorphic)、`types["Map"] = 3`、`App (Var "map_new", _)` の special-case で active_regions から region binding (空なら __heap)。Ast.pp_ty に 3-arg `Map[R, K, V]` bracket 表示 (TyRef-of-unit / polymorphic 両対応)。Phase 12.6 の `len` builtin に `V_map` ケース追加で polymorphic len も対応。3 backend codegen は Map 型 / 5 builtin 名すべて interpreter-only stub。examples/map_basics.mere 新規作成: 単純 str→int、has 安全 lookup、int→str (型逆順)、region 内で短命作成の 4 パターン demo。tutorial 10.6 に Map API 表 + 注意点 (closure / ref を key にすると識別が ref 単位)。テスト 10 件追加 (1125 passing): 5 schemes の型推論、set/get 基本、has 分岐、duplicate key の len、polymorphic 型 (int → str)、不在 key の eval error、region escape rejection、outside-region default、polymorphic len 連携、codegen rejection。これで Q-010 の主要 collection (Vec / OwnedVec / StrBuf / Map) が一通り interpreter で動く。残る: trait システム本格 (§3.1)、Allocator trait API 統一 (§3.4)、`OwnedVec` / `Vec` 往復 (§3.6)、3 backend codegen (§1.1)。
+- **Phase 12 #8: `Map[R, K, V]` (region-aware mutable map)** —
+  Minimum harness for design doc 13_region_std_types.md §5 `Map[R, K,
+  V]`. Same construction-time binding pattern as Vec[R, T] /
+  StrBuf[R]. Type is 3-arg `TyCon ("Map", [TyRef BorrowedRead R
+  TyUnit; K; V])`. Eval has `V_map of (value, value) Hashtbl.t`
+  (OCaml polymorphic hash/eq) + 5 builtins (`map_new` / `map_set` /
+  `map_get` / `map_has` / `map_len`). `map_get` on missing key is
+  eval error; `map_has` for safe check. Typer has 5 schemes
+  (region / K / V each as TyVar for polymorphism); `types["Map"] =
+  3`; `App (Var "map_new", _)` special-cased pulls region binding
+  from active_regions (empty → __heap). Ast.pp_ty has 3-arg
+  `Map[R, K, V]` bracket display (TyRef-of-unit / polymorphic both
+  handled). Added `V_map` case to Phase 12.6 `len` builtin for
+  polymorphic len. All 3 backend codegen interpreter-only stubs for
+  Map type / 5 builtin names. Added `examples/map_basics.mere`:
+  simple str→int, has-safe lookup, int→str (type reversal),
+  short-lived inside region — 4 patterns demo. Tutorial 10.6 added
+  Map API table + caveats (closure / ref as key identified per-ref).
+  Added 10 tests (1125 passing): 5-scheme type inference; basic
+  set/get; has branch; len with duplicate key; polymorphic type (int
+  → str); eval error on missing key; region escape rejection;
+  outside-region default; polymorphic len integration; codegen
+  rejection. Now Q-010 main collections (Vec / OwnedVec / StrBuf /
+  Map) all work in interpreter. Remaining: trait system proper
+  (§3.1), unified Allocator trait API (§3.4), `OwnedVec` / `Vec`
+  round-trip (§3.6), 3-backend codegen (§1.1).
 
-- **Phase 12 第七スライス: Vec の高階 API (iter / map / fold / set)** — 設計 doc 13_region_std_types.md §3 で Vec API として想定されていた高階関数群を実装。すべて region-polymorphic + element type 多相。`vec_map` の結果 Vec は source と同じ region に bind (region-preserving)。schemes: `vec_iter : Vec[R, T] -> (T -> unit) -> unit` / `vec_map : Vec[R, T] -> (T -> U) -> Vec[R, U]` / `vec_fold : Vec[R, T] -> U -> (U -> T -> U) -> U` / `vec_set : Vec[R, T] -> int -> T -> unit`。Eval は `apply_value_ref` を介して user functions (V_closure / V_builtin) を呼び出す pattern (`flip` / `try_or` / `iter_n` 等と同じ)、配置場所は apply_value_ref 定義の後。`vec_set` は in-place mutation で範囲外 index は eval error。3 backend codegen は 4 名すべて interpreter-only stub。examples/vec_higher_order.mere を新規作成: int→int の map / int→str の map / fold で sum と max / set + iter / region 内 chain の 5 パターン demo。tutorial 10.6 セクションに高階 API 表 + 使用例を追加。テスト 12 件追加 (1115 passing): 4 schemes の型推論、map (要素型変換含む)、fold (sum)、set + 範囲外、iter via 別 Vec 経由の side effect、region-preserving 動作、codegen rejection。残る Q-010: Map[R, K, V]、Allocator trait、Vec / OwnedVec / StrBuf の codegen 対応。
+- **Phase 12 #7: Vec higher-order APIs (iter / map / fold / set)** —
+  Implemented higher-order functions intended for Vec API in design
+  doc 13_region_std_types.md §3. All region-polymorphic + element
+  type polymorphic. `vec_map` result Vec bound to same region as
+  source (region-preserving). Schemes: `vec_iter : Vec[R, T] -> (T
+  -> unit) -> unit`; `vec_map : Vec[R, T] -> (T -> U) -> Vec[R, U]`;
+  `vec_fold : Vec[R, T] -> U -> (U -> T -> U) -> U`; `vec_set :
+  Vec[R, T] -> int -> T -> unit`. Eval calls user functions
+  (V_closure / V_builtin) via `apply_value_ref` pattern (same as
+  `flip` / `try_or` / `iter_n` etc.); placement after apply_value_ref
+  definition. `vec_set` is in-place mutation; out-of-range index is
+  eval error. 3 backend codegen interpreter-only stubs for all 4
+  names. Added `examples/vec_higher_order.mere`: int→int map /
+  int→str map / fold for sum and max / set + iter / chain inside
+  region — 5 patterns demo. Tutorial 10.6 section added higher-order
+  API table + usage examples. Added 12 tests (1115 passing): 4-scheme
+  type inference; map (incl. element type conversion); fold (sum);
+  set + out-of-range; iter side effects via separate Vec;
+  region-preserving behavior; codegen rejection. Remaining Q-010:
+  Map[R, K, V]; Allocator trait; Vec / OwnedVec / StrBuf codegen
+  support.
 
-- **Phase 12 第六スライス: `StrBuf[R]` (Q-010 narrowed — region 内可変文字列バッファ)** — 設計 doc 13_region_std_types.md §4 の `StrBuf[R]` 最小ハーネス。`Vec[R, T]` (Phase 12.3) と同じ construction-time binding パターンで実装、type は 1-arg `TyCon ("StrBuf", [TyRef BorrowedRead R TyUnit])` (region marker のみ、view 型と同じ慣例)。Eval に `V_strbuf of Buffer.t` (OCaml Buffer で internal storage) を追加、`to_string` で `StrBuf["..."]` 表示。Builtins: `strbuf_new : unit -> StrBuf[R]`, `strbuf_push : StrBuf[R] -> str -> unit`, `strbuf_to_str : StrBuf[R] -> str`, `strbuf_len : StrBuf[R] -> int`。Typer に schemes 4 つを polymorphic-region 形 (region 位置に TyVar) で追加、`types["StrBuf"] = 1` で pre-register、`App (Var "strbuf_new", _)` を vec_new と同じ special-case で active_regions から region binding (空なら __heap)。`Ast.pp_ty` に polymorphic 用の `StrBuf[a]` bracket 表示を追加。Phase 12.6 の `len` builtin に `V_strbuf` ケースを追加して長さも取れる。3 backend codegen は type / builtin 両方を interpreter-only として reject。examples/strbuf_basics.mere を新規作成: outside-region (default `__heap`) / region 内 (`StrBuf[R]` に auto-bind) / polymorphic `len` 経由の 3 パターンを demo。tutorial 10.6 を更新: StrBuf[R] 解説 + 制約。テスト 9 件追加 (1103 passing): 型推論、push/to_str round-trip、empty len、region 内 binding、escape rejection、polymorphic len 連携、codegen rejection。残る Q-010: `Map[R, K, V]`、Allocator trait、Vec/OwnedVec/StrBuf の codegen 対応。
+- **Phase 12 #6: `StrBuf[R]` (Q-010 narrowed — region-internal mutable
+  string buffer)** — Minimum harness for design doc
+  13_region_std_types.md §4 `StrBuf[R]`. Same construction-time
+  binding pattern as `Vec[R, T]` (Phase 12.3); type is 1-arg
+  `TyCon ("StrBuf", [TyRef BorrowedRead R TyUnit])` (region marker
+  only, same convention as view types). Added `V_strbuf of Buffer.t`
+  to eval (internal storage in OCaml Buffer); `to_string` formats as
+  `StrBuf["..."]`. Builtins: `strbuf_new : unit -> StrBuf[R]`,
+  `strbuf_push : StrBuf[R] -> str -> unit`, `strbuf_to_str : StrBuf[R]
+  -> str`, `strbuf_len : StrBuf[R] -> int`. Added 4 schemes to typer
+  in polymorphic-region form (TyVar in region position); pre-register
+  `types["StrBuf"] = 1`; `App (Var "strbuf_new", _)` special-cased
+  same as vec_new pulls region binding from active_regions (empty →
+  __heap). Added polymorphic `StrBuf[a]` bracket display to
+  `Ast.pp_ty`. Added `V_strbuf` case to Phase 12.6 `len` builtin for
+  length via polymorphic. 3 backend codegen rejects both type /
+  builtin as interpreter-only. Added `examples/strbuf_basics.mere`:
+  outside-region (default `__heap`) / inside region (auto-bound to
+  `StrBuf[R]`) / polymorphic `len` — 3 patterns demo. Tutorial 10.6
+  updated: StrBuf[R] explanation + constraints. Added 9 tests (1103
+  passing): type inference; push/to_str round-trip; empty len; inside
+  region binding; escape rejection; polymorphic len integration;
+  codegen rejection. Remaining Q-010: `Map[R, K, V]`; Allocator
+  trait; Vec/OwnedVec/StrBuf codegen support.
 
-- **Phase 12 第五スライス: ad-hoc polymorphic `len` (Q-010 narrowed / trait-style API 統一の軽量実装)** — 設計 doc 13_region_std_types.md §6 で計画された `trait Collection { fn len(self) -> usize }` の最小現実解。trait システムを本格導入 (~500 LoC) するのではなく、`show : 'a -> str` と同じ枠で `len : 'a -> int` を ad-hoc polymorphic builtin として追加。typer 上は単一 scheme (`'a -> int`)、eval が runtime に値の variant を見て dispatch: `V_vec` (Vec[R, T] と OwnedVec[T] が共有) → array length、`V_str` → byte length、`V_tuple` → arity、`V_constr (Nil/Cons chain)` → list traversal で要素数、それ以外は eval error。Vec[R, T] / OwnedVec[T] / `'a list` / `str` / `tuple` に対して **単一の API** を提供する。3 backend codegen は `len` も interpreter-only スタブで reject。テスト 8 件追加 (1094 passing): 型推論、str / Vec / OwnedVec / tuple / list 各種の動作確認、unsupported value (int) の eval error、codegen rejection。trait システムの本格導入は将来 slice — Mere の設計哲学 (明示性 > 簡潔性) と trait の暗黙性が完全に整合するかは保留中。
+- **Phase 12 #5: ad-hoc polymorphic `len` (Q-010 narrowed / lightweight
+  unified trait-style API)** — Minimum practical alternative to a full
+  trait system planned for `trait Collection { fn len(self) -> usize
+  }` in design doc 13_region_std_types.md §6. Instead of introducing
+  a full trait system (~500 LoC), added `len : 'a -> int` as an
+  ad-hoc polymorphic builtin in the same frame as `show : 'a -> str`.
+  Single scheme in typer (`'a -> int`); eval dispatches based on
+  runtime value variant: `V_vec` (shared by Vec[R, T] and
+  OwnedVec[T]) → array length; `V_str` → byte length; `V_tuple` →
+  arity; `V_constr (Nil/Cons chain)` → list traversal counts
+  elements; otherwise eval error. **Single API** for Vec[R, T] /
+  OwnedVec[T] / `'a list` / `str` / `tuple`. 3 backend codegen
+  reject `len` as interpreter-only stub. Added 8 tests (1094 passing):
+  type inference; behavior for str / Vec / OwnedVec / tuple / list;
+  eval error for unsupported value (int); codegen rejection. Full
+  trait system introduction in future slice — whether trait's
+  implicitness fully aligns with Mere's design philosophy (explicit >
+  concise) is on hold.
 
-- **Phase 12 第四スライス: `OwnedVec[T]` (Q-010 narrowed (b) 別型分離)** — 設計 doc 13_region_std_types.md §9「(b) 別型 + trait で API 統一」の「別型」部分を実装。Vec[R, T] (region 内、Trivial) と対照的に `OwnedVec[T]` (heap-allocated、Drop あり) を追加。Typer に `owned_vec_new / push / get / len` の schemes (1-arg、`'a OwnedVec` 形式) を追加、`types["OwnedVec"] = 1` + **`drop_types` に登録**することで region 配置時に `contains_drop_type` が自動拒否 (`Trivial[R] violated: cannot place value of type \`'a OwnedVec\` into region — type contains a Drop type` で reject)。Eval は `V_vec` を共有 (型システム上だけ別物として扱われる、内部実装は同じ可変 array)。Codegen 3 backend は owned_vec_* builtin と OwnedVec 型を両方 interpreter-only として reject (`Vec / OwnedVec builtins are interpreter-only` の統合メッセージ)。examples/vec_vs_owned_vec.mere を新規作成: 短命の region Vec と長期保持の OwnedVec を 1 つの program で対比、それぞれの用法を示す。tutorial 10.6 セクション更新: OwnedVec[T] の解説 + Vec[R, T] との使い分け。テスト 6 件追加 (1086 passing): owned_vec_new の型、polymorphic push/get/len、Drop による region 拒否、Vec[R, T] が region に置けることの対照、3 backend codegen rejection。残る Q-010: `StrBuf[R]` / `Map[R, K, V]`、Allocator trait の API 統一 (trait による read-API 共通化)、Vec / OwnedVec の codegen 対応。
+- **Phase 12 #4: `OwnedVec[T]` (Q-010 narrowed (b) separate type)** —
+  Implemented "separate type" portion of design doc
+  13_region_std_types.md §9 "(b) separate type + trait for unified
+  API". Added `OwnedVec[T]` (heap-allocated, has Drop) in contrast to
+  `Vec[R, T]` (region-internal, Trivial). Added `owned_vec_new /
+  push / get / len` schemes (1-arg, `'a OwnedVec` form) to typer;
+  `types["OwnedVec"] = 1` + **registered in `drop_types`** so that
+  region-placement triggers automatic rejection by
+  `contains_drop_type` (`Trivial[R] violated: cannot place value of
+  type \`'a OwnedVec\` into region — type contains a Drop type`).
+  Eval shares `V_vec` (only type system treats them as different;
+  internal implementation is the same mutable array). 3-backend
+  codegen rejects both owned_vec_* builtins and OwnedVec type as
+  interpreter-only (unified message `Vec / OwnedVec builtins are
+  interpreter-only`). Added `examples/vec_vs_owned_vec.mere`:
+  contrasts short-lived region Vec and long-lived OwnedVec in one
+  program. Tutorial 10.6 updated: OwnedVec[T] explanation + how to
+  choose vs Vec[R, T]. Added 6 tests (1086 passing): type of
+  owned_vec_new; polymorphic push/get/len; region rejection via
+  Drop; contrast that Vec[R, T] can be placed in region; 3-backend
+  codegen rejection. Remaining Q-010: `StrBuf[R]` / `Map[R, K, V]`;
+  unified Allocator trait API (trait-based unification of read API);
+  Vec / OwnedVec codegen support.
 
-- **Phase 12 第三スライス: `Vec[R, T]` に semantic 裏付け (Q-010 narrowed → 実装第三段階)** — Phase 12.2 で parse-only だった `Vec[R, T]` 構文に、region を実際に追跡する型システムを与える。Vec の arity を 1 → 2 に変更、内部表現を `TyCon ("Vec", [TyRef BorrowedRead R TyUnit; T])` に統一 (view 型と同じ region marker 慣例)。Parser: `Vec[R, T]` を 2-arg として emit、legacy `T Vec` (1-arg postfix) は default region `__heap` を auto-fill して 2-arg 形に展開 (forward-compat)。Schemes の region 位置に **TyVar を入れる** ことで、scheme 機構そのままで region-polymorphic な API を実現 (`vec_push : forall T R_marker. Vec[R_marker, T] -> T -> unit`)。call site で R_marker が具体的な region marker と unify される。`Typer.infer` の App case に special handler を追加: `App (Var "vec_new", _)` は active_regions の innermost を読み、`Vec[R, T]` の region を直接 bind (view 構築と同形)。空なら `__heap`。`Ast.pp_ty` に 2-arg Vec 用の bracket 表示を追加 (`Vec[R, int]` / `Vec[__heap, 'a]` / `Vec['a, 'b]` etc.)。動作確認: `vec_new ()` outside → `Vec[__heap, 'a]`、`region R { vec_new () }` → `Vec[R, 'a]` (escape は static error)、`fn (v: Vec[R, int]) -> vec_len v` → `(Vec[R, int] -> int)`、`fn (v: int Vec) -> vec_len v` → `(Vec[__heap, int] -> int)`。examples/vec_basics.mere を更新: region 内 `vec_new ()` の region auto-bind を実演。tutorial 10.6 を更新: region に semantic 裏付けが入ったことと escape check を明記。テスト 3 件追加 + 既存 7 件の期待文字列を新形式に更新 (1080 passing)。残る Q-010: OwnedVec[T] との明示的区別、StrBuf[R] / Map[R, K, V]、Allocator trait の API 統一、Vec の codegen 対応。
+- **Phase 12 #3: semantic backing for `Vec[R, T]` (Q-010 narrowed →
+  implementation stage 3)** — Gives type system that actually tracks
+  region to `Vec[R, T]` syntax that was parse-only in Phase 12.2.
+  Changed Vec arity from 1 → 2; internal representation unified to
+  `TyCon ("Vec", [TyRef BorrowedRead R TyUnit; T])` (region marker
+  convention same as view types). Parser: `Vec[R, T]` emitted as
+  2-arg; legacy `T Vec` (1-arg postfix) auto-filled with default
+  region `__heap` and expanded to 2-arg form (forward-compat). With
+  **TyVar in region position of scheme**, region-polymorphic APIs are
+  realized through scheme machinery as-is (`vec_push : forall T
+  R_marker. Vec[R_marker, T] -> T -> unit`); R_marker unifies with
+  concrete region marker at call site. Added special handler to
+  `Typer.infer` App case: `App (Var "vec_new", _)` reads innermost
+  active_regions and directly binds region of `Vec[R, T]` (same
+  shape as view construction); empty → `__heap`. Added bracket
+  display for 2-arg Vec to `Ast.pp_ty` (`Vec[R, int]` / `Vec[__heap,
+  'a]` / `Vec['a, 'b]` etc.). Verified: `vec_new ()` outside →
+  `Vec[__heap, 'a]`; `region R { vec_new () }` → `Vec[R, 'a]` (escape
+  is static error); `fn (v: Vec[R, int]) -> vec_len v` → `(Vec[R, int]
+  -> int)`; `fn (v: int Vec) -> vec_len v` → `(Vec[__heap, int] ->
+  int)`. Updated `examples/vec_basics.mere`: demonstrates auto-bind
+  of region for `vec_new ()` inside region. Tutorial 10.6 updated:
+  noted that region got semantic backing + explicit escape check.
+  Added 3 tests + updated 7 existing tests to new format expectations
+  (1080 passing). Remaining Q-010: explicit distinction from
+  OwnedVec[T]; StrBuf[R] / Map[R, K, V]; unified Allocator trait API;
+  Vec codegen support.
 
-- **Phase 12 第二スライス: `Vec[R, T]` 構文 (Q-010 narrowed → 実装第二段階、軽量版)** — 設計 doc 13_region_std_types.md の表記 `Vec[R, T]` をパーサに受け付ける forward-compatible スライス。`lib/parser.ml` の `simple_ty` に `T_ident name :: T_lbracket :: ...` 分岐を追加 (name は uppercase): bracket-delimited 引数列を parse、region marker (bare uppercase ident で TyCon name=[] になるもの) は drop、残りの型引数のみを `expand_alias_or_tycon name type_args` に渡す。結果として `Vec[R, int]` は内部的に `int Vec` (1-arg TyCon) と同一 — 同じ TyCon を生成する。region R はドキュメント上のマーカーで、現状 semantic 裏付けなし (将来 slice で region-aware allocation / lifetime tracking を実装予定)。examples/vec_basics.mere を更新: region 内で `(vec_new () : Vec[R, int])` の annotation を実演。tutorial 10.6 セクションを更新: `Vec[R, T]` 構文が書けるようになったこと、現状の R はドキュメント のみ、両形式 (`int Vec` / `Vec[R, int]`) が等価な型を生むことを明記。テスト 3 件追加 (1077 passing): 型注釈パース、str 版、`int Vec` と `Vec[R, int]` が同一型。実装規模は parser.ml に ~25 行追加のみ。次の slice (12.3) で R にセマンティック裏付けを与える方針: vec_new の return type に active_regions を反映させる (view 構築のパターン)。
+- **Phase 12 #2: `Vec[R, T]` syntax (Q-010 narrowed → implementation
+  stage 2, lightweight)** — Forward-compatible slice that accepts
+  the notation `Vec[R, T]` from design doc 13_region_std_types.md
+  into parser. Added `T_ident name :: T_lbracket :: ...` branch to
+  `simple_ty` in `lib/parser.ml` (name is uppercase): parses
+  bracket-delimited argument list; region marker (bare uppercase
+  ident yielding TyCon name=[]) dropped; remaining type arguments
+  passed to `expand_alias_or_tycon name type_args`. Result is that
+  `Vec[R, int]` is internally identical to `int Vec` (1-arg TyCon)
+  — generates same TyCon. Region R is a documentation marker
+  currently with no semantic backing (region-aware allocation /
+  lifetime tracking implementation planned in future slice). Updated
+  `examples/vec_basics.mere`: demonstrates `(vec_new () : Vec[R,
+  int])` annotation inside region. Tutorial 10.6 section updated:
+  `Vec[R, T]` syntax can now be written; current R is documentation
+  only; both forms (`int Vec` / `Vec[R, int]`) produce equivalent
+  types. Added 3 tests (1077 passing): type annotation parse; str
+  version; `int Vec` and `Vec[R, int]` produce same type.
+  Implementation scale: only ~25 lines added to parser.ml. Next
+  slice (12.3) gives R semantic backing: reflect active_regions in
+  vec_new return type (view construction pattern).
 
-- **Phase 12 第一スライス: `'a Vec` 最小ハーネス (Q-010 narrowed → 実装第一段階)** — 設計 doc `13_region_std_types.md` の region 版 std 型のうち、最も基本的な可変長 vector を `'a Vec` として polymorphic builtin に追加。Phase 12 全体 (Vec[R,T] / OwnedVec[T] / StrBuf[R] / Map[R,K,V] / Allocator trait など) のうち本 slice は MVP に絞り、region パラメータを型に乗せる構文や OwnedVec との区別は後続 slice。`lib/eval.ml` に `V_vec of value array ref` (storage は OCaml の可変 array、push は append で reallocate) + 4 builtin (`vec_new : unit -> 'a Vec`, `vec_push : 'a Vec -> 'a -> unit`, `vec_get : 'a Vec -> int -> 'a`, `vec_len : 'a Vec -> int`) を追加、`to_string` の整形は `Vec[...]` 形式。`lib/typer.ml` に schemes 4 つ (`vec_new_scheme` etc.) を追加、`Hashtbl.replace types "Vec" 1` で arity 1 の polymorphic type として pre-register。`initial_env` に登録。Trivial[R] check は既存の `contains_drop_type` が再帰的に walk するので `Conn Vec` (Conn が drop type) を region に置こうとすると自動で拒否される。Codegen (C / LLVM / Wasm) の Var ハンドラに `vec_new` / `vec_push` / `vec_get` / `vec_len` を見つけたら `Codegen_error` を raise する明示的なスタブを追加 (3 backend すべて `interpreter-only` メッセージ)。`examples/vec_basics.mere` を新規作成: int / str Vec の基本操作 + region 内 Vec の demo。テスト 14 件追加 (1074 passing): 4 builtin の型推論、空 Vec の len、push 後の len/get、多相 (str Vec)、region 配置 OK、Conn Vec が Trivial[R] で拒否、範囲外 get の eval error、3 backend codegen rejection。今後の slice 候補: Vec[R, T] のように region をパラメータに乗せる + Allocator trait + OwnedVec[T] との区別。
+- **Phase 12 #1: `'a Vec` minimum harness (Q-010 narrowed →
+  implementation stage 1)** — Adds basic variable-length vector as
+  polymorphic builtin under name `'a Vec`, the most basic of design
+  doc `13_region_std_types.md` region-version std types. Phase 12
+  total (Vec[R,T] / OwnedVec[T] / StrBuf[R] / Map[R,K,V] / Allocator
+  trait etc.) narrowed to MVP; syntax for region parameters in type
+  and distinction from OwnedVec come in subsequent slices. Added
+  `V_vec of value array ref` (storage in OCaml mutable array; push
+  appends with reallocate) + 4 builtins (`vec_new : unit -> 'a Vec`,
+  `vec_push : 'a Vec -> 'a -> unit`, `vec_get : 'a Vec -> int -> 'a`,
+  `vec_len : 'a Vec -> int`) to `lib/eval.ml`; `to_string` formats as
+  `Vec[...]`. Added 4 schemes (`vec_new_scheme` etc.) to
+  `lib/typer.ml`; `Hashtbl.replace types "Vec" 1` pre-registers as
+  arity-1 polymorphic type. Registered in `initial_env`. Trivial[R]
+  check works because existing `contains_drop_type` walks
+  recursively, so placing `Conn Vec` (where Conn is a drop type) in
+  region is auto-rejected. Added explicit stubs to Var handlers of
+  codegen (C / LLVM / Wasm) raising `Codegen_error` when they see
+  `vec_new` / `vec_push` / `vec_get` / `vec_len` (all 3 backends
+  emit `interpreter-only` message). Added `examples/vec_basics.mere`:
+  basic operations on int / str Vec + Vec inside region demo. Added
+  14 tests (1074 passing): type inference for 4 builtins; len of
+  empty Vec; len/get after push; polymorphic (str Vec); region
+  placement OK; Conn Vec rejected with Trivial[R]; eval error for
+  out-of-range get; 3-backend codegen rejection. Future slice
+  candidates: Vec[R, T] with region as parameter + Allocator trait
+  + distinction from OwnedVec[T].
 
-- **Phase 11 第四スライス: borrow checker の最小ハーネス** — Q-004 の「残る実装 TODO」を消化する slice。`lib/typer.ml` に `check_borrows : (string * string * borrow_mode * Loc.t) list -> Ast.expr -> unit` を追加。同一 (region, 変数名) に対する borrow を active 集合として lexical scope を thread し、衝突する mode 並存を `Type_error` で拒否する。並存可能ペアは `borrows_compatible` で定義: shared read 同士 (`BorrowedRead` + `BorrowedRead`) と shared write 同士 (`SharedWrite` + `SharedWrite`) のみ OK、それ以外はすべて衝突 (`exclusive` 系は何とも共存不可、shared read + shared write も無効化リスクで拒否)。AST walk は `Let (P_var p, Ref (mode, region, Var v_name), body)` を発見すると active set に `(region, v_name, mode, value.loc)` を追加して body を recurse、free-standing な `&[m] R v` も active との衝突チェック。`Pipeline.process` で `Typer.infer` の後に `Typer.check_borrows [] (Ast.desugar_program prog)` を呼んで program 全体を 1 パスで検査。`examples/borrow_conflict.mere` を新規作成 (`&R v` 後に `&mut R v` を取って衝突する意図的失敗 demo)。エラーメッセージに「previous borrow at line N, col N」note 付き。動作確認: `let a = &R v in let b = &mut R v` / `let a = &mut R v in let b = &mut R v` / `let a = &R v in let b = &shared write R v` / `let a = &exclusive R v in let b = &R v` すべて conflict で reject、`let a = &R v in let b = &R v` / 2 つの shared write / 異なる変数 は OK。`docs/tutorial.md` 10.4 セクションに borrow checker 解説 + 衝突例の出力を追加。テスト 8 件追加 (1060 passing)。現状追跡対象は `&[m] R x` の `x` が単純 Var の場合のみ — 複雑式 (`&R rec.field` 等) は今後。これで Q-004 設計の (b) borrow 注釈細分化が「型として書ける + 衝突を機械検証する」両面で完成。
+- **Phase 11 #4: borrow checker minimum harness** — Slice that
+  consumes Q-004 "remaining implementation TODO". Added `check_borrows
+  : (string * string * borrow_mode * Loc.t) list -> Ast.expr -> unit`
+  to `lib/typer.ml`. Threads borrows for the same (region, var name)
+  as active set through lexical scope; rejects coexistence of
+  conflicting modes with `Type_error`. Coexistence allowed pairs
+  defined in `borrows_compatible`: only shared read with shared read
+  (`BorrowedRead` + `BorrowedRead`) and shared write with shared write
+  (`SharedWrite` + `SharedWrite`); all else conflicts (`exclusive`
+  family doesn't coexist with anything; shared read + shared write
+  also rejected due to invalidation risk). AST walk: when discovering
+  `Let (P_var p, Ref (mode, region, Var v_name), body)`, adds
+  `(region, v_name, mode, value.loc)` to active set and recurses on
+  body; free-standing `&[m] R v` also conflict-checks with active.
+  `Pipeline.process` calls `Typer.check_borrows [] (Ast.desugar_program
+  prog)` after `Typer.infer` to inspect program in one pass. Added
+  `examples/borrow_conflict.mere` (intentional failure demo: taking
+  `&mut R v` after `&R v`). Error message includes "previous borrow at
+  line N, col N" note. Verified: `let a = &R v in let b = &mut R v` /
+  `let a = &mut R v in let b = &mut R v` / `let a = &R v in let b =
+  &shared write R v` / `let a = &exclusive R v in let b = &R v` all
+  reject as conflict; `let a = &R v in let b = &R v` / 2 shared write
+  / different variables OK. Added borrow checker explanation +
+  conflict example output to `docs/tutorial.md` 10.4 section. Added 8
+  tests (1060 passing). Currently tracking is limited to simple Var
+  for `x` in `&[m] R x` — complex expressions (`&R rec.field` etc.)
+  in future. Now Q-004 design (b) borrow annotation refinement is
+  complete in both "can be written as types + machine-verifies
+  conflict".
 
-- **Phase 11 第三スライス: `&R T` を介した field access の auto-deref** — Phase 11.1 で借用注釈を入れた時点では `lg_ref.info "hi"` のような field access が `field access on non-record value` で落ちていた。`lib/typer.ml` の `Field_get` ケースに `strip_refs` ヘルパを追加 (TyRef ラッパを再帰的に剥がす)、剥がした後の型に対して既存の view / record 判定を行うように変更。borrow mode は静的契約のままで、eval 側は元から `&R v` を素通し評価していたので runtime 変更ゼロ。結果として `&R Logger` / `&mut R Logger` / `&shared write R Logger` のいずれを介しても `lg.info "msg"` のように直接 method 呼出が動く。examples/borrow_modes.mere を全面更新: signature 限定だった demo を実際の cap method (`log_action`, `db_run`, `show_config`) が borrow 越しに呼ばれる形に書き直し、`mk_logger` の `[INFO]` 出力 + DbHandle の `exec` 呼出 + AppConfig の `name`/`threads` 読み出しを print。テスト 5 件追加 (1052 passing): Pt record の field access through `&R`、through `&mut R`、through `&shared write R`、user 定義 Lg11 を介した型推論、`&R Lg11r` から field を取り出した型確認。
+- **Phase 11 #3: auto-deref for field access through `&R T`** — At
+  Phase 11.1 borrow annotation introduction, field access like
+  `lg_ref.info "hi"` was crashing with `field access on non-record
+  value`. Added `strip_refs` helper to `Field_get` case of
+  `lib/typer.ml` (recursively peels TyRef wrappers); changed to
+  perform existing view / record judgment on type after peeling.
+  Borrow mode remains static contract; eval side already passed `&R
+  v` through, so zero runtime changes. Result: method calls work
+  directly through any of `&R Logger` / `&mut R Logger` / `&shared
+  write R Logger`, like `lg.info "msg"`. Fully rewrote
+  examples/borrow_modes.mere: rewrote signature-only demo to actually
+  call cap methods (`log_action`, `db_run`, `show_config`) across
+  borrow; prints `mk_logger`'s `[INFO]` output + DbHandle's `exec`
+  call + AppConfig's `name`/`threads` read. Added 5 tests (1052
+  passing): field access on Pt record through `&R`; through `&mut
+  R`; through `&shared write R`; type inference for user-defined
+  Lg11; type confirmation extracting field from `&R Lg11r`.
 
-- **Phase 11 第二スライス: 借用注釈の realistic example + tutorial 10.4 セクション** — Phase 11.1 で構文を入れた 4 mode (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を「何の役に立つか」見せる節目。`examples/borrow_modes.mere` を新規作成: Logger (shared write) / DbHandle (exclusive write) / AppConfig (shared read) の 3 種を region 内で構築し、各 cap を適切な mode で借用してから handler に渡す realistic demo。実行すると "[logged] save_order" / "[exclusive] UPDATE ..." / "[read]" を print。`examples/borrow_modes_typeerror.mere` を新規作成: `&R db` を `&mut R DbHandle` 引数に渡して **意図的に型エラーで落ちる** demo (`expected \`&mut R DbHandle\`, got \`&R DbHandle\`` が出ることを documentation として表示)。`docs/tutorial.md` に 10.4 「借用注釈」セクション追加 (4 mode 表 + 使用例 + mode mismatch エラー例 + 現状の制約 (borrow checker 排他規則と `&R T` の field auto-deref は今後))。section 12 の examples list にも 2 本の新 example を追加。テスト数変動なし (1047 のまま)。Phase 11.1 で「型として書けた」状態を、Phase 11.2 で「読んで意味がわかる」状態に。次の slice 候補は borrow checker (排他規則) と `&R T` の field auto-deref。
+- **Phase 11 #2: borrow annotation realistic example + tutorial 10.4
+  section** — Milestone showing "what is it good for" of the 4 modes
+  added in Phase 11.1 (`&R T` / `&mut R T` / `&shared write R T` /
+  `&exclusive R T`). Added `examples/borrow_modes.mere`: realistic
+  demo constructing 3 kinds — Logger (shared write) / DbHandle
+  (exclusive write) / AppConfig (shared read) — inside region, then
+  borrowing each cap with appropriate mode and passing to handler.
+  Run prints "[logged] save_order" / "[exclusive] UPDATE ..." /
+  "[read]". Added `examples/borrow_modes_typeerror.mere`:
+  **intentionally fails with type error** demo passing `&R db` to
+  `&mut R DbHandle` parameter (displays as documentation that
+  `expected \`&mut R DbHandle\`, got \`&R DbHandle\`` is shown).
+  Added 10.4 "Borrow annotation" section to `docs/tutorial.md`
+  (4-mode table + usage examples + mode mismatch error example +
+  current limitations (borrow checker exclusion rules and `&R T`
+  field auto-deref are future work)). Also added 2 new examples to
+  section 12 examples list. No test count change (1047 still).
+  Phase 11.1 brought "writable as type" state; Phase 11.2 brought
+  "readable with understood meaning" state. Next slice candidates:
+  borrow checker (exclusion rules) and `&R T` field auto-deref.
 
-- **Phase 11 第一スライス: 借用注釈の細分化 (Q-004 narrowed → 実装第一段階)** — 設計ドキュメント 08_effect_granularity.md で narrowed の (b) borrow 注釈細分化を実装に落とす最小ハーネス。AST に `borrow_mode = BorrowedRead | SharedWrite | ExclusiveRead | ExclusiveWrite` を追加、`TyRef of borrow_mode * string * ty` (型レベル) と `Ref of borrow_mode * string * expr` (値レベル) のシグネチャを 3 引数化。Parser に 4 つの新構文:`&R T` (default = BorrowedRead)、`&mut R T` (ExclusiveWrite)、`&shared write R T` (SharedWrite)、`&exclusive R T` (ExclusiveRead)。値レベル `&R v` / `&mut R v` / `&shared write R v` / `&exclusive R v` も同様。`mut` / `shared` / `write` / `exclusive` は contextual keyword (lexer では普通の ident、parser が `&` の後でのみ認識)。Typer の unify を `TyRef (m1, r1, t1) ↔ TyRef (m2, r2, t2)` で「region かつ mode の equality」を要求 (strict、subtyping なし)。pp_ty を `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` に対応。Codegen (C / LLVM / Wasm) は mode を ignore — pointer 表現は同じで、静的保証のみ。動作確認: `fn (x: &mut R int) -> ...` の型表示 OK、`fn (x: &mut R int) -> 1` に `&R 5` を渡すと `expected \`&mut R int\`, got \`&R int\`` で type error、同じ mode 同士の call は通る、`(&R 5 : &mut R int)` の annotation mismatch は type error。Logger 問題 (shared write の表現) は構文レベルで解決済、borrow checker (排他規則) は今後の slice で。テスト 14 件追加 (1047 passing)。
+- **Phase 11 #1: borrow annotation refinement (Q-004 narrowed →
+  implementation stage 1)** — Minimum harness for narrowing (b)
+  borrow annotation refinement in design doc 08_effect_granularity.md
+  down to implementation. Added `borrow_mode = BorrowedRead |
+  SharedWrite | ExclusiveRead | ExclusiveWrite` to AST; signatures
+  for `TyRef of borrow_mode * string * ty` (type level) and `Ref of
+  borrow_mode * string * expr` (value level) changed to 3-arg. 4 new
+  syntaxes in parser: `&R T` (default = BorrowedRead); `&mut R T`
+  (ExclusiveWrite); `&shared write R T` (SharedWrite); `&exclusive R
+  T` (ExclusiveRead). Value level `&R v` / `&mut R v` / `&shared
+  write R v` / `&exclusive R v` similarly. `mut` / `shared` / `write`
+  / `exclusive` are contextual keywords (regular idents in lexer;
+  parser recognizes only after `&`). Typer's unify changed to require
+  "region and mode equality" for `TyRef (m1, r1, t1) ↔ TyRef (m2,
+  r2, t2)` (strict, no subtyping). pp_ty handles `&R T` / `&mut R T`
+  / `&shared write R T` / `&exclusive R T`. Codegen (C / LLVM / Wasm)
+  ignores mode — pointer representation is the same; only static
+  guarantee. Verified: `fn (x: &mut R int) -> ...` type display OK;
+  passing `&R 5` to `fn (x: &mut R int) -> 1` is type error
+  `expected \`&mut R int\`, got \`&R int\``; calls with same mode
+  pass; `(&R 5 : &mut R int)` annotation mismatch is type error.
+  Logger problem (shared write representation) solved at syntax
+  level; borrow checker (exclusion rules) in future slice. Added 14
+  tests (1047 passing).
 
-- **Phase 10 第一スライス: 到達点の集約 — tutorial / README / 新規 examples / SUMMARY** — 1033 tests / 3 backend / REPL / module / import が揃った節目で、外向きドキュメントを整える。`docs/tutorial.md` に 10.5「モジュールと import」セクションと 11.5「REPL を使う」セクションを追加、13「ネイティブコンパイル」を C 専用から 3 backend (C / LLVM / Wasm) 対応に rewrite、末尾の「メモリモデルは codegen 上で実装されていない」記述を「全 backend で動く」に更新。`README.md` を全面更新: ステータスを 2026-06-19 時点 (1033 tests / 3 backend parity / module / import / REPL コマンド)、機能テーブルにモジュール・import・REPL コマンド・エラー UX 行を追加、ビルド例に LLVM / Wasm の build パスを追加。新規 example: `examples/module_basic.mere` (`module Math { let inc / square / pow / inc_then_square ... }` + 短縮内部参照デモ)、`examples/lib_list_ops.mere` (decls-only ライブラリで `module ListOps { sum / length / map }` を export)、`examples/import_demo.mere` (lib を `import "examples/lib_list_ops.mere";` で取込み)、`examples/repl_session.md` (`:type` / `:env` / `:show` / `:load` / `:reset` / multi-line を対話セッション形式で示す Markdown)。`internal design notes` を新規作成: Phase 1〜9 の到達点を「外向け」(将来の自分 / 共有相手に 5 分で状況伝達) として再構成、機能の網羅性・経緯のフェーズ表・できないこと・次の方向性まで集約。テスト数変動なし (1033 のまま)。
+- **Phase 10 #1: aggregating where we are — tutorial / README / new
+  examples / SUMMARY** — Milestone with 1033 tests / 3 backends /
+  REPL / module / import in place; arranging outward-facing
+  documentation. Added 10.5 "Modules and import" section and 11.5
+  "Using the REPL" section to `docs/tutorial.md`; rewrote 13 "Native
+  compilation" from C-only to 3-backend (C / LLVM / Wasm); updated
+  closing remark from "memory model is not implemented in codegen"
+  to "works in all backends". Full rewrite of `README.md`: status as
+  of 2026-06-19 (1033 tests / 3 backend parity / module / import /
+  REPL commands); added rows for module, import, REPL command, error
+  UX to features table; added LLVM / Wasm build paths to build
+  examples. New examples: `examples/module_basic.mere` (`module Math
+  { let inc / square / pow / inc_then_square ... }` + shortened
+  internal reference demo); `examples/lib_list_ops.mere` (decls-only
+  library exporting `module ListOps { sum / length / map }`);
+  `examples/import_demo.mere` (imports lib with `import
+  "examples/lib_list_ops.mere";`); `examples/repl_session.md`
+  (Markdown showing `:type` / `:env` / `:show` / `:load` / `:reset`
+  / multi-line in dialog session format). Created new `internal
+  design notes`: restructured destinations of Phases 1-9 as
+  "outward-facing" (5-min status delivery to future self / sharing
+  partners); aggregates feature coverage, history phase table,
+  what's missing, next directions. No test count change (1033
+  still).
 
-- **Phase 9 第二スライス: ファイル分割 — `import "./other.mere";`** — Lexer に `import` キーワード + `T_import` トークン追加。Parser に `imported_files : (string, unit) Hashtbl.t` 登録簿と、`parse_decls` の `T_import T_string path T_semi` ブランチを追加: 対象ファイルを `In_channel.with_open_text` で読み、`Lexer.tokenize` + 再帰的に parse_program_internal 呼出、得た decls を List.rev_append で現 decl ストリームに混ぜ込み (main 式は捨てる)。同じパスが既登録なら skip (cycle 防止)。`parse_program` を `parse_program_internal` (再帰 worker) + `parse_program` (top-level wrapper、`Hashtbl.reset imported_files` 実行後 worker を call) に split — top-level の cycle guard accumulator が再帰 import 全体に渡って効くと同時に、top-level 呼出ごとに fresh になる。parser registries (constructors / records / module_names / aliases) は recursive call で共有されるので、import 先で定義された型 / record / module は importer 側からも見える。動作確認: `import "/tmp/lib.mere"; helper base` で別ファイルの helper / base を参照、`import "/tmp/lib_mod.mere"; Math.sq (Math.dbl 5)` で import 先の module を qualified 参照、互いに import し合う `cyc_a ↔ cyc_b` で a_val + b_val = 30 (cycle guard で無限ループなし)、diamond pattern (lib を経由 A・経由 B 両方から import) で重複なく 1 回だけ取込み、missing file は parse error。テスト 6 件追加 (1033 passing)。base path resolution は cwd 基準、symlink / 異なる相対形は別ファイル扱い (canonicalisation は今後)。
+- **Phase 9 #2: file split — `import "./other.mere";`** — Added
+  `import` keyword + `T_import` token to lexer. Added
+  `imported_files : (string, unit) Hashtbl.t` registry and
+  `parse_decls` `T_import T_string path T_semi` branch to parser:
+  reads target file with `In_channel.with_open_text`, recursively
+  calls `Lexer.tokenize` + parse_program_internal, mixes resulting
+  decls into current decl stream with List.rev_append (discards main
+  expression). Skips same path if already registered (cycle
+  prevention). Split `parse_program` into `parse_program_internal`
+  (recursive worker) + `parse_program` (top-level wrapper, runs
+  worker after `Hashtbl.reset imported_files`) — top-level cycle
+  guard accumulator extends throughout recursive imports while being
+  fresh per top-level call. Parser registries (constructors /
+  records / module_names / aliases) are shared across recursive
+  calls, so types / records / modules defined in imported files are
+  visible from importer side. Verified: `import "/tmp/lib.mere";
+  helper base` references helper / base from another file; `import
+  "/tmp/lib_mod.mere"; Math.sq (Math.dbl 5)` qualifiedly references
+  module in import; mutual `cyc_a ↔ cyc_b` imports yield a_val +
+  b_val = 30 (no infinite loop thanks to cycle guard); diamond
+  pattern (importing lib via both A and B) loads once without
+  duplication; missing file is parse error. Added 6 tests (1033
+  passing). Base path resolution is cwd-based; symlinks / different
+  relative forms treated as different files (canonicalisation in
+  future).
 
-- **Phase 9 第一スライス: モジュール最小ハーネス — `module M { let f = ...; }` + `M.f` 参照** — 言語 surface の次の節目。Lexer に `module` キーワード + `T_module` トークンを追加、`parser.ml` に `module_names : (string, unit) Hashtbl.t` 登録簿と `parse_module_body` (slice 1 では `let` / `let rec` のみ、`T_rbrace` で終端)、`prefix_module_decls` (binding 名と body 内の自由 Var 参照を `M.` プレフィックスで書換) を追加。`Ast.rename_free_vars` を新規実装: shadowing 対応の AST walker で `Fun (param, ...)` / `Let (P_var p, ...)` body / `Let_rec [(n, _); ...]` / `With (n, ...)` body / `Match` arm pattern が `pattern_vars` で計算した bind 名を shadow リストから除外。parser の `field_chain` を拡張: lhs が `Var "M"` で `M ∈ module_names` なら `Field_get` ではなく `Var "M.f"` を emit。uppercase ident の atom_base でも `module_names` を constructor / record 判定より先にチェック。`parse_program` に decls-only モード (T_eof のみなら main = `()`) を追加し、`Repl.prepare_input` の `; ()` ハックを撤廃 (no-op 化、互換のため identity wrapper として残置)。動作確認: `module M { let answer = 42; let add = fn x -> fn y -> x + y; }; M.add M.answer 8` → 50、内部の `inc (inc x)` 短縮参照は `M.inc (M.inc x)` に rewrite、`let rec fact = fn n -> ... fact (n-1)` も M.fact 自己呼出が動く、`module M; module N;` 同名 binding が衝突しない、`p.x` の通常 field access は変更なし。REPL でも `module M { ... }` を multi-line で直書きでき `:env` に `M.f` が出る。テスト 7 件追加 (1027 passing)。型 / record / 入れ子 module は今後の slice。
+- **Phase 9 #1: minimum module harness — `module M { let f = ...; }`
+  + `M.f` reference** — Next milestone for language surface. Added
+  `module` keyword + `T_module` token to lexer; added `module_names :
+  (string, unit) Hashtbl.t` registry and `parse_module_body` to
+  `parser.ml` (slice 1: only `let` / `let rec`; terminates at
+  `T_rbrace`); added `prefix_module_decls` (rewrites binding names
+  and free Var references in body with `M.` prefix). Newly
+  implemented `Ast.rename_free_vars`: shadowing-aware AST walker
+  that excludes bind names computed by `pattern_vars` from shadow
+  list in `Fun (param, ...)` / `Let (P_var p, ...)` body / `Let_rec
+  [(n, _); ...]` / `With (n, ...)` body / `Match` arm patterns.
+  Extended parser's `field_chain`: if lhs is `Var "M"` and `M ∈
+  module_names`, emits `Var "M.f"` instead of `Field_get`. uppercase
+  ident atom_base also checks `module_names` before constructor /
+  record judgment. Added decls-only mode to `parse_program` (main =
+  `()` if only T_eof); removed `Repl.prepare_input`'s `; ()` hack
+  (made no-op, left as identity wrapper for compatibility).
+  Verified: `module M { let answer = 42; let add = fn x -> fn y -> x
+  + y; }; M.add M.answer 8` → 50; internal `inc (inc x)` shortened
+  references rewritten as `M.inc (M.inc x)`; `let rec fact = fn n ->
+  ... fact (n-1)` M.fact self-call works; `module M; module N;`
+  same-name bindings don't conflict; `p.x` regular field access
+  unchanged. In REPL also can write `module M { ... }` multi-line
+  directly; `M.f` appears in `:env`. Added 7 tests (1027 passing).
+  Types / records / nested modules in future slices.
 
-- **Phase 8 第二スライス: REPL 続編 — :show NAME + :reset** — `lib/repl.ml` に 2 つの新 command を追加。(1) `:show NAME` は型と値を同時に出す: `format_show eval_env type_env name` ヘルパが `type_env` から scheme、`eval_env` から `value ref` をそれぞれ引いて `val NAME : TY\n  = VAL` 形式の string を返す (`Eval.to_string` を使うので closure は `<closure:p>`、str は quote 済み、数値や record/variant も同じフォーマッタ)。未束縛名は `unbound name: NAME`。`print_show` は同じ内容を print する側エントリ。(2) `:reset` は `do_reset eval_env type_env` で両 env を `Eval.initial_env` / `Typer.initial_env` に巻き戻し、`(envs reset)` を表示。help テキストを 2 行追加。動作確認: `let x = 42; let g = "hi"; :show x` → "val x : int\n = 42"、`:show g` → "val g : str\n = \"hi\""、`:show inc` (closure) → "val inc : (int -> int)\n = <closure:n>"、`:show nope` → "unbound name: nope"、`:reset` で env クリア後 `:env` → "(no user bindings)"。テスト 5 件追加 (1020 passing、format_show / do_reset の I/O を split して純粋部分を直接 assert)。
+- **Phase 8 #2: REPL continued — `:show NAME` + `:reset`** — Added 2
+  new commands to `lib/repl.ml`. (1) `:show NAME` outputs type and
+  value at once: `format_show eval_env type_env name` helper pulls
+  scheme from `type_env` and `value ref` from `eval_env` respectively,
+  returns string in `val NAME : TY\n  = VAL` format (uses
+  `Eval.to_string`, so closures are `<closure:p>`, str is quoted,
+  numbers / records / variants in same formatter). Unbound name
+  yields `unbound name: NAME`. `print_show` is print entry of same
+  content. (2) `:reset` rewinds both envs to
+  `Eval.initial_env` / `Typer.initial_env` via `do_reset eval_env
+  type_env`; displays `(envs reset)`. Added 2 lines to help text.
+  Verified: `let x = 42; let g = "hi"; :show x` → "val x : int\n =
+  42"; `:show g` → "val g : str\n = \"hi\""; `:show inc` (closure) →
+  "val inc : (int -> int)\n = <closure:n>"; `:show nope` → "unbound
+  name: nope"; after `:reset` env cleared, `:env` → "(no user
+  bindings)". Added 5 tests (1020 passing; split I/O of
+  `format_show` / `do_reset` to directly assert pure parts).
 
-- **Phase 8 第一スライス: REPL UX 改善 — multi-line 入力 + Diagnostic.format 統合 + :env / :load** — `lib/repl.ml` を 4 点で強化。(1) `read_logical_input` で複数行を蓄積するループに切替: 入力後の試し parse が「T_eof 位置でエラー」なら未完了扱いで `..>` 継続プロンプト、parse 成功で `Some input` を返す。`is_unfinished ~source` で `Parser.Parse_error` の loc が tokenize 結果の T_eof の loc と一致するかで判定 (`eof_loc` ヘルパ + `loc_eq`)、`Lexer.Lex_error "unterminated string literal"` も unfinished 扱い。継続行で空行は `(input aborted)`、`:` で始まる行は multi-line buffer を中断して command 単独実行に。(2) `format_exn` を `format_diag ~source` に置き換え、`Lexer/Parser/Typer/Eval` 各 error を `Diagnostic.format ~source ~filename:"<repl>"` に通す — REPL でも file モードと同じ Rust 風 code frame で表示。(3) `:env` コマンド追加: `user_bindings` ヘルパが `Typer.initial_env` の builtin 名を除外して user-added bindings のみを insertion order で返し、`val name : type` 形式で列挙。(4) `:load FILE` コマンド追加: ファイルを読んで decls を `process_decl` 経由で eval/type env に追加、追加された binding を `val name : type` で表示後 `(loaded path)`。help テキストを新コマンドに合わせて更新。動作確認: 複数行の `let rec` で fib/factorial を REPL に直書きできる、型エラー `let x = 5 + "hi" in x` で caret + help: が表示、`:load /tmp/foo.mere` で定義を取込んで `:env` で確認できる。テスト 9 件追加 (1015 passing) — REPL helpers (probe_unfinished で各パターン検出、user_bindings の insertion order / 空 user env)。
+- **Phase 8 #1: REPL UX improvement — multi-line input +
+  Diagnostic.format integration + :env / :load** — 4-point
+  enhancement to `lib/repl.ml`. (1) Switched to loop accumulating
+  multiple lines with `read_logical_input`: if tentative parse after
+  input yields "error at T_eof location", treats as incomplete and
+  prompts `..>` for continuation; returns `Some input` on parse
+  success. `is_unfinished ~source` judges by whether `Parser.Parse_error`
+  loc matches T_eof loc in tokenize result (`eof_loc` helper +
+  `loc_eq`); `Lexer.Lex_error "unterminated string literal"` also
+  treated as unfinished. Empty line in continuation is `(input
+  aborted)`; line starting with `:` interrupts multi-line buffer for
+  standalone command execution. (2) Replaced `format_exn` with
+  `format_diag ~source`; passes each error (`Lexer / Parser / Typer
+  / Eval`) through `Diagnostic.format ~source ~filename:"<repl>"` —
+  REPL also displays with Rust-style code frame, same as file mode.
+  (3) Added `:env` command: `user_bindings` helper excludes builtin
+  names of `Typer.initial_env` and returns only user-added bindings
+  in insertion order, listed as `val name : type`. (4) Added `:load
+  FILE` command: reads file, adds decls to eval/type env through
+  `process_decl`; displays added bindings as `val name : type` then
+  `(loaded path)`. Updated help text for new commands. Verified: can
+  directly write multi-line `let rec` like fib/factorial in REPL;
+  type error `let x = 5 + "hi" in x` displays caret + help:;
+  `:load /tmp/foo.mere` loads definitions and they can be confirmed
+  with `:env`. Added 9 tests (1015 passing) — REPL helpers
+  (probe_unfinished detects each pattern; user_bindings insertion
+  order / empty user env).
 
-- **Phase 7 第七スライス: 型エラー UX — hint 拡張 + App 型エラーの方向修正** — `Typer.type_conversion_hint` のカバー範囲を拡張: (1) `expected int, got bool` → `use \`if b then 1 else 0\` to get an \`int\` from a \`bool\``、(2) `TyTuple ts1` vs `TyTuple ts2` の arity 不一致 → `tuple lengths differ — expected N element(s), got M`、(3) `expected fn, got value` を per-direction で分岐 (extra arg / partial application)、(4) `TyCon (n1, _)` vs `TyCon (n2, _)` で名前違い → `these are different named types (\`n1\` vs \`n2\`)`。さらに `Typer.infer` の `Ast.App (f, arg)` case を 3 つのサブケースに restructure: (a) `tf = Ast.TyArrow (param_ty, ret_ty)` → `unify arg.loc param_ty ta` で arg の loc に caret + `expected param_ty, got ta`、(b) `tf = TyVar _` → 従来通り fresh var + 全体 unify、(c) その他 (extra arg ケース、`int 3 4` の `inc 3` 部分が `int` 等) → 専用エラー `expected a function (\`'a -> 'b\`), got \`<actual>\`` + `help: you may be passing one too many arguments (...)`。動作確認: `inc 3 4` → "expected a function, got int / help: too many arguments"、`add "hi" 3` → "expected int, got str / help: use str_len" (arg.loc に caret)、`add 1 + 2` (= `add 1` が int に来る場面) → "expected int, got (int -> int) / help: missing an argument"、`true + 1` → "expected int, got bool / help: use if b then 1 else 0"、`f (1, 2, 3)` (f が `(int, int) -> ...`) → "expected (int * int), got (int * int * int) / help: tuple lengths differ — expected 2, got 3"、distinct named records → "expected BarN, got FooN / help: different named types (BarN vs FooN)"。テスト 6 件追加 (1006 passing)。
+- **Phase 7 #7: type error UX — hint expansion + App type error
+  direction fix** — Expanded coverage of
+  `Typer.type_conversion_hint`: (1) `expected int, got bool` → `use
+  \`if b then 1 else 0\` to get an \`int\` from a \`bool\``; (2)
+  `TyTuple ts1` vs `TyTuple ts2` arity mismatch → `tuple lengths
+  differ — expected N element(s), got M`; (3) per-direction branching
+  for `expected fn, got value` (extra arg / partial application);
+  (4) `TyCon (n1, _)` vs `TyCon (n2, _)` name difference → `these
+  are different named types (\`n1\` vs \`n2\`)`. Further restructured
+  `Typer.infer` `Ast.App (f, arg)` case into 3 sub-cases: (a) `tf =
+  Ast.TyArrow (param_ty, ret_ty)` → caret at arg.loc + `expected
+  param_ty, got ta` via `unify arg.loc param_ty ta`; (b) `tf = TyVar
+  _` → fresh var + whole unify as before; (c) others (extra arg case
+  where `inc 3` portion of `int 3 4` is `int` etc.) → dedicated
+  error `expected a function (\`'a -> 'b\`), got \`<actual>\`` +
+  `help: you may be passing one too many arguments (...)`. Verified:
+  `inc 3 4` → "expected a function, got int / help: too many
+  arguments"; `add "hi" 3` → "expected int, got str / help: use
+  str_len" (caret at arg.loc); `add 1 + 2` (= `add 1` arrives at
+  int) → "expected int, got (int -> int) / help: missing an
+  argument"; `true + 1` → "expected int, got bool / help: use if b
+  then 1 else 0"; `f (1, 2, 3)` (where f is `(int, int) -> ...`) →
+  "expected (int * int), got (int * int * int) / help: tuple lengths
+  differ — expected 2, got 3"; distinct named records → "expected
+  BarN, got FooN / help: different named types (BarN vs FooN)".
+  Added 6 tests (1006 passing).
 
-- **Phase 7 第六スライス: 型エラー UX — 型変換 hint** — `Typer.type_conversion_hint t1 t2 -> string option` ヘルパを追加、unify エラーで base メッセージ後に `help: ...` を append (with_hint 経由) する。covered cases: `expected str, got int/bool` → `use \`show x\``、`expected int, got str` → `use \`str_len s\` ...`、`expected bool, got int/str` → `wrap in a comparison`、`expected fn, got value` → `you may be missing an argument`、`expected value, got fn` → `you may have passed a partially-applied function`。それ以外は hint なし。動作確認: `"answer: " ++ 42` → `help: use \`show x\``、`5 + "hi"` → `help: use \`str_len s\``、`if 1 then ... else ...` → `help: wrap in a comparison`。テスト 4 件追加 (**1000 passing — 大台**)。
+- **Phase 7 #6: type error UX — type conversion hint** — Added
+  `Typer.type_conversion_hint t1 t2 -> string option` helper;
+  appends `help: ...` after base message in unify error (via
+  with_hint). Covered cases: `expected str, got int/bool` → `use
+  \`show x\``; `expected int, got str` → `use \`str_len s\` ...`;
+  `expected bool, got int/str` → `wrap in a comparison`; `expected
+  fn, got value` → `you may be missing an argument`; `expected
+  value, got fn` → `you may have passed a partially-applied
+  function`. Other cases get no hint. Verified: `"answer: " ++ 42` →
+  `help: use \`show x\``; `5 + "hi"` → `help: use \`str_len s\``;
+  `if 1 then ... else ...` → `help: wrap in a comparison`. Added 4
+  tests (**1000 passing — milestone**).
 
-- **Phase 7 第五スライス: 型エラー UX — source span (token width で caret 範囲表示)** — `Loc.t` を `{ line; col }` から `{ line; col; width }` に拡張、`Loc.mk ?(width=1) ~line ~col ()` ヘルパを追加 (default width = 1 で既存コードと互換、`Loc.dummy` は width = 0)。Lexer の `tokenize` で identifier / tyvar / string literal / int literal / float literal / 1-3 char operator (既存はそのまま 1) の各 token 出力時に `with_width pos w` で token char count を pos に attach。`Diagnostic.format` で caret を `String.make (max 1 width) '^'` で複数文字に拡張、ANSI 色付けは bold-red を全 caret に適用。動作確認: `let y = x + "hello"` の error で `^` 単独から `^^^^^^^^^^` (10文字) に、`factrial` 識別子の error で `^^^^^^^^` (8文字) に、`add "hello"` の `add` で `^^^` (3文字) に。テスト 3 件追加 (996 passing)。
+- **Phase 7 #5: type error UX — source span (caret range display
+  with token width)** — Extended `Loc.t` from `{ line; col }` to
+  `{ line; col; width }`; added `Loc.mk ?(width=1) ~line ~col ()`
+  helper (default width = 1 for backward compatibility; `Loc.dummy`
+  has width = 0). In lexer's `tokenize`, attached token char count
+  to pos via `with_width pos w` at output of each token: identifier
+  / tyvar / string literal / int literal / float literal / 1-3 char
+  operator (existing kept at 1). In `Diagnostic.format`, extended
+  caret to multiple chars with `String.make (max 1 width) '^'`;
+  applied bold-red ANSI color to all carets. Verified: in `let y = x
+  + "hello"` error from `^` alone to `^^^^^^^^^^` (10 chars); in
+  `factrial` identifier error to `^^^^^^^^` (8 chars); in `add
+  "hello"` `add` to `^^^` (3 chars). Added 3 tests (996 passing).
 
-- **Phase 7 第四スライス: 型エラー UX — ANSI 色付け** — `Diagnostic.use_color : bool ref` (default false) を追加、CLI (`bin/main.ml`) で `Unix.isatty Unix.stderr && not NO_COLOR` のときに `true` に set。`ansi`/`red`/`blue`/`cyan`/`bold`/`bold_red`/`bold_cyan` helpers で escape codes (`\027[CODEm ... \027[0m`) を選択的に挿入。Diagnostic.format で kind は bold-red、gutter の line number と `|` `-->` `=` は blue、caret `^` は bold-red、help: / note: の keyword は bold-cyan に。`use_color = false` の時は全部素通し (テスト互換)。NO_COLOR 環境変数 (https://no-color.org/) も尊重。動作確認: TTY 経由 (`script` 経由) で実行すると色付き、pipe では plain、`NO_COLOR=1` でも plain。テスト 5 件追加 (993 passing)。
+- **Phase 7 #4: type error UX — ANSI coloring** — Added
+  `Diagnostic.use_color : bool ref` (default false); CLI
+  (`bin/main.ml`) sets to `true` when `Unix.isatty Unix.stderr &&
+  not NO_COLOR`. `ansi`/`red`/`blue`/`cyan`/`bold`/`bold_red`/`bold_cyan`
+  helpers selectively insert escape codes (`\027[CODEm ...
+  \027[0m`). In Diagnostic.format, kind is bold-red; line number,
+  `|`, `-->`, `=` in gutter are blue; caret `^` is bold-red; help:
+  / note: keywords are bold-cyan. When `use_color = false`,
+  everything passes through (test compatibility). Also respects
+  NO_COLOR env var (https://no-color.org/). Verified: when run via
+  TTY (via `script`), colored; plain when piped; plain when
+  `NO_COLOR=1`. Added 5 tests (993 passing).
 
-- **Phase 7 第三スライス: 型エラー UX — Levenshtein による typo 修正候補の提案** — `Typer.levenshtein` (edit distance 計算、O(la*lb) DP)、`Typer.suggest_name` (`max_dist` = len-based、3/2/1)、`Typer.with_hint` / `raise_with_suggestion` ヘルパを追加。`unbound variable` / `unknown constructor` / `unknown record type` (式中 + pattern 中の両方) の Type_error raise を `raise_with_suggestion` 経由に変更し、近い候補があれば `help: did you mean \`<name>\`?` を付加。`Diagnostic.format` を拡張: msg を `\n` で split し、headline は code frame の caret 横に、それ以降 (help:/note:) は code frame の後に `= help: ...` 形式で render。動作確認: `factrial + 1` (factorial が in scope) → "unbound variable: factrial / help: did you mean `factorial`?"、`Greeen` (Color = Red | Green | Blue) → "unknown constructor: Greeen / help: did you mean `Green`?"、`zzzzzz` (近い名前なし) → hint なし。distance threshold は名前長で調整 (短い名前は厳しめに)、tie-break は短い候補優先。テスト 4 件追加 (988 passing)。
+- **Phase 7 #3: type error UX — suggesting typo corrections via
+  Levenshtein** — Added `Typer.levenshtein` (edit distance
+  calculation, O(la*lb) DP), `Typer.suggest_name` (`max_dist` based
+  on length, 3/2/1), `Typer.with_hint` / `raise_with_suggestion`
+  helpers. Changed Type_error raises in `unbound variable` / `unknown
+  constructor` / `unknown record type` (both in expression and in
+  pattern) to go through `raise_with_suggestion`; appends `help: did
+  you mean \`<name>\`?` if there's a close candidate. Extended
+  `Diagnostic.format`: splits msg by `\n`; headline goes beside
+  caret of code frame; rest (help:/note:) renders after code frame
+  in `= help: ...` format. Verified: `factrial + 1` (factorial in
+  scope) → "unbound variable: factrial / help: did you mean
+  `factorial`?"; `Greeen` (Color = Red | Green | Blue) → "unknown
+  constructor: Greeen / help: did you mean `Green`?"; `zzzzzz` (no
+  close name) → no hint. Distance threshold adjusts by name length
+  (stricter for short names); tie-break prefers shorter. Added 4
+  tests (988 passing).
 
-- **Phase 7 第二スライス: 型エラー UX — "expected X, got Y" 形式 + unify 呼出順の audit** — `Typer.unify` のエラー文言を `"type mismatch: \`X\` vs \`Y\`"` から `"expected \`X\`, got \`Y\`"` に変更 (X=expected, Y=actual)。同時に、Typer 全体の `unify loc t1 t2` 呼出を **`(expected, actual)` 順に統一**: Neg / Bin (+, -, *, /, %, ++) / Logic / If condition の primitive type check は `unify ... Ast.TyXxx actual` (TyXxx=expected) に swap、Fun annotation は `unify t' alpha` (annotation=expected)、Match guard は `unify TyBool tg`、Match 各 arm は `unify result_var tb` (first arm が expected)、Record_lit / Record_update の field は `unify exp_ty t` (declared=expected)、Field_get / Record_update の base は `unify result_ty t_base`。Constr arg は `unify exp ta` (param=expected)。symmetric なケース (`==` の lhs/rhs、if branch then/else、P_or の bs1/bs2、let-rec alpha vs body) は意味のある順序を保持。pattern check (P_int/Bool/Str/Unit/constr/tuple/record) は元々 `unify expected XXX` (scrutinee=expected) なので変更不要。App は元の `unify tf (TyArrow (ta, result))` を保持 (recursive structural unify が tf.param と ta を比較するので "expected param_ty, got arg_ty" になる)。動作確認: `let y = x + "hello"` → "expected `int`, got `str`"、`add "hi"` (add: int->int) → "expected `int`, got `str`"、`if cond then "yes" else 42` → "expected `str`, got `int`"、record field → "expected `int`, got `str`"。テスト 4 件追加 (984 passing)。
+- **Phase 7 #2: type error UX — "expected X, got Y" form + audit of
+  unify call order** — Changed `Typer.unify` error wording from
+  `"type mismatch: \`X\` vs \`Y\`"` to `"expected \`X\`, got \`Y\`"`
+  (X=expected, Y=actual). At the same time, **unified `unify loc t1
+  t2` calls across Typer to `(expected, actual)` order**: primitive
+  type checks for Neg / Bin (+, -, *, /, %, ++) / Logic / If
+  condition swapped to `unify ... Ast.TyXxx actual` (TyXxx=expected);
+  Fun annotation `unify t' alpha` (annotation=expected); Match guard
+  `unify TyBool tg`; each Match arm `unify result_var tb` (first arm
+  is expected); Record_lit / Record_update field `unify exp_ty t`
+  (declared=expected); Field_get / Record_update base `unify
+  result_ty t_base`. Constr arg `unify exp ta` (param=expected).
+  Symmetric cases (`==` lhs/rhs; if branch then/else; P_or bs1/bs2;
+  let-rec alpha vs body) preserve meaningful order. Pattern checks
+  (P_int/Bool/Str/Unit/constr/tuple/record) were originally `unify
+  expected XXX` (scrutinee=expected) so no change needed. App
+  preserves original `unify tf (TyArrow (ta, result))` (recursive
+  structural unify compares tf.param and ta yielding "expected
+  param_ty, got arg_ty"). Verified: `let y = x + "hello"` →
+  "expected `int`, got `str`"; `add "hi"` (add: int->int) →
+  "expected `int`, got `str`"; `if cond then "yes" else 42` →
+  "expected `str`, got `int`"; record field → "expected `int`, got
+  `str`". Added 4 tests (984 passing).
 
-- **Phase 7 第一スライス: 型エラー UX の改善 — Rust 風コードフレーム** — `lib/diagnostic.ml` の `Diagnostic.format` を Rust 風の multi-line code frame に書き直し: ヘッダ (`kind: msg`)、`--> filename:line:col` のロケーションポインタ、行番号付き margin (`1 | ...`)、エラー行の下に caret + message (`  | ^ ...`)、前 2 行 + 後 1 行のコンテキストを表示。`Typer.unify` の終端エラーメッセージを `"cannot unify X with Y"` から `"type mismatch: \`X\` vs \`Y\`"` (型名をバッククォートで囲む、neutral な順序) に変更。zero-loc 時は従来通り 1 行のフォールバック。動作確認: `let y = x + "hello"` で `type error: type mismatch: \`str\` vs \`int\` --> file:2:13 | 1 | let x = 5 in | 2 | let y = x + "hello" in | | ^ type mismatch: ... | 3 | y` のような表示。parse error / unbound variable error なども共通フォーマットで出力。テスト 6 件追加 (980 passing)。Phase 7 着手 — 言語 surface の開発体験改善。
+- **Phase 7 #1: type error UX improvement — Rust-style code frame**
+  — Rewrote `Diagnostic.format` in `lib/diagnostic.ml` to Rust-style
+  multi-line code frame: header (`kind: msg`); location pointer
+  `--> filename:line:col`; line-numbered margin (`1 | ...`); caret
+  + message below error line (`  | ^ ...`); context of 2 lines
+  before + 1 line after. Changed terminal error message of
+  `Typer.unify` from `"cannot unify X with Y"` to `"type mismatch:
+  \`X\` vs \`Y\`"` (type names enclosed in backticks, neutral
+  order). At zero-loc, 1-line fallback as before. Verified: `let y =
+  x + "hello"` displays as `type error: type mismatch: \`str\` vs
+  \`int\` --> file:2:13 | 1 | let x = 5 in | 2 | let y = x +
+  "hello" in | | ^ type mismatch: ... | 3 | y`. Parse error / unbound
+  variable error etc. output in common format. Added 6 tests (980
+  passing). Phase 7 started — improving language surface developer
+  experience.
 
-- **Phase 6 第十二スライス: Wasm codegen に `'a list` show を `[a, b, c]` 形式に special-case** — LLVM Phase 5.14 相当を Wasm 版で実装。`emit_show_fn` の variant branch の前に `TyCon ("list", [elem_ty])` を special-case として処理: cur / acc / first / tag / pl / h locals を使ってループ走査。`block $end` + `loop $lp` で先頭から tag を load、Nil なら break、Cons なら payload (tuple offset) を load → head = `i32.load offset=0 payload` → 必要なら `, ` concat (first flag) → `show_<elem_tag>(h)` を concat → cur = tail = `i32.load offset=4 payload` → loop。終了後 `]` を concat。`[` / `]` / `, ` を `intern_show_str` で de-dupe。動作確認 (wat2wasm + Node.js): `show [1, 2, 3]` → `[1, 2, 3]`、`show (Nil : int list)` → `[]`、`show ["hello", "world"]` → `["hello", "world"]`。テスト 3 件追加 (974 passing)。**3 backend (C / LLVM / Wasm) が完全並列に到達 — 同じ Mere プログラムが 3 つの backend それぞれで native binary / WAT として動く**。
+- **Phase 6 #12: Wasm codegen special-cases `'a list` show in
+  `[a, b, c]` form** — Wasm version of LLVM Phase 5.14. In
+  `emit_show_fn`'s variant branch, processes `TyCon ("list",
+  [elem_ty])` as special-case before others: loop scan with cur /
+  acc / first / tag / pl / h locals. `block $end` + `loop $lp`
+  loads tag from head, break on Nil; on Cons, loads payload (tuple
+  offset) → head = `i32.load offset=0 payload` → concat `, ` if
+  needed (first flag) → concat `show_<elem_tag>(h)` → cur = tail =
+  `i32.load offset=4 payload` → loop. After end, concat `]`.
+  `[` / `]` / `, ` deduped via `intern_show_str`. Verified (wat2wasm
+  + Node.js): `show [1, 2, 3]` → `[1, 2, 3]`; `show (Nil : int
+  list)` → `[]`; `show ["hello", "world"]` → `["hello", "world"]`.
+  Added 3 tests (974 passing). **3 backends (C / LLVM / Wasm) fully
+  parallel — the same Mere program runs on each of 3 backends as
+  native binary / WAT**.
 
-- **Phase 6 第十一スライス: Wasm codegen に show 汎用 builtin** — LLVM Phase 5.12 相当を Wasm 版で実装。Wasm には `asprintf` 相当がないので **全部自前**: `show_int` を Wasm 上で int→decimal string conversion (16 byte buffer を bump pointer から確保 → 右から左に digit を書く → 必要なら `-` を prepend → first digit へのポインタを返す)、`show_bool` は `true` / `false` を data segment に登録して `select` で分岐、`show_str` は `"` でラップする 2 段 concat、`show_unit` は `()` の const offset、`show_tuple_X_Y` は `(`、各要素 show、`, `、`)` を `__lang_str_concat` で連結、`show_<R>` は `R { f1 = `、各 field show、`, f2 = `、` }` を concat、`show_<V>` は tag dispatch (`i32.load + i32.eq` の nested if/else) → 各 ctor で nullary なら data ptr 直接、payload あれば `ctor_name + " "` + payload 再帰 show を concat。`show_types` Hashtbl + `collect_show_types` + `add_show_type` で型を発見 + 依存型を再帰登録 (循環ガード)。`subst_params` ヘルパで polymorphic record/variant の args 適用 (Wasm でも mono instance ごとに別関数を emit、layout は共通)。`intern_show_str` で literal を de-dupe して data segment を節約。`App (Var "show", arg)` を `call $show_<ty_tag arg.ty>` に dispatch。動作確認 (wat2wasm + Node.js): `show 42` → "42"、`show true` → "true"、`show "hi"` → "\"hi\""、`show (1, "hi")` → `(1, "hi")`、`show (SS 42)` → "SS 42"、`show (Pt { x = 3, y = 4 })` → `Pt { x = 3, y = 4 }`、`show (Cons (1, Cons (2, Cons (3, Nil))))` → `Cons (1, Cons (2, Cons (3, Nil)))` (recursive variant も自然に動く)。テスト 8 件追加 (971 passing)。`'a list` special-case `[a, b, c]` 形式は今後の slice。
+- **Phase 6 #11: Wasm codegen show general builtin** — Wasm version
+  of LLVM Phase 5.12. Wasm has no `asprintf` equivalent so **all
+  hand-rolled**: `show_int` performs int→decimal string conversion
+  on Wasm (allocates 16-byte buffer from bump pointer → writes digits
+  right-to-left → prepends `-` if needed → returns pointer to first
+  digit); `show_bool` registers `true` / `false` in data segment and
+  branches with `select`; `show_str` is 2-stage concat wrapping with
+  `"`; `show_unit` is const offset of `()`; `show_tuple_X_Y`
+  concatenates `(`, each element show, `, `, `)` via
+  `__lang_str_concat`; `show_<R>` concats `R { f1 = `, each field
+  show, `, f2 = `, ` }`; `show_<V>` is tag dispatch (nested
+  if/else of `i32.load + i32.eq`) → each ctor: data ptr direct if
+  nullary; concat `ctor_name + " "` + recursive payload show if
+  payload. `show_types` Hashtbl + `collect_show_types` +
+  `add_show_type` registers types + recursively registers dependent
+  types (cycle guard). `subst_params` helper applies args of
+  polymorphic record/variant (Wasm also emits separate function per
+  mono instance; layout is shared). `intern_show_str` dedupes
+  literals to save data segment. `App (Var "show", arg)` dispatches
+  to `call $show_<ty_tag arg.ty>`. Verified (wat2wasm + Node.js):
+  `show 42` → "42"; `show true` → "true"; `show "hi"` → "\"hi\"";
+  `show (1, "hi")` → `(1, "hi")`; `show (SS 42)` → "SS 42"; `show
+  (Pt { x = 3, y = 4 })` → `Pt { x = 3, y = 4 }`; `show (Cons (1,
+  Cons (2, Cons (3, Nil))))` → `Cons (1, Cons (2, Cons (3, Nil)))`
+  (recursive variant works naturally). Added 8 tests (971 passing).
+  `'a list` special-case `[a, b, c]` form in future slice.
 
-- **Phase 6 第十スライス: Wasm codegen に複雑な pattern (P_int / P_str / P_bool / P_unit / P_record / P_as / nested ctor / or / guard)** — LLVM Phase 5.11 相当を Wasm 版で実装。`compile_pat` を fully recursive な `(cond_local_slot, bindings)` 関数として書き直し: P_int → `i32.eq`、P_bool → `i32.eq`、P_str → `call $__lang_streq` (新規 runtime helper、byte-by-byte 比較で i32 真偽値)、P_unit → constant true、P_record → declared field 順に `i32.load offset` + sub-pattern recurse (record / view 両対応)、P_as → inner pattern + whole value bind、P_tuple → 各要素 `i32.load offset=i*4` + recurse、P_constr → tag test (`i32.load offset=0 + i32.eq`) + sub-pattern recurse (nested OK)。複数 sub-test は `combine_and` ヘルパで `i32.and` chain。or-pattern は `expand_or` で arms を pre-flatten。guard は arm の bindings scope 内で評価して cond と AND、`if/else` で短絡 (cond が false なら guard 評価せず)。`@__lang_streq` runtime helper を追加 (block + loop で byte_a / byte_b 順次比較)。動作確認 (wat2wasm + Node.js): `match 3 with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300、`match "hello" with | "hi" -> 1 | "hello" -> 2 | _ -> 9` → 2、`match Cons (SS 5, Nil) with | Cons (SS n, _) -> n` → 5 (nested ctor)、`match Pt { x = 3, y = 4 } with | Pt { x = a, y = b } -> a + b` → 7、`(a, b) as p → fst p + snd p + a + b` → 6、`LCgA | LCgB -> 1` → 1 (or)、`when n < 10 -> 200` → 200 (guard)。テスト 8 件追加 (963 passing)。
+- **Phase 6 #10: Wasm codegen complex patterns (P_int / P_str /
+  P_bool / P_unit / P_record / P_as / nested ctor / or / guard)** —
+  Wasm version of LLVM Phase 5.11. Rewrote `compile_pat` as fully
+  recursive `(cond_local_slot, bindings)` function: P_int →
+  `i32.eq`; P_bool → `i32.eq`; P_str → `call $__lang_streq` (new
+  runtime helper, byte-by-byte compare yielding i32 boolean);
+  P_unit → constant true; P_record → declared field order
+  `i32.load offset` + sub-pattern recurse (handles both record /
+  view); P_as → inner pattern + whole value bind; P_tuple → each
+  element `i32.load offset=i*4` + recurse; P_constr → tag test
+  (`i32.load offset=0 + i32.eq`) + sub-pattern recurse (nested OK).
+  Multiple sub-tests chained with `combine_and` helper via
+  `i32.and`. Or-patterns pre-flattened with `expand_or`. Guard
+  evaluated in arm's bindings scope, AND with cond, short-circuit
+  with `if/else` (no guard eval if cond is false). Added
+  `@__lang_streq` runtime helper (block + loop with sequential
+  byte_a / byte_b compare). Verified (wat2wasm + Node.js): `match 3
+  with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300; `match "hello" with
+  | "hi" -> 1 | "hello" -> 2 | _ -> 9` → 2; `match Cons (SS 5,
+  Nil) with | Cons (SS n, _) -> n` → 5 (nested ctor); `match Pt { x
+  = 3, y = 4 } with | Pt { x = a, y = b } -> a + b` → 7; `(a, b) as
+  p → fst p + snd p + a + b` → 6; `LCgA | LCgB -> 1` → 1 (or);
+  `when n < 10 -> 200` → 200 (guard). Added 8 tests (963 passing).
 
-- **Phase 6 第九スライス: Wasm codegen に多相 variant / record + 再帰 variant + P_tuple sub-pattern** — Wasm の memory layout は uniform (どの値も i32 = 4 bytes) なので、LLVM (Phase 5.9 / 5.10) のような monomorphization は不要。`'a opt`、`'a Box`、`'a list = Nil | Cons of 'a * 'a list` すべて mono variant/record と同じ code path で動く。`Constr` の `params <> []` check と `Record_lit` の `r_params <> []` check を撤廃 (Wasm では type-specific な struct typedef は emit しないので multi-instantiation でも同じ code でいい)。`'a list` の Cons (tuple payload `('a, 'a list)`) を Match で展開するため、`Match` の `compile_pat` 相当部分に `P_tuple` sub-pattern を追加: payload tuple offset から各要素を `i32.load offset=i*4` で fresh local に load して bind (`Cons (h, t)` → h, t それぞれ別 local に load)。動作確認 (wat2wasm + Node.js): `type 'a opt; match LSome 42 with | LSome n -> n` → 42、`type 'a Box; let bi = Box { v = 42 } in let bs = Box { v = "hi" } in str_len bs.v + bi.v` → 44、`type 'a list; sum [1,2,3,4,5]` → 15、`length ["a","b","c","d"]` → 4。テスト 4 件追加 (955 passing)。Wasm backend ならではの利点: layout uniformity で monomorphization 不要。
+- **Phase 6 #9: Wasm codegen polymorphic variant / record + recursive
+  variant + P_tuple sub-pattern** — Wasm memory layout is uniform
+  (every value is i32 = 4 bytes), so LLVM-style (Phase 5.9 / 5.10)
+  monomorphization is not needed. `'a opt`, `'a Box`, `'a list = Nil
+  | Cons of 'a * 'a list` all work via same code path as mono
+  variant/record. Removed `params <> []` check in `Constr` and
+  `r_params <> []` check in `Record_lit` (Wasm doesn't emit
+  type-specific struct typedefs, so same code works for
+  multi-instantiation). To expand `'a list` Cons (tuple payload
+  `('a, 'a list)`) in Match, added `P_tuple` sub-pattern to
+  `compile_pat` equivalent in `Match`: loads each element from
+  payload tuple offset via `i32.load offset=i*4` into fresh local and
+  binds (`Cons (h, t)` → h, t each loaded into separate locals).
+  Verified (wat2wasm + Node.js): `type 'a opt; match LSome 42 with
+  | LSome n -> n` → 42; `type 'a Box; let bi = Box { v = 42 } in let
+  bs = Box { v = "hi" } in str_len bs.v + bi.v` → 44; `type 'a list;
+  sum [1,2,3,4,5]` → 15; `length ["a","b","c","d"]` → 4. Added 4
+  tests (955 passing). Wasm backend's advantage: layout uniformity
+  makes monomorphization unnecessary.
 
-- **Phase 6 第八スライス: Wasm codegen に Region_block + Ref + with Drop + view 構築 + Unit_lit** — LLVM Phase 5.13 相当を Wasm 版で。Wasm の linear memory + `__lang_bump` global は既に 1 つの region 的に動いているので、ユーザの `region R { body }` は LIFO 方式で実装: 入口で `__lang_bump` の現在値を local に save → body 評価 → result を別 local に stash → bump を saved 値に restore → result を push back。これで region scope 内の allocation は scope 末で「解放」(bump pointer が戻り以降の alloc が上書き可能)。`Ref (R, v)` (`&R v`) は inner 評価 + bump 4 bytes alloc + `i32.store offset=0` + base push。`With (c, v, body)` は v を local 保存 + body 評価 + body 後に v の record に `close: unit -> unit` field があれば closure value から `i32.load` で env/fn_idx を取り出して `i32.const 0` (unit arg) + `call_indirect (type $cl)` で auto-invoke、結果を drop して body の値を push。`view V[R] of T { ... }` の Record_lit を view-name で別途処理 (record と同じ memory レイアウト、bump alloc + i32.store)、view 値の Field_get は `Typer.views.v_fields` の field index で `i32.load offset=idx*4`。`Unit_lit` を `i32.const 0` に。動作確認 (wat2wasm + Node.js): `region R { let x = &R 5 in 42 }` → 42、`with c = mk 7 in c.id * 10` (close が "closing" を print) → 70、`view Cell[R] of int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7。テスト 6 件追加 (951 passing)。**Wasm backend がメモリモデル全機能をカバー、C / LLVM と並列に到達**。
+- **Phase 6 #8: Wasm codegen Region_block + Ref + with Drop + view
+  construction + Unit_lit** — Wasm version of LLVM Phase 5.13.
+  Wasm's linear memory + `__lang_bump` global already acts as one
+  region, so user's `region R { body }` is implemented in LIFO: save
+  current value of `__lang_bump` to local at entry → evaluate body
+  → stash result in another local → restore bump to saved value →
+  push result back. This way allocations within region scope are
+  "freed" at scope end (subsequent allocations can overwrite as bump
+  pointer returns). `Ref (R, v)` (`&R v`) evaluates inner + bump
+  4-byte alloc + `i32.store offset=0` + push base. `With (c, v,
+  body)` saves v to local + evaluates body + after body, if v's
+  record has `close: unit -> unit` field, pulls env/fn_idx from
+  closure value via `i32.load` + auto-invokes with `i32.const 0`
+  (unit arg) + `call_indirect (type $cl)`, drops result, pushes
+  body value. `view V[R] of T { ... }` Record_lit handled
+  separately by view-name (same memory layout as record, bump alloc
+  + i32.store); Field_get of view value uses field index from
+  `Typer.views.v_fields` with `i32.load offset=idx*4`. `Unit_lit` →
+  `i32.const 0`. Verified (wat2wasm + Node.js): `region R { let x =
+  &R 5 in 42 }` → 42; `with c = mk 7 in c.id * 10` (close prints
+  "closing") → 70; `view Cell[R] of int { v: int }; region R { let
+  c = Cell { v = 7 } in c.v }` → 7. Added 6 tests (951 passing).
+  **Wasm backend covers all memory model features, on par with C /
+  LLVM**.
 
-- **Phase 6 第七スライス: Wasm codegen に first-class fn + closure** — Wasm 特有の制約に対応: 関数ポインタは memory ptr ではなく **function table の index**、間接呼出は `call_indirect (type $sig)` 経由。`(type $cl (func (param i32) (param i32) (result i32)))` を module 冒頭で宣言、`(table N funcref)` + `(elem (i32.const 0) ...)` で adapter 群を index 0 から登録。closure value は 8 bytes `{ env_offset, fn_table_idx }` の memory struct。各 top-level fn `f` に env-ignoring adapter `(func $f_closure (param i32) (param i32) (result i32) local.get 1; call $f)` を自動生成 + table 登録、`fn_closure_table_idx` に index 記録。`Var name` value position で `fn_closure_table_idx` 登録済なら closure value (`env=0, fn_idx=N`) を memory alloc + push。indirect App は closure を local 保存 → load env / arg / load fn_idx → `call_indirect (type $cl)`。anonymous Fun は `free_vars` で自由変数計算 → `locals` 登録済のみ capture → fresh adapter `anon_N_fn` を table 登録 → `pending_closures` キューに積む → 構築 site で env を memory alloc (各 capture を順に store)、closure value を alloc + push。adapter body の entry で env から capture を `i32.load offset=N*4` で local slot に load してから body 評価。emit_program で pending を drain loop で処理。`pattern_vars` + `free_vars` ヘルパを追加。動作確認 (wat2wasm + Node.js): `let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc` → 6、`(make_adder 5) 10` → 15、`compose inc dbl 5` → 11、`twice inc 5` → 7。テスト 7 件追加 (945 passing)。
+- **Phase 6 #7: Wasm codegen first-class fn + closure** —
+  Wasm-specific constraint handling: function pointers are not
+  memory ptr but **function table indexes**; indirect calls go
+  through `call_indirect (type $sig)`. Declared `(type $cl (func
+  (param i32) (param i32) (result i32)))` at module top; adapters
+  registered in table starting from index 0 via `(table N funcref)`
+  + `(elem (i32.const 0) ...)`. closure value is 8-byte memory
+  struct `{ env_offset, fn_table_idx }`. Auto-generated env-ignoring
+  adapter `(func $f_closure (param i32) (param i32) (result i32)
+  local.get 1; call $f)` for each top-level fn `f` + table
+  registration; recorded index in `fn_closure_table_idx`. At `Var
+  name` value position, if `fn_closure_table_idx` is registered,
+  memory-allocs closure value (`env=0, fn_idx=N`) and pushes.
+  Indirect App: save closure to local → load env / arg / load
+  fn_idx → `call_indirect (type $cl)`. Anonymous Fun: compute free
+  variables via `free_vars` → capture only those registered in
+  `locals` → register fresh adapter `anon_N_fn` in table → push to
+  `pending_closures` queue → at construction site, memory-alloc env
+  (store each capture in sequence), alloc closure value + push.
+  Adapter body entry loads captures from env into local slots via
+  `i32.load offset=N*4` before evaluating body. Drain loop in
+  emit_program processes pending. Added `pattern_vars` + `free_vars`
+  helpers. Verified (wat2wasm + Node.js): `let inc = fn x -> x + 1
+  in let apply = fn f -> f 5 in apply inc` → 6; `(make_adder 5) 10`
+  → 15; `compose inc dbl 5` → 11; `twice inc 5` → 7. Added 7 tests
+  (945 passing).
 
-- **Phase 6 第六スライス: Wasm codegen に variant + match (単相、payload 型 1 つ)** — Variant も linear memory にレイアウト: nullary-only なら 4 bytes (`{ i32 tag }`)、payload があれば 8 bytes (`{ i32 tag, i32 payload }`)。`variant_tags : (cname, int) Hashtbl` を `Exhaustive.type_variants` から emit_program 冒頭で populate、`variant_payload_ty` ヘルパで payload 型を検出 (全 payload-bearing コンストラクタが共有する単一の型、異なれば Codegen_error)。`Constr cname (arg)` を bump alloc + `i32.store offset=0` (tag) + 必要なら `i32.store offset=4` (payload) + base push に compile。`Match` は scrut を local に保存して tag/payload を `i32.load offset=0/4` で取り出し、各 arm を `local.get tag; i32.const N; i32.eq; if (result i32) ... else ... end` の入れ子 chain に compile、fallthrough は `unreachable` で trap。Pattern subset: P_constr / P_var / P_wild、payload bind は payload local slot を使う。動作確認 (wat2wasm + Node.js): `type Color = R | G | B; match G with | R -> 0 | G -> 1 | B -> 2` → 1、`type Stat = Ok | Err of str; match Err "boom" with | Ok -> 0 | Err msg -> str_len msg` → 4、`let v = ISome 42 in match v with | INone -> 0 | ISome n -> n` → 42。テスト 6 件追加 (938 passing)。guard / 多相 / 再帰 / nested pattern / or-pattern は引き続き Codegen_error (今後の slice)。
+- **Phase 6 #6: Wasm codegen variant + match (monomorphic, single
+  payload type)** — Variants also laid out in linear memory:
+  4 bytes (`{ i32 tag }`) if nullary-only; 8 bytes (`{ i32 tag, i32
+  payload }`) if payload. `variant_tags : (cname, int) Hashtbl`
+  populated at start of emit_program from `Exhaustive.type_variants`;
+  `variant_payload_ty` helper detects payload type (single type
+  shared by all payload-bearing ctors; Codegen_error if differ).
+  Compiled `Constr cname (arg)` to bump alloc + `i32.store offset=0`
+  (tag) + (if needed) `i32.store offset=4` (payload) + push base.
+  `Match` saves scrut to local, loads tag/payload via `i32.load
+  offset=0/4`; each arm compiles to nested chain of `local.get tag;
+  i32.const N; i32.eq; if (result i32) ... else ... end`; fallthrough
+  traps with `unreachable`. Pattern subset: P_constr / P_var / P_wild;
+  payload bind uses payload local slot. Verified (wat2wasm +
+  Node.js): `type Color = R | G | B; match G with | R -> 0 | G -> 1
+  | B -> 2` → 1; `type Stat = Ok | Err of str; match Err "boom" with
+  | Ok -> 0 | Err msg -> str_len msg` → 4; `let v = ISome 42 in
+  match v with | INone -> 0 | ISome n -> n` → 42. Added 6 tests
+  (938 passing). guard / polymorphic / recursive / nested pattern /
+  or-pattern continue to be Codegen_error (future slices).
 
-- **Phase 6 第五スライス: Wasm codegen に record (単相) 対応** — tuple (Phase 6.4) と同じ linear memory レイアウト。`Record_lit (name, fields)` を `Typer.records.r_fields` の **宣言順** に store (source field 順が違っても再構成): base = bump → bump を 4*N 即時 advance (reserve) → 各 field を `i32.store offset=i*4` で書き込み → base を push。`Field_get (inner, fname)` は inner type の record 名から index を引いて `i32.load offset=idx*4` に。`Record_update (base, updates)` は新 buffer を bump で確保し、各 field について updates に含まれていれば新値を、なければ source から `i32.load offset=...` でコピー、新 buffer の base を返す。record を取る / 返す関数も自然に動く (record も i32 offset として渡せる、signature 不変)。動作確認 (wat2wasm + Node.js): `type Pt = { x: int, y: int }; let p = Pt { x = 3, y = 4 } in p.x + p.y` → 7、`{ p | x = 100 }.x * .y` → 400、record-returning fn `let mk = fn x -> Pair { a = x, b = str_len x } in print ((mk "hello").a)` → "hello"。多相 record / view は引き続き Codegen_error (今後の slice)。`wasm_with_decls` test helper を追加。テスト 4 件追加 (932 passing)。
+- **Phase 6 #5: Wasm codegen record (monomorphic)** — Same linear
+  memory layout as tuple (Phase 6.4). Stores `Record_lit (name,
+  fields)` in `Typer.records.r_fields` **declaration order**
+  (reconstructed even if source field order differs): base = bump →
+  immediately advance bump by 4*N (reserve) → write each field via
+  `i32.store offset=i*4` → push base. `Field_get (inner, fname)`
+  pulls index from record name of inner type → `i32.load
+  offset=idx*4`. `Record_update (base, updates)` allocates new
+  buffer with bump; for each field, writes new value if in updates,
+  else copies from source via `i32.load offset=...`; returns base of
+  new buffer. Functions that take / return record also work
+  naturally (record is also passed as i32 offset; signature
+  unchanged). Verified (wat2wasm + Node.js): `type Pt = { x: int,
+  y: int }; let p = Pt { x = 3, y = 4 } in p.x + p.y` → 7;
+  `{ p | x = 100 }.x * .y` → 400; record-returning fn `let mk = fn
+  x -> Pair { a = x, b = str_len x } in print ((mk "hello").a)` →
+  "hello". Polymorphic record / view continue to be Codegen_error
+  (future slices). Added `wasm_with_decls` test helper. Added 4
+  tests (932 passing).
 
-- **Phase 6 第四スライス: Wasm codegen に tuple 対応** — tuple を linear memory にレイアウト: 各要素 4 bytes (Mere の int / bool / str はすべて i32 / offset 表現)。`Tuple [e1; e2; ...]` 構築は: base offset = bump、bump += 4*N で memory 領域を即時 reserve、各要素を `i32.store offset=N*4` で base 相対位置に書き込み、最後に base を push。reserve を先にするのが重要 — nested tuple や `++` の内側 emit がさらに bump を advance するので、後で reserve すると重なる (実装中に `((1,2), 3)` の和が 22 になる bug を fix)。`fst` / `snd` builtin を `i32.load offset=0` / `offset=4` に dispatch。tuple-arg / tuple-return 関数も自然に動く (tuple は i32 offset なので signature 変更不要)。動作確認 (wat2wasm + Node.js): `let p = (1, 2) in fst p + snd p` → 3、`let p = ("hello", 42) in print (fst p)` → "hello"、`((1, 2), 3)` の和 → 6、tuple-arg fn `sum_pair (10, 20)` → 30。テスト 5 件追加 (928 passing)。
+- **Phase 6 #4: Wasm codegen tuple** — Tuple laid out in linear
+  memory: each element 4 bytes (Mere int / bool / str all in i32 /
+  offset representation). `Tuple [e1; e2; ...]` construction: base
+  offset = bump; bump += 4*N immediately reserves memory area; write
+  each element via `i32.store offset=N*4` at base-relative
+  position; finally push base. Important to reserve first — nested
+  tuple or `++` inner emit advances bump further (during
+  implementation, fixed bug where `((1,2), 3)` summed to 22 because
+  reserve was after writing). `fst` / `snd` builtin dispatched to
+  `i32.load offset=0` / `offset=4`. Tuple-arg / tuple-return
+  functions also work naturally (tuple is i32 offset, no signature
+  change). Verified (wat2wasm + Node.js): `let p = (1, 2) in fst p
+  + snd p` → 3; `let p = ("hello", 42) in print (fst p)` → "hello";
+  `((1, 2), 3)` sum → 6; tuple-arg fn `sum_pair (10, 20)` → 30.
+  Added 5 tests (928 passing).
 
-- **Phase 6 第三スライス: Wasm codegen に文字列対応** — Wasm の linear memory を使って文字列を扱うアーキテクチャを実装。`(memory (export "memory") 1)` で 1 page (64 KB) メモリを宣言 + export、`(global $__lang_bump (mut i32) (i32.const N))` で動的 alloc 用の bump pointer (mutable global)。`Str_lit` を `(data (i32.const offset) "...\00")` の data セグメントとして lift、`wasm_string_escape` で `\HH` エスケープ。`fresh_str_offset` ヘルパで各リテラルにユニークな offset を割当て、`str_data_decls` ref に蓄積。`$__lang_strlen` (block + loop で null byte 探索) と `$__lang_str_concat` (strlen 2 回 + 2 つの copy loop + null 終端 + bump 更新) を WAT 内に inline 定義 (runtime_helpers として一括 emit)。`print s` を host import `(import "env" "puts" (func $puts (param i32)))` 経由で host (Node.js) に委譲、値は i32 0、Node.js 側で memory にアクセスして decode + console.log。`str_len s` を `call $__lang_strlen`、`++` を `call $__lang_str_concat` に dispatch。str を取る / 返す関数も自然に動く (Wasm では str も i32 として扱うので signature 変更不要)。動作確認 (wat2wasm + Node.js with puts that decodes memory): `str_len "Hello, world!"` → 13、`str_len ("hello, " ++ "world!")` → 13、`print "Hello, Wasm!"` → "Hello, Wasm!"、`let greet = fn name -> "Hello, " ++ name ++ "!" in print (greet "world")` → "Hello, world!"。テスト 9 件追加 (923 passing)。
+- **Phase 6 #3: Wasm codegen string support** — Implemented
+  architecture for handling strings via Wasm's linear memory.
+  `(memory (export "memory") 1)` declares 1-page (64 KB) memory +
+  exports; `(global $__lang_bump (mut i32) (i32.const N))` is bump
+  pointer for dynamic alloc (mutable global). `Str_lit` lifted as
+  `(data (i32.const offset) "...\00")` data segment;
+  `wasm_string_escape` escapes `\HH`. `fresh_str_offset` helper
+  assigns unique offset to each literal; accumulates in
+  `str_data_decls` ref. `$__lang_strlen` (block + loop searches null
+  byte) and `$__lang_str_concat` (2 strlen calls + 2 copy loops +
+  null terminator + bump update) defined inline in WAT (emitted as
+  runtime_helpers in one go). `print s` delegated to host (Node.js)
+  via host import `(import "env" "puts" (func $puts (param i32)))`;
+  value is i32 0; Node.js side accesses memory to decode +
+  console.log. `str_len s` dispatched to `call $__lang_strlen`; `++`
+  to `call $__lang_str_concat`. Functions taking / returning str
+  also work naturally (Wasm also treats str as i32, so signature
+  unchanged). Verified (wat2wasm + Node.js with puts that decodes
+  memory): `str_len "Hello, world!"` → 13; `str_len ("hello, " ++
+  "world!")` → 13; `print "Hello, Wasm!"` → "Hello, Wasm!"; `let
+  greet = fn name -> "Hello, " ++ name ++ "!" in print (greet
+  "world")` → "Hello, world!". Added 9 tests (923 passing).
 
-- **Phase 6 第二スライス: Wasm codegen に関数 lifting + recursion** — top-level `let f = fn x -> ...` および `let rec` を `(func $f (param i32) (result i32) ...)` として lift。LLVM Phase 5.2 と同形の `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` / `resolve_fn_types` を `codegen_wasm.ml` に並列実装。`emit_fn_def` で各 fn を独立した locals/instrs scope に: param は slot 0 (Wasm の positional locals)、let bindings は slot 1, 2, ... と mint、`local_counter` / `locals` / `instrs` は per-fn で save/restore。`emit_expr` の `App (Var name, arg)` を `<arg push>` + `call $name` に compile (`toplevel_fn_names` 登録済の名前のみ direct call)。Wasm は同モジュール内で前方参照可なので C/LLVM のような forward declaration / mutual recursion 特別扱いは不要。動作確認 (wat2wasm + Node.js): `factorial 10` → 3628800、`fibonacci 15` → 610、`is_even 7` (相互再帰) → 0。テスト 5 件追加 (914 passing)。
+- **Phase 6 #2: Wasm codegen function lifting + recursion** — Top-
+  level `let f = fn x -> ...` and `let rec` lifted as `(func $f
+  (param i32) (result i32) ...)`. `fn_skel` / `lift_fn_skels` /
+  `find_concrete_arrow` / `resolve_fn_types` implemented in
+  `codegen_wasm.ml` in parallel, same shape as LLVM Phase 5.2.
+  `emit_fn_def` puts each fn in independent locals/instrs scope:
+  param in slot 0 (Wasm positional locals); let bindings minted as
+  slot 1, 2, ...; `local_counter` / `locals` / `instrs` saved /
+  restored per-fn. Compiled `App (Var name, arg)` to `<arg push>` +
+  `call $name` (only names registered in `toplevel_fn_names` get
+  direct call). Wasm allows forward reference in same module, so
+  C/LLVM-style forward declaration / mutual recursion special
+  handling not needed. Verified (wat2wasm + Node.js): `factorial 10`
+  → 3628800; `fibonacci 15` → 610; `is_even 7` (mutual recursion) →
+  0. Added 5 tests (914 passing).
 
-- **Phase 6 第一スライス: Wasm (WAT) codegen MVP** — design 目標の三本目 (Wasm) に着手。新規 `lib/codegen_wasm.ml` に `emit_program : ?main_ty:ty -> Ast.program -> string` を実装、subset (int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var) / Var / Annot) を WAT (WebAssembly Text format、S-expression 形式) として emit。Wasm はスタックベース VM (LLVM の SSA と異なる) — 各 expression は operand を順に push、opcode 1 個でスタック消費 + 結果 push。`Bin (op, a, b)` を `emit_expr a; emit_expr b; <opcode>` の連続に。`If` を `if (result i32) ... else ... end` ブロックに。`Let (P_var n, value, body)` を `(local i32)` (fresh slot 割当て) + `local.set N` + `local.get N` の組合せに。比較は `i32.lt_s` / `i32.gt_s` / `i32.eq` 等、bool は i32 ワイド化 (`i32.const 0/1`)、`Neg` は `0 - x` で表現。`main` 関数を `(func $main (export "main") (result i32))` として emit、local 宣言を関数頭部に集約。CLI に `-w <file>` / `-we <expr>` flag を追加、`infer_program` ヘルパを C/LLVM/Wasm 3 backend で共有。動作確認 (wat2wasm 経由で `.wasm` binary 化 + Node.js `WebAssembly.instantiate` で実行): `let a = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200、`if 3 > 2 then 100 else 200` → 100、`let x = 5 in x * x + 1` → 26、`true && (false || true)` → 1。テスト 14 件追加 (909 passing)。関数 / 文字列 / record / variant / closure / region 等は Phase 6 の後続 slice で。
+- **Phase 6 #1: Wasm (WAT) codegen MVP** — Started on the third
+  design target (Wasm). Implemented `emit_program : ?main_ty:ty ->
+  Ast.program -> string` in new `lib/codegen_wasm.ml`; emits subset
+  (int / bool / arith / cmp / logic / Neg / If / Let (P_var) / Var /
+  Annot) as WAT (WebAssembly Text format, S-expression form). Wasm
+  is a stack-based VM (different from LLVM's SSA) — each expression
+  pushes operands in sequence, opcode consumes from stack + pushes
+  result. Compiled `Bin (op, a, b)` to sequential `emit_expr a;
+  emit_expr b; <opcode>`. `If` to `if (result i32) ... else ... end`
+  block. `Let (P_var n, value, body)` to combination of `(local
+  i32)` (fresh slot assignment) + `local.set N` + `local.get N`.
+  Comparison via `i32.lt_s` / `i32.gt_s` / `i32.eq` etc.; bool
+  widened to i32 (`i32.const 0/1`); `Neg` expressed as `0 - x`.
+  `main` function emitted as `(func $main (export "main") (result
+  i32))`; local decls consolidated at function head. Added `-w <file>`
+  / `-we <expr>` flags to CLI; `infer_program` helper shared across
+  3 backends (C/LLVM/Wasm). Verified (via wat2wasm `.wasm` binary +
+  Node.js `WebAssembly.instantiate`): `let a = 10 in let b = 20 in
+  if a + b > 25 then a * b else 0` → 200; `if 3 > 2 then 100 else
+  200` → 100; `let x = 5 in x * x + 1` → 26; `true && (false ||
+  true)` → 1. Added 14 tests (909 passing). Functions / strings /
+  record / variant / closure / region etc. in subsequent slices of
+  Phase 6.
 
-- **Phase 5 第十四スライス: LLVM IR codegen に `'a list` の show special-case (`[a, b, c]` 形式)** — C codegen の Phase 4.16 相当。`emit_show_fn` の variant branch の前に `TyCon ("list", [elem_ty])` (recursive list である場合) を special-case として処理: alloca/load/store + ループブロック (`loop_test` / `loop_body` / `loop_iter` / `loop_end`) で先頭から走査、各要素を `show_<elem_tag>` で文字列化、間に `", "` を挟みつつ `__lang_str_concat` で連結、最後に `"]"` を追加。`@.s_lbracket` ("[")、`@.s_rbracket` ("]")、`@.s_comma_space` (", ") を pre-register。副次的に: (1) `add_show_type` で polymorphic TyCon に出会ったとき `mono_variant_instances` / `mono_record_instances` にも登録 (`show (Nil : int list)` のように mono instance を Constr 経由で収集できないケースで struct typedef が emit されるように)、(2) `collect_tuple_shapes` の末尾で mono variant instances の substituted payload を walk (`int list` の Cons payload `(int, int list)` の tuple shape を、AST 上に Cons なしでも emit する)、(3) `collect_show_types` を typedef emission の前に移動 (instance flow が正しく伝播するように)。動作確認 (clang 経由 native): `show [1, 2, 3]` → `[1, 2, 3]`、`show (Nil : int list)` → `[]`、`show ["hello", "world"]` → `["hello", "world"]`。テスト 4 件追加 (895 passing)。**Phase 5 (LLVM backend) が C codegen (Phase 4) の全機能をカバー** — int / fn / str / tuple / record / variant / closure / region / poly / 再帰 variant / 複雑 pattern / show / メモリモデル全部 / list pretty-print。
-- **Phase 5 第十三スライス: LLVM IR codegen に Region_block + Ref + with Drop + view 構築 + Unit_lit** — Mere のメモリモデル機能を LLVM backend で一括実装、C codegen の Phase 4.17 user-side region + 4.18 with Drop + 4.19 view 構築に相当。`current_regions : (name * register) list ref` で region scope を track。`Region_block (R, body)` を `alloca %__lang_region` + `__lang_region_init(ptr, 1MB)` + body + `__lang_region_free` に compile。`Ref (R, v)` (`&R v`) を inner 評価 + sizeof (`getelementptr null` + `ptrtoint`) + `__lang_region_alloc` + `store` で region buffer に書き込み、ptr return。`With (c, v, body)` を `let c = v` + body 評価 + body 後に v の record に `close: unit -> unit` field があれば `c.close.fn(c.close.env, 0)` で auto-invoke (`extractvalue` でclosure value→env/fn 分離して call)。`Record_lit` で `name in Typer.views` なら view 構築: `e.Ast.ty` の `TyCon (V, [TyRef (R, ...)])` から region 名取得 → 宣言順 `insertvalue` で record value 構築 → `__lang_region_alloc` + `store` で region に置く → ptr return。`Field_get` で inner type が `is_view_type` なら `getelementptr %V, ptr %x, i32 0, i32 idx` + `load` で field 取得。`llvm_ty_of` に `TyRef _ → ptr` と `TyCon (n, _) when Typer.views n → ptr` を追加。`Unit_lit` を `i32 0` として emit (`fn () -> ()` で必要)。動作確認 (clang 経由 native): `region R { let x = &R 5 in 42 }` → 42、`region R { let pair = &R (1, 2) in 99 }` → 99、`type Pt = { x: int }; region R { let p = &R Pt { x = 42 } in 100 }` → 100 (record も region 内に置ける)、`drop type Conn = { id, close }; with c = mk 7 in c.id * 10` → "close 7\n70" (close が scope 末で正しく呼ばれる)、`view Cell[R] of int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7。テスト 7 件追加 (891 passing)。**LLVM backend がメモリモデル全機能をカバー、C backend (Phase 4.21) と並列に到達**。
+- **Phase 5 #14: LLVM IR codegen `'a list` show special-case
+  (`[a, b, c]` form)** — Equivalent to C codegen Phase 4.16.
+  Special-cases `TyCon ("list", [elem_ty])` (when recursive list)
+  before variant branch in `emit_show_fn`: scans from head with
+  alloca/load/store + loop blocks (`loop_test` / `loop_body` /
+  `loop_iter` / `loop_end`); stringifies each element via
+  `show_<elem_tag>`; concats with `", "` between via
+  `__lang_str_concat`; appends `"]"` at end. Pre-registers
+  `@.s_lbracket` ("["), `@.s_rbracket` ("]"), `@.s_comma_space` (",
+  "). Side: (1) `add_show_type` registers in
+  `mono_variant_instances` / `mono_record_instances` when
+  encountering polymorphic TyCon (struct typedef emitted for cases
+  like `show (Nil : int list)` where mono instance can't be
+  collected via Constr); (2) `collect_tuple_shapes` end walks
+  substituted payload of mono variant instances (emits tuple shape
+  of Cons payload `(int, int list)` of `int list` even without Cons
+  in AST); (3) moved `collect_show_types` before typedef emission
+  (so instance flow propagates correctly). Verified (clang native):
+  `show [1, 2, 3]` → `[1, 2, 3]`; `show (Nil : int list)` → `[]`;
+  `show ["hello", "world"]` → `["hello", "world"]`. Added 4 tests
+  (895 passing). **Phase 5 (LLVM backend) covers all C codegen
+  (Phase 4) features** — int / fn / str / tuple / record / variant /
+  closure / region / poly / recursive variant / complex pattern /
+  show / all memory model / list pretty-print.
+
+- **Phase 5 #13: LLVM IR codegen Region_block + Ref + with Drop +
+  view construction + Unit_lit** — Implemented all Mere memory-model
+  features in LLVM backend in one slice; equivalent to C codegen
+  Phase 4.17 user-side region + 4.18 with Drop + 4.19 view
+  construction. `current_regions : (name * register) list ref`
+  tracks region scope. Compiled `Region_block (R, body)` to `alloca
+  %__lang_region` + `__lang_region_init(ptr, 1MB)` + body +
+  `__lang_region_free`. Compiled `Ref (R, v)` (`&R v`) to inner
+  evaluation + sizeof (`getelementptr null` + `ptrtoint`) +
+  `__lang_region_alloc` + `store` to write to region buffer; ptr
+  return. `With (c, v, body)`: `let c = v` + body evaluation; after
+  body, if v's record has `close: unit -> unit` field, auto-invokes
+  via `c.close.fn(c.close.env, 0)` (`extractvalue` separates closure
+  value → env/fn + call). At `Record_lit`, if `name in Typer.views`,
+  view construction: get region name from `e.Ast.ty`'s `TyCon (V,
+  [TyRef (R, ...)])` → build record value with `insertvalue` in
+  declaration order → place in region with `__lang_region_alloc` +
+  `store` → ptr return. At `Field_get`, if inner type is
+  `is_view_type`, `getelementptr %V, ptr %x, i32 0, i32 idx` +
+  `load` to get field. Added `TyRef _ → ptr` and `TyCon (n, _) when
+  Typer.views n → ptr` to `llvm_ty_of`. `Unit_lit` emitted as `i32
+  0` (needed for `fn () -> ()`). Verified (clang native): `region R
+  { let x = &R 5 in 42 }` → 42; `region R { let pair = &R (1, 2) in
+  99 }` → 99; `type Pt = { x: int }; region R { let p = &R Pt { x =
+  42 } in 100 }` → 100 (record also placeable in region); `drop
+  type Conn = { id, close }; with c = mk 7 in c.id * 10` → "close
+  7\n70" (close called correctly at scope end); `view Cell[R] of
+  int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7.
+  Added 7 tests (891 passing). **LLVM backend covers all memory-
+  model features, on par with C backend (Phase 4.21)**.
 
 ## 2026-06-17
 
-- **Phase 5 第十二スライス: LLVM IR codegen に show 汎用 builtin** — C codegen の Phase 4.12 相当を LLVM 版で実装。`show : 'a -> str` を呼出ごとに引数型から `show_<ty_tag>` を specialize、各型に dedicated 関数を生成。`@asprintf(ptr, ptr, ...)` を runtime_decls に追加。`show_types` Hashtbl + `collect_show_types` で AST walk して `App (Var "show", arg)` を発見、`add_show_type` が引数型 + 依存型 (tuple elem / record field / variant payload) を再帰登録 (Hashtbl ガードで再帰 variant の `'a list` 等で無限ループしない)。`emit_show_fn` が各型ごとに specialized 関数を emit: int → `@asprintf("%d", x)`、bool → `select i1` で `@.s_true` / `@.s_false`、str → `@asprintf("\"%s\"", x)`、unit → const `@.s_unit`、tuple → 各要素 `show_T` を call → `@asprintf("(%s, ..., %s)", ...)`、record (mono / poly) → 各 field show + `@asprintf("Type { f = %s, ... }", ...)`、variant (mono / poly / 再帰) → tag dispatch (icmp eq + br + phi) → 各 ctor で nullary なら `@.s_ctor_<name>` 直接、payload あれば payload を再帰 show して `@asprintf("Ctor %s", ...)` で合成。Format string と ctor 名 string は emit_program 冒頭で必要分だけ pre-register (`mint_show_global` / `mint_show_format` helpers)。`App (Var "show", arg)` を `call ptr @show_<ty_tag arg.ty>(arg)` に dispatch。動作確認 (clang 経由 native): `show 42` → "42"、`show "hi"` → "\"hi\""、`show true` → "true"、`show (1, "hi")` → `(1, "hi")`、`show (SS 42)` → "SS 42"、`show (Pt { x = 3, y = 4 })` → `Pt { x = 3, y = 4 }`、`show (Cons (1, Cons (2, Cons (3, Nil))))` → `Cons (1, Cons (2, Cons (3, Nil)))`。テスト 9 件追加 (884 passing)。`'a list` の special-case `[1, 2, 3]` 形式 (Phase 4.16 相当) は今後の slice。
-- **Phase 5 第十一スライス: LLVM IR codegen に複雑な pattern (P_int / P_str / P_bool / P_unit / P_record / P_as / nested / or / guard)** — C codegen の Phase 4.14 + 4.15 相当を LLVM 版で実装。`compile_pat` を fully recursive な `(test_cond, bindings, var_types)` 関数として書き直し: P_int → `icmp eq i32`、P_bool → `icmp eq i1`、P_str → `@strcmp(ptr, ptr)` + `icmp eq i32 result, 0`、P_unit → constant `1`、P_record → declared field 順に `extractvalue` + sub-pattern recurse、P_as → inner pattern + whole value bind、P_tuple → 各要素 `extractvalue` + recurse、P_constr → tag test + sub-pattern recurse (payload は recursive variant なら GEP+load、そうでなければ extractvalue)。複数 sub-test は `and_cond` helper で `and i1` 連鎖。or-pattern は `expand_or` で arms を pre-flatten (typer が両 branch の bound 名一致を保証してくれている、body 複製可)。guard は arm の bindings スコープ内で評価し、true なら body へ、false なら next_label へ (= 次の arm を試す)。`@strcmp` を runtime_decls に追加。動作確認 (clang 経由 native): `match 3 with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300、`match "hello"` の str match → 2、`match Cons (SS 5, Nil)` の nested ctor → 5、`match Pt { x=3, y=4 } with | Pt { x=a, y=b }` → 7、`(a, b) as p` → 6 (`P_as`)、`match LCgB with | LCgA | LCgB -> 1 | LCgC -> 2` → 1 (or)、`match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300` → 200 (guard)。テスト 8 件追加 (875 passing)。
-- **Phase 5 第十スライス: LLVM IR codegen に再帰 variant + P_tuple sub-pattern** — 自己参照 payload を持つ variant (`type ilist = INil | ICons of int * ilist`、`'a list = Nil | Cons of 'a * 'a list`) を heap-allocated node + ptr 表現に切替。`recursive_variants` set + `variant_is_recursive` / `mono_variant_is_recursive` ヘルパで判定。emit_program 内で declaration 登録時 (source-level) + mono instance 収集時 (substituted) の 2 段で populate。`emit_variant_typedef` / `emit_mono_variant_typedef` は recursive なら `%V_node = type { i32, T }` (on-heap node) を emit、`llvm_ty_of` が recursive_variants 登録名なら `ptr` を返すので value 型は ptr で透明。`Constr` 再帰: `__lang_region_alloc` で node を default region に allocate、`getelementptr` + `store i32 tag` + `getelementptr` + `store T payload` で書き込み、ptr return。`Match` 再帰: scrutinee の ptr に対して `getelementptr` + `load i32` で tag、各 arm の payload も同様に `load`。pattern compile で `P_tuple` sub-pattern (`Cons (h, t)`) を payload tuple struct の `extractvalue` 連鎖に展開、各 element を fresh register に bind。`pattern_var_types` ヘルパで pattern bind 名の concrete 型を current_var_types に追加 (polymorphic 再帰呼出で `'a list` のまま残らないように)。Match scrutinee 型を Var なら current_var_types から fallback、App 直接呼出の arg 型も同様。typedef 順序を `collect_mono_instances` + recursive 判定 → tuple/record/variant typedef emit (recursive_variants 状態が tuple emit に効くため) に並び替え。動作確認 (clang 経由 native): `type ilist = INil | ICons of int * ilist; sum (ICons (1, ICons (2, ICons (3, INil))))` → 6、`type 'a list = Nil | Cons of 'a * 'a list; sum [1,2,3,4,5]` → 15、`length ["a","b","c","d"]` → 4 (poly 再帰 list)。テスト 5 件追加 (867 passing)。
-- **Phase 5 第九スライス: LLVM IR codegen に多相 variant / record の monomorphization** — C codegen の Phase 4.11 + 4.13 を LLVM 側で一括実装。`polymorphic_variants` / `polymorphic_records` Hashtbl で宣言を保留 (emit_program の頭で `Exhaustive.type_variants` + `Typer.records` を walk して poly のものだけ登録)、constructor の `params` 経由で poly variant の param 名を復元。`mono_variant_instances` / `mono_record_instances` で発見した instance を蓄積、`collect_mono_instances` が AST + fn signature を walk して `(name, args)` を発見。`subst_params` / `subst_variants` で型変数→具体型置換、`mono_variant_name n args` / `mono_record_name n args` で specialized 名 (`opt_int`, `Box_str` 等)。`emit_mono_variant_typedef` は substituted な payload 型から `variant_payload_ty_of` で payload 型を決め、`%opt_int = type { i32, T }` を emit。`emit_mono_record_typedef` は substituted field 型で `%Box_int = type { ... }` を emit。`llvm_ty_of (TyCon (n, args))` が `polymorphic_variants/records` 登録名なら mono name にマップ。`Constr` emit: `e.ty` から mono name を引き、`variant_payload_ty_of` で payload 型を決める。`Record_lit` / `Field_get` / `Record_update` 同様に poly record では `mono_record_name` + substituted field を使用。`Match` の scrutinee 型が poly なら mono name + substituted variants を使う。動作確認 (clang 経由 native): `type 'a LCgOpt = LCgN | LCgS of 'a; match LCgS 42 with | LCgN -> 0 | LCgS n -> n` → 42、`type 'a Box = { v: 'a }; let b = Box { v = 42 } in b.v` → 42、両 type で specialize `let bi = Box { v = 42 } in let bs = Box { v = "hi" } in str_len bs.v + bi.v` → 44 (`%Box_int` と `%Box_str` 両方が emit)。テスト 7 件追加 (862 passing)。再帰 poly variant (`'a list`) は recursive variant support が必要なので Phase 5.10 で。
-- **Phase 5 第八スライス: LLVM IR codegen に default region runtime + closure/文字列 alloc を region 経由に** — C codegen の Phase 4.17 + 4.20 + 4.21 に相当する作業を LLVM 側で一括実装。`%__lang_region = type { ptr, ptr, i64 }` 構造体 + `@__lang_default_region = internal global %__lang_region zeroinitializer` の file-scope global + `__lang_region_init/alloc/free` の 3 ヘルパ関数を LLVM IR 内に inline 定義 (`region_runtime_helpers`)。`__lang_region_alloc` は 8 byte aligned bump pointer 方式 (`(n + 7) & -8` を `and i64 ..., -8` で実装、top を gep i8 で進めて store)。`@main` の冒頭で `__lang_region_init(@__lang_default_region, 4194304)` (4 MB) を call、末尾の `ret i32 0` 前に `__lang_region_free` を call。`__lang_str_concat` 内の `malloc` を `__lang_region_alloc(@__lang_default_region, ...)` に置換、closure env (anonymous Fun) の `malloc(sizeof)` も同様に置換。`@free` を runtime_decls に追加、region_runtime_helpers を str_concat_helper の直前に emit 順に挿入。動作確認 (clang 経由 native): `(make_adder 5) 10` → 15、`compose inc dbl 5` → 11、`"hello, " ++ "world"` などの concat、生成 IR 内の `malloc` 呼出は region init 内の 1 箇所のみ (program 終了時に一括 free、valgrind clean)。テスト 8 件追加 (855 passing)。LLVM backend のメモリモデルが C backend (Phase 4.21) と同等のレベルに到達。
-- **Phase 5 第七スライス Phase B: LLVM IR codegen に anonymous Fun + closure-with-captures** — 内部 `fn x -> ...` を expression position で扱う。`free_vars` / `pattern_vars` ヘルパで AST の自由変数を計算 (bound 名を除外、preserve 順序)、`current_var_types` に登録済な名前にフィルタ (top-level / builtin を除外)。capture ごとに `current_var_types` から concrete 型を取得、`%anon_N_env = type { T1, T2, ... }` env struct typedef を生成、`anon_N_fn` adapter を `pending_closures` キューに積む。構築 site では `malloc(sizeof(%anon_N_env))` (LLVM の getelementptr null trick + ptrtoint で size を計算) で env を確保、各 capture を `getelementptr %env, ptr %p, i32 0, i32 idx` + `store` で env field に書き込み、`insertvalue %closure undef, ptr %env, 0` + `insertvalue ..., ptr @anon_N_fn, 1` で closure value を組み立てる。`emit_anon_adapter` を `emit_program` で `pending_closures` を drain して呼出 (drain 中に新たな pending も処理する iterative loop)、adapter body の entry block では各 capture を `getelementptr` + `load` で env_self から取り出して fresh register に入れ、それを env に bind してから元 Fun body を emit。`current_expected_ty : ty option ref` を追加: AST の Fun.ty が polymorphic な場合に parent context の型を fallback として使えるようにする (let-poly 後の `fn f -> fn x -> f (f x)` のような curried 多相 HOF で内側 Fun の型が `'a -> 'a` のまま残るケースを解決、emit_fn_def / emit_anon_adapter が body 開始時に return_ty を set / 終了時に restore)。Let case で current_var_types に value 型を加えるよう拡張 (closure が outer let の変数を capture できるように)。動作確認 (clang 経由 native): `let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10` → 15 (capture)、`let twice = fn f -> fn x -> f (f x) in twice inc 5` → 7 (curried HOF + 多相)、`let apply = fn f -> fn x -> f x in apply (fn n -> n * 3) 7` → 21 (anon Fun を引数として渡す)、`let compose = fn f -> fn g -> fn x -> f (g x) in ((compose inc) dbl) 5` → 11 (3 段ネスト closure + 2 capture)。テスト 7 件追加 (847 passing)。env は現状 `@malloc` で leak — default region 化は将来の slice。
-- **Phase 5 第七スライス Phase A: LLVM IR codegen に first-class top-level fn** — `T1 -> T2` 型を `%closure_T1_T2 = type { ptr, ptr }` (env, fn pointer) として lower。`closure_struct_name` ヘルパで closure 型名を、`collect_arrow_types` で AST + fn signature を walk して使われた arrow 型を全部収集、`emit_closure_typedef` で typedef を生成。各 top-level fn に env-ignoring adapter `define T2 @<name>_closure_fn(ptr %env_unused, T1 %x) { ret T2 @<name>(T1 %x); }` を自動生成 (`emit_closure_adapter`)。`emit_expr` の `Var name`: env に shadowing がなく `toplevel_fn_names` に登録済なら、`insertvalue %closure undef, ptr null, 0` + `insertvalue ..., ptr @<name>_closure_fn, 1` で inline に closure value を構築。`App f arg`: 既存の direct-call path (known top-level fn の場合) はそのまま、それ以外は `extractvalue %closure %c, 0/1` で env/fn を取り出して `call T2 %fn_ptr(ptr %env, T1 %arg)` で dispatch (opaque pointer 経由なので fn pointer 型キャストは不要)。`current_var_types : (string * ty) list ref` を追加して、fn body 内の polymorphic Var (let-poly 後に `'a -> int` のまま残る引数) について resolve_fn_types 由来の concrete 型を引けるように (`emit_fn_def` の頭で param の concrete ty を set、save/restore)。動作確認 (clang 経由 native): `let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc` → 6、`let apply2 = fn f -> f (f 5) in apply2 inc` → 7。テスト 7 件追加 (840 passing)。anonymous Fun (inner `fn x -> ...`) と closure-with-captures (Phase B) は別 slice。
-- **Phase 5 第六スライス: LLVM IR codegen に variant + match (単相、payload 型 1 つ)** — 単相 variant を LLVM named struct に lower: 全コンストラクタが nullary なら `%V = type { i32 }`、payload がある場合は `%V = type { i32, T }` (`variant_payload_ty` で全 payload-bearing コンストラクタが共有する単一の payload 型を検出、異なる型なら Codegen_error)。`variant_tags` ハッシュテーブルで constructor → 整数 tag を保持、`emit_variant_typedef` の副作用で set。`collect_variant_names` で AST + fn signature + Constr の type_name を walk して使われた variant 型を集める (`Typer.types` arity 0 のものだけ)。`Constr cname arg_opt` を `%t0 = insertvalue %V undef, i32 tag, 0` → optional `%t1 = insertvalue %V %t0, T arg, 1` の chain で SSA に struct value 構築。`Match` は scrutinee の tag を `extractvalue %V %s, 0` で取り出し、各 arm を `icmp eq i32 %tag, N` + `br i1` で順次テスト、fallthrough は `@abort()` + `unreachable`、最後に全 arm 結果を `phi <result_ty>` で merge。Pattern は P_constr / P_var / P_wild のみ、payload bind は `extractvalue %V %s, 1` で payload register を作って bindings に入れる。@abort declaration を runtime_decls に追加。動作確認 (clang 経由 native): `type Color = R | G | B; match G with | R -> 0 | G -> 1 | B -> 2` → 1、`type Status = Ok | Err of str; match Err "boom" with | Ok -> 0 | Err m -> str_len m` → 4、`type IntOpt = INone | ISome of int; let v = ISome 42 in match v with | INone -> 0 | ISome n -> n` → 42。テスト 9 件追加 (833 passing)。guard / 多相 variant / 再帰 variant / nested pattern / or-pattern は引き続き Codegen_error。
-- **Phase 5 第五スライス: LLVM IR codegen に record (単相) 対応** — monomorphic record (`type Pt = { x: int, y: int }`) を LLVM named struct (`%Pt = type { i32, i32 }`) に lower。`llvm_ty_of` に `TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name` を追加、`record_fields` / `field_index` ヘルパで `Typer.records` から宣言順の field を引いてくる。`Record_lit` の emit は宣言順に `insertvalue` chain で構築 (source の field 順が宣言順と違っても、`List.assoc_opt` で値を引いて宣言順に重ねる)。`Field_get` は `extractvalue %R %p, idx`、`Record_update` は base value からスタートして各更新 field を `insertvalue` で重ねる。`collect_record_names` で AST + fn signature を walk して使われた record 型を全部収集 (多相 record は今は除外、別 slice)。`emit_record_typedef` が `%Name = type { T1, T2, ... }` を生成。`bin/main.ml` の `infer_program` ヘルパ経由なので、Typer.records は既に populate されている。`llvm_with_decls` test helper を追加 (codegen_with_decls と並列)。動作確認 (clang 経由 native): `type Pt = { x: int, y: int }; let p = Pt { x = 3, y = 4 } in p.x + p.y` → 7、Record_update `{ p | x = 100 }` で x * y → 400、record-returning fn `let mk = fn x -> Pair { a = x, b = str_len x } in print ((mk "hello").a)` → "hello"。テスト 6 件追加 (824 passing)。多相 record (`type 'a Box`) は Codegen_error のまま。
-- **Phase 5 第四スライス: LLVM IR codegen に tuple 対応** — tuple を LLVM named struct (`%tuple_int_str = type { i32, ptr }`) に lower。`ty_tag` / `tuple_struct_name` ヘルパ (codegen_c と同じ命名規則で `tuple_int_str` 等のシンボルを生成)、`collect_tuple_shapes` で AST + fn signature を walk して使われた tuple 型を全部収集、`emit_tuple_typedef` が `%name = type { T1, T2, ... }` を生成。`Tuple` node の emit は `insertvalue` chain (`undef` から始めて、各要素を `insertvalue %T %prev, Tn vn, idx` で順に重ねる) で SSA register に struct value を構築。`fst` / `snd` builtin を `extractvalue %tuple_X %p, 0/1` に compile (arg の `.ty` から struct 名を解決)。`llvm_ty_of (TyTuple ts)` → `%<tuple_struct_name>` を返すので、tuple-arg / tuple-return 関数の signature は自動的に正しい形 (`define %tuple_int_int @split(ptr %s)`、`define i32 @sum_pair(%tuple_int_int %p)`) になる。nested tuple (`((1, 2), 3)` → `%tuple_tuple_int_int_int = type { %tuple_int_int, i32 }`) も自動生成。動作確認 (clang 経由 native): `let p = (1, 2) in fst p + snd p` → 3、`let p = ("hello", 42) in print (fst p)` → "hello"、`let split = fn s -> (s, str_len s) in print (fst (split "hello"))` → "hello"、nested tuple `((1,2), 3)` の和 → 6、tuple-arg fn `sum_pair (10, 20)` → 30。テスト 8 件追加 (818 passing)。
-- **Phase 5 第三スライス: LLVM IR codegen に文字列 + print + ++ + str_len + str-取る/返す関数** — `TyStr` を LLVM の `ptr` (opaque pointer) にマップ。`Str_lit s` を private constant global `@.str_N = private constant [N x i8] c"...\00"` として lift、`fresh_str_global` ヘルパで生成、ASCII 印字可能以外は `\HH` でエスケープ。値としてはグローバルシンボルを直接 ptr として使用 (opaque pointer なので GEP 不要)。`Bin (Concat, a, b)` を `call ptr @__lang_str_concat(ptr %a, ptr %b)` に compile、`__lang_str_concat` は LLVM IR 内に inline 定義 (`malloc` + `strlen` + `memcpy` + GEP + `store i8 0` の組合せ)。`print` builtin を `call i32 @puts(ptr %s)` に (return value は捨て、Mere 上の値は 0)、`str_len` を `call i64 @strlen(ptr %s)` + `trunc i64 ... to i32` に。`main_format_of` に `TyStr → ("ptr", "%s")` を追加、`@.fmt_s = c"%s\\0A\\00"` global を生成。str を取る/返す関数も自動で正しく lower (`define ptr @f(ptr %s)`)。runtime helpers (`declare ptr @malloc(i64)` 等) と `__lang_str_concat` 本体を emit_program で一括 emit、`.ll` ファイル単体で完結。動作確認 (clang 経由 native): `print "Hello, LLVM!"` → "Hello, LLVM!"、`"hello, " ++ "world!"` → "hello, world!"、`str_len "Hello, world!"` → 13、`let greet = fn name -> "Hello, " ++ name ++ "!" in print (greet "world")` → "Hello, world!"、`let exclaim = fn s -> s ++ "!" in print (exclaim "wow")` → "wow!"、`let pick = fn n -> if n > 0 then "positive" else "negative" in print (pick 5)` → "positive"。テスト 10 件追加 (810 passing)。
-- **Phase 5 第二スライス: LLVM IR codegen に関数 lifting + recursion** — top-level `let f = fn x -> ...` および `let rec f = ... and g = ...` を LLVM の `define iXX @f(iYY %x) { ... }` として lift。C codegen と同形の `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` / `resolve_fn_types` を `codegen_llvm.ml` 内に並列実装 (LLVM 固有の `llvm_ty_of` と組合せ)。`emit_fn_def` が各関数を独立した SSA scope として emit (`reg_counter` / `label_counter` を関数ごとに reset、`instrs` は save/restore)。`App (Var name, arg)` で `name` が `toplevel_fn_names` に登録済なら `%t = call iZZ @name(iYY %arg)` に compile (closure-as-value は今後の slice)。LLVM IR は同モジュール内で前方参照可能なので、Phase 4 で必要だった forward declaration は不要 (相互再帰はそのまま動く)。動作確認 (clang 経由 native): `factorial 10` → 3628800、`fib 15` → 610、`is_even 7` (相互再帰) → 0。テスト 6 件追加 (800 passing)。
-- **Phase 5 第一スライス: LLVM IR codegen MVP** — Mere を native binary に compile する第二の backend を着手。新規 `lib/codegen_llvm.ml` に `emit_program : ?main_ty:ty -> Ast.program -> string` を実装、subset (int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var) / Var / Annot) を LLVM textual IR に変換。手書き text 生成方式 (opam の `llvm` パッケージは依存せず、`clang out.ll` で直接コンパイル)。SSA register counter (`%t0`, `%t1` ...) と basic block label counter で名前管理、If は `br i1` + label/phi 経由、比較は `icmp slt/sgt/eq/...`、bool は `i1` で計算して main 末尾で zext で `i32` に拡張して `@printf` 経由出力 (`@.fmt_d = c"%d\\0A\\00"`)。CLI に `-ll <file>` / `-lle <expr>` flag を追加、infer_program helper を C / LLVM の両 backend で共有。動作確認 (clang 経由 native 実行): `let a = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200、`if 3 > 2 then 100 else 200` → 100、`let x = 5 in x * x + 1` → 26、`true && (false || true)` → 1。テスト 15 件追加 (794 passing)。関数 / 文字列 / record / variant / closure / region 等は今は Codegen_error (Phase 4 の MVP と同じ scope)。
-- **Phase 4 第二十一スライス: 文字列 / 再帰 variant node も default region 化** — 残っていた 2 つの malloc サイトを `__lang_default_region` 経由に統合。`__lang_str_concat` runtime helper の `malloc(la + lb + 1)` を `__lang_region_alloc(&__lang_default_region, la + lb + 1)` に、再帰 variant の Constr emit (`Cons (h, t)` 等の自己参照 variant) の `malloc(sizeof(T_node))` を `__lang_region_alloc(&__lang_default_region, sizeof(T_node))` に切替。`emit_program` の helper 並び順を `region_runtime_helpers → str_concat_helper` に並べ替えて、str_concat helper が `__lang_default_region` シンボルを参照できるように (順序問題)。これで C 側に残る malloc は `__lang_region_init` 内部の base buffer 確保のみで、ユーザ可視な alloc サイトはすべて bump arena に乗った。`main` 末尾の `__lang_region_free(&__lang_default_region)` で一括解放、valgrind clean。動作確認 (clang 経由 native 実行): `let greet = fn name -> "Hello, " ++ name ++ "!" in print (greet "world")` → "Hello, world!"、`sum [1, 2, 3, 4, 5]` → 15 (再帰 list の Cons が全部 region alloc)。テスト 2 件追加 + 1 件更新 (779 passing、旧「Constr mallocs node」を「Constr uses default region」に改名)。
-- **Phase 4 第二十スライス: closure env の default region 化** — program-lifetime arena `__lang_default_region` を file-scope に追加 (`static __lang_region __lang_default_region;`)、`main` の冒頭で `__lang_region_init(&__lang_default_region, 1 << 22)` (4MB)、末尾で `__lang_region_free` する。anonymous closure の env struct alloc を `malloc(sizeof(...))` から `__lang_region_alloc(&__lang_default_region, sizeof(...))` に切替。closure はユーザの `region R { ... }` を越えて生きうるため (`make_adder 3 |> add3 4` のように外側に持ち出される)、user region と同居せず別系統の program-lifetime arena に置く必要があった。closure 1 個あたりの malloc コストが消え、`main` 終了時に一括解放されるので valgrind も clean。動作確認 (clang 経由 native 実行): `let make_adder = fn n -> fn x -> n + x in let add3 = make_adder 3 in add3 4` → 7、`let compose = fn f -> fn g -> fn x -> f (g x) in compose (fn n -> n + 1) (fn n -> n * 2) 5` → 11 (capture を含む nested closure も全部 default region に乗る)。残り leak: 文字列 concat (`++`) と再帰 variant node (`Cons`)。テスト 5 件追加 + `assert_no_contains` helper を追加 (777 passing)。
-- **Phase 4 第十九スライス: view 構築の region 化** — `view V[R] of T { ... }` を region 上の bump allocator に乗せて codegen。view 値を C 上で `V*` (ポインタ型) として表現、構築時に `__lang_region_alloc(&__region_R, sizeof(V))` で region 内に allocate して中身を copy し、ポインタを return。`c_type_of (TyCon (V, [TyRef R TyUnit])) -> V*`、`is_view_type` ヘルパで record と view を区別、`Field_get` が view value に対して `->` を使う。view 値の lifetime が region scope と一致 (Phase 2.1 escape check + Phase 4.17 region runtime と組合せ) — **メモリモデルの view 機能が完全に runtime レベルで動く**。動作確認 (clang 経由 native 実行): `view Cell[R] of int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7。テスト 3 件追加 (772 passing、codegen_with_decls helper に Top_view 対応を追加)。
-- **Phase 4 第十八スライス: `with` Drop 実行 codegen + typedef 順序整理** — `with c = v in body` を C codegen 化: scope 末で c の `close` field を `c.close.fn(c.close.env, 0)` で自動呼出 (Drop 型に `close: unit -> unit` field がある場合のみ、無ければ skip。複数 with は AST が nested なので自然に LIFO 順)。副次的に、typedef 構造を「forward decl 全部 → closure typedef → struct body 全部」に再編成。これは Drop type の `close: unit -> unit` field のように record が `closure_T1_T2` 型を持つケースで、closure typedef が record 完全定義を function-pointer return として使う必要があり、ただし C は forward-declared struct を function pointer の return type に使えるので、forward decl を先に出せば closure typedef が出せる、というロジック。記録 variant / record / tuple の typedef を全て forward decl + body の 2 段に split、emit_program でその順に並べる。動作確認 (clang 経由 native 実行): `drop type Conn = { id: int, close: unit -> unit }; let mk = fn id -> Conn { id = id, close = fn () -> print ("close " ++ show id) } in with c = mk 7 in c.id * 10` → "close 7\n70" (close が scope 末で正しく呼ばれる)。テスト 3 件追加 + 6 件の typedef snapshot を新形式に合わせ更新 (769 passing)。
-- **Phase 4 第十七スライス: region runtime (bump allocator)** — `region R { body }` を実体ある bump allocator として codegen。新規 C runtime ヘルパ `__lang_region` (`{ char* base; char* top; size_t cap; }`) + `__lang_region_init/alloc/free` を生成 source に inject。`emit_expr Region_block` が `({ __lang_region __region_R; __lang_region_init(&__region_R, 1<<20); __auto_type __r_result = body; __lang_region_free(&__region_R); __r_result; })` の statement expression を出す。`emit_expr Ref (R, v)` が `({ __auto_type __ref_v = v; typeof(__ref_v)* __p = __lang_region_alloc(&__region_R, sizeof __ref_v); *__p = __ref_v; __p; })` で region 内に bump alloc + copy + ポインタ return。`c_type_of (TyRef _ inner)` を `inner*` に。escape check (typer) と組合せて、region scope を抜けるとメモリが一括解放されるが、型シグネチャ上 `&R T` が漏れていないことが保証されている (Phase 2.1 で実装済の escape check) ので安全。**メモリモデルが「型レベルラベル」から「実体ある bump allocator」になった節目**。動作確認 (clang 経由 native 実行): `region R { let x = &R 5 in 42 }` → 42、`region R { let pair = &R (1, 2) in 99 }` → 99、`type Pt = { x: int }; region R { let p = &R Pt { x = 42 } in 100 }` → 100 (record も region 内に置ける)。テスト 5 件追加 (766 passing)。
-- **Phase 4 第十六スライス: `'a list` の show を `[a, b, c]` 形式に + variant payload の tuple shape 収集** — `emit_show_fn` で `TyCon ("list", [elem_ty])` を special-case 化し、Nil なら `"[]"`、Cons はリスト全体を while ループで走査して `[1, 2, 3]` 形式で文字列化する specialized 関数を生成 (Mere interpreter の出力と一致)。副次的に、tuple shape 収集を mono variant の payload まで含めるように拡張 (`tuple_int_list_int` 等は `show ([] : int list)` のような Cons 構築を含まないケースでも参照されるため、必要な struct typedef が emit されないとビルド失敗するのを修正)。動作確認 (clang 経由 native 実行): `show [1, 2, 3]` → `[1, 2, 3]`、`show ["hello", "world"]` → `["hello", "world"]`、`show ([] : int list)` → `[]`。テスト 2 件追加 (761 passing)。
-- **Phase 4 第十五スライス: C codegen に or-pattern + match guard** — `| pat1 | pat2 -> body` を Match emit の pre-pass `expand_or` で複数 arm に flatten (両 branch が同じ name set を bind する制約は typer が保証してくれている)。body は両方に複製されるが純粋式なので安全。`when ...` guard は arm の bindings スコープ内で評価して false ならフォールスルー (`test ? ({ bindings; guard ? body : next; }) : next`)。動作確認 (clang 経由 native 実行): `type Col = R | G | B; match G with | R | G -> 1 | B -> 2` → 1、`match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300` → 200。nested or-pattern (or の中に constructor 等) は引き続き Codegen_error。テスト 4 件追加 + 1 件更新 (759 passing、旧「guard rejected」を「guard accepted」に置換)。
-- **Phase 4 第十四スライス: C codegen に複雑な pattern** — Match の pattern compilation を `compile_pattern` で fully recursive に書き直し。各 pattern を (test_expr, bindings_str) に分解、constructor 内に constructor / tuple / record を nest 可能、`P_int` / `P_str` (strcmp == 0) / `P_bool` / `P_unit` / `P_record` (named field destructure) / `P_as` (whole-value bind) を実装。`is_ptr_ty` / `payload_ty_for_ctor` / `field_ty` ヘルパで sub-value の型を解決して再帰的にパターンを分解。動作確認 (clang 経由 native 実行): `match 3 with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300、`match "hello" with | "hi" -> 1 | "hello" -> 2 | _ -> 3` → 2、`match Cons (Some 5, Nil) with | Nil -> 0 | Cons (None, _) -> 1 | Cons (Some n, _) -> n` → 5 (nested poly variant)、`match Point { x = 3, y = 4 } with | Point { x = a, y = b } -> a + b` → 7。or-pattern と guard は引き続き Codegen_error。テスト 6 件追加 + 4 件 substring を新形式に合わせ更新 (755 passing)。
-- **Phase 4 第十三スライス: C codegen に多相 record の monomorphization** — `type 'a Box = { v: 'a }` 等の polymorphic record を、variant の Phase 4.11 と同じパターンで type ごとに specialize (`Box_int`, `Box_str` 等)。`polymorphic_records` Hashtbl で宣言を保留 (emit_record_typedef は r_params != [] なら deferring)、`collect_mono_variant_instances` を records も対象に拡張、`emit_mono_record_typedef` が subst_params で field 型を具体化して `typedef struct { int v; } Box_int;` を生成。`Record_lit` emit が Record_lit の `.ty` から mono 名を引いて compound literal を出す (`((Box_int){.v = 42})`)。Field_get と Record_update は `__auto_type` 経由で自然に動く。動作確認 (clang 経由 native): `type 'a Box = { v: 'a }; let b = Box { v = 42 } in b.v` → 42、`let bi = Box { v = 42 } in let bs = Box { v = "hi" } in show (bi.v, bs.v)` → `(42, "hi")` (Box_int と Box_str を両方 specialize)。テスト 3 件追加 + 1 件更新 (749 passing、旧「多相 record 拒否」を「specialize 検証」に置換)。
-- **Phase 4 第十二スライス: C codegen に `show` 汎用 builtin** — `show : 'a -> str` を、AST から呼出ごとの引数型を集めて型ごとに specialized `show_T` C 関数を自動生成。`collect_show_types` で `App (Var "show", arg)` を発見、`add_with_deps` が引数型に依存する型 (tuple elem / record field / variant payload) も再帰的に登録 (循環ガード付き、再帰 variant の self-referential payload で無限ループしない)。`emit_show_fn` が各型に specialized fn を生成 — int/bool/str/unit は trivial、tuple/record は要素 show を合成、variant (mono + 多相 instantiation + 再帰) は tag dispatch + payload show。`emit_expr App` の `Var "show"` を引数型の `ty_tag` で resolve した `show_<tag>(arg)` 呼出に dispatch。動作確認 (clang 経由 native 実行): `show 42` → "42"、`show (1, "hello")` → `(1, "hello")`、`show (Some 42)` → "Some 42"、`show [1, 2, 3]` → "Cons (1, Cons (2, Cons (3, Nil)))"。`asprintf` ベース (malloc leak だが他 codegen と一貫)。テスト 7 件追加 (747 passing)。
-- **Phase 4 第十一スライス: C codegen に多相 variant の monomorphization** — `type 'a opt = None | Some of 'a` や `type 'a list = Nil | Cons of 'a * 'a list` 等の polymorphic variant を、AST と fn signature から concrete instantiation を収集して instance ごとに specialized struct (`opt_int`, `list_int` 等) を emit する monomorphization を実装。`polymorphic_variants` Hashtbl で宣言を保留、`mono_variant_instances` で発見した instance を蓄積、`subst_params` / `subst_variants` で param→arg 置換、`mono_variant_is_recursive` で具体型上の再帰判定。`c_type_of` と `ty_tag` を `TyCon (n, args)` で args 付きの場合にも対応 (`int list` → `list_int` 等)。`Constr` emit は Constr の `.ty` から mono 名を引き、Match の `is_ptr` 判定も mono 名で再帰性チェック。動作確認 (clang 経由 native 実行): `type 'a opt = None | Some of 'a; let v = Some 42 in match v with | None -> 0 | Some n -> n` → 42、`type 'a list = Nil | Cons of 'a * 'a list; let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum [1, 2, 3]` → 6 (list literal + 再帰 sum、`[1, 2, 3]` は parser が `Cons (1, Cons (2, Cons (3, Nil)))` に desugar)。テスト 4 件追加 (740 passing)。
-- **Phase 4 第十スライス: C codegen に再帰 variant + P_tuple pattern** — 自己参照 payload を持つ variant (例: `type ilist = INil | ICons of int * ilist`) を heap-allocated node + ptr typedef に切り替え (`typedef struct ilist_node ilist_node; typedef ilist_node* ilist; struct ilist_node { ... };`)。`variant_is_recursive` で payload の自己参照を検出、`recursive_variants` Hashtbl に登録。Constr emit が `({ ilist_node* __p = malloc(...); __p->tag = N; __p->payload.CTOR = ...; __p; })` で malloc + return ptr。Match emit が scrutinee の型を見て `.` vs `->` を切替え。P_tuple sub-pattern (`CgCons (h, t)`) を `.f0 / .f1` の binding 列に展開。typedef の循環依存は forward decl + ptr typedef を先に emit して、struct body を tuple/record typedef の後で emit することで解決。動作確認 (clang 経由 native): `type ilist = INil | ICons of int * ilist; let rec sum = fn xs -> match xs with | INil -> 0 | ICons (h, t) -> h + sum t in sum (ICons (1, ICons (2, ICons (3, INil))))` → 6 (連結リスト sum)。テスト 5 件追加 (736 passing)。
-- **Phase 4 第九スライス Phase B: C codegen に anonymous Fun + closure-with-captures** — anonymous Fun in expression position を heap-allocated env struct + adapter + closure 構築として lift。capture vars は `current_env_subst` map で `__env_self->name` に rewrite、capture types は `current_var_types` で scope を辿って解決 (let-poly 後の polymorphic 残留問題への対処)。`current_expected_ty` で context type を Fun emit に渡し、外側 fn の return_ty から inner Fun の型を推定。closure typedef は内側→外側の順 (post-order walk) で emit して循環参照を避ける。動作確認 (clang 経由 native): `let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5` → 6 (curried HOF)、`let twice = fn f -> fn x -> f (f x) in twice inc 5` → 7、`let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10` → 15 (closure with capture)。テスト 4 件追加 + 1 件更新 (731 passing)。
-- **Phase 4 第九スライス (Phase A): C codegen に first-class functions** — `T1 -> T2` 型の関数値を C struct `closure_T1_T2 = { void* env; T2 (*fn)(void*, T1); }` で表現。各 top-level fn に env-ignoring adapter (`f_closure_fn`) + 値 const (`f_as_value`) を自動生成。`c_type_of (TyArrow ...)` を closure struct 名にマップ、`ty_tag` もネスト対応。`emit_expr Var`: 名前が top-level fn のとき value 位置で `f_as_value` を emit (inner-lifted を value で使う場合は Codegen_error)。`emit_expr App`: known top-level の Var 呼出は引き続き direct call の高速パス、その他は `({ __auto_type __c = e; __c.fn(__c.env, arg); })` で closure dispatch。`collect_arrow_types` で AST + fn signatures から arrow 型を集めて closure typedef を自動生成。動作確認 (clang 経由 native): `let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc` → 6 (top-level fn を値として HOF に渡す形が動く)。inner / anonymous fn を値化する Phase B は別 slice。テスト 6 件追加 (727 passing)。
-- **Phase 4 第八スライス: C codegen に closure conversion (defunctionalization)** — 関数本体内の `let h = fn x -> body in ...` を top-level に lift する pre-pass を追加。free_vars helper で自由変数を計算 (typer initial_env の builtin / top-level fn 名を除外)、捕捉された変数を C function の param 列に prepend (defunctionalization)。`emit_expr` の Let は `Hashtbl.mem inner_lifts name` を見て lift 済み binding を skip、App は capture 引数を call site で渡す。captures は int/bool/str/unit のみ (tuple/record/関数値 capture は Codegen_error)。多段ネストもサポート (h が x と n を 2 階層から capture)。副次として `resolve_fn_types` を let-poly 後の Fun.ty 問題のために `find_concrete_arrow` で call site の monomorphic 型を引くように改修。動作確認: `let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5` → 15、ネスト 2 段 → 6。テスト 4 件追加 + 1 件更新 (721 passing、旧「closure 拒否」テストを「lift 結果検証」に置換)。
-- **Phase 4 第七スライス: C codegen に variant + match** — 単相 variant 型 (`type Status = Ok | Err of str`) を tagged union (`typedef struct { int tag; union { const char* Err; } payload; } Status;`) にコンパイル。`Constr` を compound literal (`((Status){.tag = 1, .payload.Err = "boom"})`) に。`Match` を statement expression 内の ternary chain に展開 (`__scrut.tag == N ? ({ binding; body; }) : ...` + fallthrough `abort()`)。Pattern subset: `P_constr` (nullary or `P_var` / `P_wild` sub)、`P_var`、`P_wild`。guard / 多相 variant / nested pattern は Codegen_error。動作確認 (clang 経由 native): `type Color = R | G | B; match G with | R -> 0 | G -> 1 | B -> 2` → 1、`type Status = Ok | Err of str; match Err "boom" with | Ok -> 0 | Err msg -> str_len msg` → 4。テスト 9 件追加 (715 passing)。
-- **Phase 4 第六スライス: C codegen に record サポート** — `type Point = { x: int, y: int }` を `typedef struct { int x; int y; } Point;` に compile。Record_lit / Field_get / Record_update を実装 (Record_update は `({ __auto_type __rupd = base; __rupd.f = v; __rupd; })` の statement expression パターン)。`collect_record_names` で AST + fn signature を walk して使用された record 型を集めて typedef を自動生成。`compile_to_c` を top-level decl 処理込みに拡張 (Pipeline.type_of と同じく eval スキップ、record/variant/view/drop 登録のみ)。動作確認 (clang 経由 native 実行): `let p = Point { x = 3, y = 4 } in p.x + p.y` → 7、record update → 102、record-returning fn → 15。多相 record (`type 'a Box = { v: 'a }`) は引き続き Codegen_error。テスト 7 件追加 (706 passing)。
-- **Phase 4 第五スライス: C codegen に tuple サポート + AST 型注釈基盤** — 基盤として `Ast.expr` に `mutable ty : ty option` を追加、`Typer.infer` が各ノードに推論結果を記録するように。これで codegen がノードごとの型を直接参照できる。`Tuple` を C struct (`typedef struct { ... } tuple_int_int;`) + C99 compound literal `((tuple_int_int){.f0 = 1, .f1 = 2})` にコンパイル。`fst` / `snd` builtin を `.f0` / `.f1` field access に。任意の element 型 (int/bool/str + ネスト tuple) をサポート、shape ごとに自動で struct を生成 (`collect_tuple_shapes` で AST 全体 + fn signature を walk)。動作確認 (clang 経由 native): `let p = (1, 2) in fst p + snd p` → 3、`let p = ("hello", 42) in print (fst p)` → "hello"、`let split = fn s -> (s, str_len s) in print (fst (split "hello"))` → "hello"。テスト 6 件追加 (699 passing)。
-- **Phase 4 第四スライス: C codegen: str を取る / 返す関数** — lifted 関数の param / return が str (const char*) も使えるように。`fn_decl` に `param_ty` / `return_ty` を追加、`lift_fn_skels` で骨格抽出 → `resolve_fn_types` で全 lifted fn を 1 つの let-rec group として typer に流して型推論 (自己 / 相互再帰対応) → `c_type_of` で Ast.ty → C type にマップ (int/bool → `int`, str → `const char*`, unit → `int`)。`str_len` builtin を C の `strlen` に compile (App 特殊ケース)。動作確認 (clang 経由): `let greet = fn n -> if n > 0 then "pos" else "neg" in print (greet 5)` → "positive"、`let exclaim = fn s -> s ++ "!" in print (exclaim "hello")` → "hello!"、`str_len "hello, world!"` → 13。テスト 5 件追加 (693 passing)。
-- **Phase 4 第三スライス: C codegen に文字列対応** — `Str_lit` を C 文字列リテラルに、`++` を runtime helper `__lang_str_concat` (malloc ベース) 経由に、`print` builtin を `puts` (statement expression で int 0 を返す) に compile。`let` を GNU/Clang 拡張 `__auto_type` ベースに切替えて int/str 両方の値で同じ emit が動く。`emit_program` を型認識化 (`~main_ty`) して printf の format を main の型から選択 (int/bool → `%d`、str → `%s`、unit → printf skip)。動作確認: `print "hello, world!"` → hello, world!、`"hello" ++ " " ++ "world"` → hello world (全て clang 経由 native 実行)。malloc は leak (region/GC 統合は将来 slice)。テスト 6 件追加 / 既存 codegen テストを fragment 検査に再構成 (688 passing)。
-- **Phase 4 第二スライス: C codegen に関数 lifting** — top-level `let f = fn x -> ...` および `let rec f = fn x -> ... and g = fn y -> ...` を C 関数として lift (forward declaration 込み)。`App (Var name, arg)` 形式の直接呼出を C の `name(arg)` に compile、自己再帰と相互再帰が共に動く (factorial 10 = 3628800、fibonacci 15 = 610、is_even 7 = 0 を clang 経由 native 実行確認)。closure (関数本体内の `fn ...`) は引き続き Codegen_error。テスト 5 件追加 (681 passing)。
-- **Phase 4 第一スライス: C codegen MVP** — interpreter から native への第一歩。新規 `lib/codegen_c.ml` に `emit_program : Ast.program -> string` を実装、int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var のみ) / Var / Annot の subset を C 式に変換 (let は GCC/Clang statement expression `({ ... })` で 1 つの C 式に compile)。CLI に `-c FILE` / `-ce <expr>` flag を追加、stdout に C source を出力。`clang OUT.c -o BIN && ./BIN` で native 実行可能。関数 / 文字列 / record / variant / region / view 等は今は Codegen_error。テスト 7 件追加 (677 passing)、E2E manual で `clang` 経由動作確認 (`let a = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200)。
-- **example: examples/pipeline.mere** — region / view / effect (builtin Logger・Metrics + cap passing + using sugar) / with Drop の全機能を組合せた realistic example (~75 行)。簡易ビルドパイプライン: ユーザ session を `with session = open_session logger uid` で開閉、各タスクを `region R { ... }` で処理、region 内で `view Task[R]` を組み立てて size を計算。出力は session 開閉 log + タスクごとの [task] log / [METRIC] inc / record / user log + 最終合計。Mere の全機能が一貫した実用例で動くことを実証。
-- **Phase 3.1: `with` Drop semantics** — `with c = v in body` は v の型が Drop 型 (`drop type ...` 宣言済み) であることを要求 (Trivial 値は型エラー、`let` を使う)。eval 側でスコープ末に v の `close: unit -> unit` field を呼び出す (field 無ければ no-op)。複数 `with x, y in body` は y → x の LIFO 順で close 実行。examples/with_caps.mere を Drop 型ベースに書き直し。設計 doc 12_drop_and_with.md 案 (i) を実装。テスト 6 件追加 / 6 件再構成 (670 passing)。
-- **effect: builtin `Logger` / `Metrics` cap 型 + `mk_logger` / `mk_metrics` 構築 builtin** — cap 型を stdlib として provide。typer に `Logger { info, warn, error: str -> unit }` と `Metrics { inc: str -> unit, record: str -> int -> unit }` を register、eval に対応する V_record 構築関数を追加。ユーザが毎回 cap 型を再定義しなくて済む (オーバーライドは可)。examples/effects.mere を builtin 使用に書き直し。テスト 7 件追加 (668 passing)。
-- **effect: `using [cap]` 構文糖** — `fn x using [logger] -> body` を `fn logger -> fn x -> body` に desugar (caps が outer-most curried args)。cap-passing スタイルで頻発する partial application 反復 (Q-003/Q-006 解の主要パターン) を緩和。型注釈可、複数 cap 可、通常 params との組合せ可。設計 doc `10_effect_trial_findings.md` の補助設計を実装。テスト 7 件追加 (661 passing)。examples/effects.mere も sugar 形で書き直し。
-- **example: examples/effects.mere** — Capability passing パターンの実証例 (約 75 行)。`Logger` / `Metrics` cap 型を record として宣言、低階関数で直接使用 / バケツリレー / partial application で高階関数に渡すの 3 パターンを demo。設計 doc `05_effect_system.md` の「副作用 = ケイパビリティを値で渡す」が現状の Mere (HM + 関数引数 + record + curry) だけで動くことを実証 — エフェクトシステムのために新規構文を入れる必要なし。
-- **region Phase 2.6**: `Trivial[R]` 制約 — `drop type Name = ...` で Drop 型を宣言できるように。`&R v` / `R.alloc(v)` / view フィールドの構築時に inner 型を walk して、`drop_types` registry に登録された型を含めば「Trivial[R] violated」型エラー。function 型は Trivial 扱い (closure 値自体は Drop ではない)。設計 doc 12_drop_and_with.md の案 (i) を構文化。`with` 式 + Drop 実行は Phase 3 で。テスト 7 件追加 (654 passing)。
-- **region Phase 2.5**: `R.alloc(v)` syntactic sugar — `&R v` の method-call 風記法。parser が region_stack を保持し、`region NAME { ... }` の body 内では `NAME.alloc(EXPR)` を `Ref (NAME, EXPR)` に desugar。R がスコープ内 region でない場合は普通の field access として扱われるので、既存の `obj.alloc(...)` パターンは無影響。テスト 7 件追加 (647 passing)。
-- **region Phase 2.4**: view 値の type-level region tag + field access / record update の region 伝播 — view 構築で `TyCon (name, [TyRef (target_region, TyUnit)])` を返すようにして value の型に region を埋め込み、`Field_get` / `Record_update` で view 名 + 埋め込み region を読み取って `subst_region` で field 型を実 region に置換。view 値そのものも escape check の対象になる (`Cell[S]` を region S の外に持ち出せない)。pp_ty に `Name[R]` 表記の heuristic を追加。テスト 5 件追加 (640 passing)。Phase 2.3 の "field access は raw R を返す" 既知制約を解消。
+- **Phase 5 #12: LLVM IR codegen show general builtin** — LLVM
+  version of C codegen Phase 4.12. Specializes `show : 'a -> str`
+  per-call from arg type's `show_<ty_tag>`; generates dedicated
+  function for each type. Added `@asprintf(ptr, ptr, ...)` to
+  runtime_decls. `show_types` Hashtbl + `collect_show_types` walks
+  AST to find `App (Var "show", arg)`; `add_show_type` recursively
+  registers arg type + dependent types (tuple elem / record field /
+  variant payload), with Hashtbl guard so recursive variant `'a
+  list` etc. doesn't infinite-loop. `emit_show_fn` emits specialized
+  fn per type: int → `@asprintf("%d", x)`; bool → `select i1` for
+  `@.s_true` / `@.s_false`; str → `@asprintf("\"%s\"", x)`; unit →
+  const `@.s_unit`; tuple → call each element `show_T` →
+  `@asprintf("(%s, ..., %s)", ...)`; record (mono / poly) → each
+  field show + `@asprintf("Type { f = %s, ... }", ...)`; variant
+  (mono / poly / recursive) → tag dispatch (icmp eq + br + phi) →
+  each ctor: `@.s_ctor_<name>` direct if nullary; recursive payload
+  show + `@asprintf("Ctor %s", ...)` if payload. Format strings and
+  ctor name strings pre-registered at start of emit_program for what
+  is needed (`mint_show_global` / `mint_show_format` helpers). `App
+  (Var "show", arg)` dispatched to `call ptr @show_<ty_tag
+  arg.ty>(arg)`. Verified (clang native): `show 42` → "42"; `show
+  "hi"` → "\"hi\""; `show true` → "true"; `show (1, "hi")` → `(1,
+  "hi")`; `show (SS 42)` → "SS 42"; `show (Pt { x = 3, y = 4 })` →
+  `Pt { x = 3, y = 4 }`; `show (Cons (1, Cons (2, Cons (3, Nil))))`
+  → `Cons (1, Cons (2, Cons (3, Nil)))`. Added 9 tests (884
+  passing). `'a list` special-case `[1, 2, 3]` form (equivalent to
+  Phase 4.16) in future slice.
+
+- **Phase 5 #11: LLVM IR codegen complex patterns (P_int / P_str /
+  P_bool / P_unit / P_record / P_as / nested / or / guard)** — LLVM
+  version of C codegen Phase 4.14 + 4.15. Rewrote `compile_pat` as
+  fully recursive `(test_cond, bindings, var_types)` function: P_int
+  → `icmp eq i32`; P_bool → `icmp eq i1`; P_str → `@strcmp(ptr,
+  ptr)` + `icmp eq i32 result, 0`; P_unit → constant `1`; P_record
+  → declared field order `extractvalue` + sub-pattern recurse;
+  P_as → inner pattern + whole value bind; P_tuple → each element
+  `extractvalue` + recurse; P_constr → tag test + sub-pattern
+  recurse (payload via GEP+load if recursive variant, else
+  extractvalue). Multiple sub-tests chained via `and_cond` helper
+  with `and i1`. Or-patterns pre-flattened with `expand_or` (typer
+  guarantees both branches' bound names match, body duplicable).
+  Guard evaluated in arm's bindings scope; if true → body, if false
+  → next_label (= try next arm). Added `@strcmp` to runtime_decls.
+  Verified (clang native): `match 3 with | 0 -> 100 | 1 -> 200 | _
+  -> 300` → 300; `match "hello"` str match → 2; `match Cons (SS 5,
+  Nil)` nested ctor → 5; `match Pt { x=3, y=4 } with | Pt { x=a,
+  y=b }` → 7; `(a, b) as p` → 6 (`P_as`); `match LCgB with | LCgA
+  | LCgB -> 1 | LCgC -> 2` → 1 (or); `match 7 with | n when n < 5
+  -> 100 | n when n < 10 -> 200 | _ -> 300` → 200 (guard). Added 8
+  tests (875 passing).
+
+- **Phase 5 #10: LLVM IR codegen recursive variant + P_tuple sub-
+  pattern** — Switched variants with self-referential payload (`type
+  ilist = INil | ICons of int * ilist`, `'a list = Nil | Cons of 'a
+  * 'a list`) to heap-allocated node + ptr representation.
+  `recursive_variants` set + `variant_is_recursive` /
+  `mono_variant_is_recursive` helpers for judgment. Populated in 2
+  stages within emit_program: at decl registration (source-level) +
+  at mono instance collection (substituted). `emit_variant_typedef`
+  / `emit_mono_variant_typedef` emit `%V_node = type { i32, T }`
+  (on-heap node) if recursive; `llvm_ty_of` returns `ptr` if name in
+  recursive_variants, so value type is transparent ptr. `Constr`
+  recurse: `__lang_region_alloc` allocates node in default region;
+  `getelementptr` + `store i32 tag` + `getelementptr` + `store T
+  payload` write; ptr return. `Match` recurse: get tag from
+  scrutinee ptr via `getelementptr` + `load i32`; payload of each
+  arm similarly via `load`. In pattern compile, expand `P_tuple`
+  sub-pattern (`Cons (h, t)`) into chain of `extractvalue` of
+  payload tuple struct; bind each element to fresh register.
+  `pattern_var_types` helper adds concrete types of pattern bind
+  names to current_var_types (so polymorphic recursive calls don't
+  leave `'a list` as-is). Match scrutinee type fallback to
+  current_var_types if Var; same for direct-call App arg type.
+  Reordered typedef emission to `collect_mono_instances` + recursive
+  judgment → tuple/record/variant typedef emit (so recursive_variants
+  state affects tuple emit). Verified (clang native): `type ilist =
+  INil | ICons of int * ilist; sum (ICons (1, ICons (2, ICons (3,
+  INil))))` → 6; `type 'a list = Nil | Cons of 'a * 'a list; sum
+  [1,2,3,4,5]` → 15; `length ["a","b","c","d"]` → 4 (poly recursive
+  list). Added 5 tests (867 passing).
+
+- **Phase 5 #9: LLVM IR codegen monomorphization of polymorphic
+  variant / record** — C codegen Phase 4.11 + 4.13 implemented on
+  LLVM side in one slice. `polymorphic_variants` /
+  `polymorphic_records` Hashtbl defer declarations (walk
+  `Exhaustive.type_variants` + `Typer.records` at start of
+  emit_program; register only poly ones); recover poly variant param
+  names via constructor's `params`. `mono_variant_instances` /
+  `mono_record_instances` accumulate found instances;
+  `collect_mono_instances` walks AST + fn signature to find
+  `(name, args)`. `subst_params` / `subst_variants` substitute type
+  vars → concrete types; `mono_variant_name n args` /
+  `mono_record_name n args` produce specialized names (`opt_int`,
+  `Box_str` etc.). `emit_mono_variant_typedef` determines payload
+  type from substituted payload type via `variant_payload_ty_of`;
+  emits `%opt_int = type { i32, T }`. `emit_mono_record_typedef`
+  emits `%Box_int = type { ... }` with substituted field types.
+  `llvm_ty_of (TyCon (n, args))` maps to mono name if name in
+  `polymorphic_variants/records`. `Constr` emit: pull mono name from
+  `e.ty`; determine payload type with `variant_payload_ty_of`.
+  `Record_lit` / `Field_get` / `Record_update` similarly use
+  `mono_record_name` + substituted fields for poly records. `Match`
+  scrutinee type, if poly, uses mono name + substituted variants.
+  Verified (clang native): `type 'a LCgOpt = LCgN | LCgS of 'a;
+  match LCgS 42 with | LCgN -> 0 | LCgS n -> n` → 42; `type 'a Box
+  = { v: 'a }; let b = Box { v = 42 } in b.v` → 42; specialize both
+  types `let bi = Box { v = 42 } in let bs = Box { v = "hi" } in
+  str_len bs.v + bi.v` → 44 (both `%Box_int` and `%Box_str` emitted).
+  Added 7 tests (862 passing). Recursive poly variant (`'a list`)
+  requires recursive variant support → Phase 5.10.
+
+- **Phase 5 #8: LLVM IR codegen default region runtime + closure/
+  string alloc via region** — Implemented work equivalent to C
+  codegen Phase 4.17 + 4.20 + 4.21 on LLVM side in one slice.
+  `%__lang_region = type { ptr, ptr, i64 }` struct + `@__lang_default_region
+  = internal global %__lang_region zeroinitializer` file-scope
+  global + 3 helper functions `__lang_region_init/alloc/free`
+  defined inline in LLVM IR (`region_runtime_helpers`).
+  `__lang_region_alloc` uses 8-byte aligned bump pointer (`(n + 7) &
+  -8` implemented with `and i64 ..., -8`; advances top via gep i8,
+  store). Calls `__lang_region_init(@__lang_default_region,
+  4194304)` (4 MB) at `@main` entry; calls `__lang_region_free`
+  before final `ret i32 0`. Replaced `malloc` in `__lang_str_concat`
+  with `__lang_region_alloc(@__lang_default_region, ...)`; closure
+  env (anonymous Fun) `malloc(sizeof)` similarly replaced. Added
+  `@free` to runtime_decls; inserted region_runtime_helpers in emit
+  order right before str_concat_helper. Verified (clang native):
+  `(make_adder 5) 10` → 15; `compose inc dbl 5` → 11; concat like
+  `"hello, " ++ "world"`; only `malloc` call in generated IR is one
+  spot inside region init (one-shot free at program end, valgrind
+  clean). Added 8 tests (855 passing). LLVM backend memory model
+  reached the same level as C backend (Phase 4.21).
+
+- **Phase 5 #7 Phase B: LLVM IR codegen anonymous Fun + closure-
+  with-captures** — Handles internal `fn x -> ...` in expression
+  position. Computes free variables of AST with `free_vars` /
+  `pattern_vars` helpers (excluding bound names, preserving order);
+  filters to those registered in `current_var_types` (excluding top-
+  level / builtin). For each capture, gets concrete type from
+  `current_var_types`; generates `%anon_N_env = type { T1, T2, ...
+  }` env struct typedef; pushes `anon_N_fn` adapter to
+  `pending_closures` queue. At construction site: allocates env with
+  `malloc(sizeof(%anon_N_env))` (LLVM `getelementptr null` trick +
+  `ptrtoint` calculates size); writes each capture to env field via
+  `getelementptr %env, ptr %p, i32 0, i32 idx` + `store`; assembles
+  closure value with `insertvalue %closure undef, ptr %env, 0` +
+  `insertvalue ..., ptr @anon_N_fn, 1`. `emit_anon_adapter` invoked
+  by `emit_program` draining `pending_closures` (iterative loop also
+  processes new pending added during drain); in adapter body entry
+  block, pulls each capture from env_self with `getelementptr` +
+  `load` into fresh register, binds to env, then emits original Fun
+  body. Added `current_expected_ty : ty option ref`: lets parent
+  context type serve as fallback when AST's Fun.ty is polymorphic
+  (resolves cases where inner Fun's type stays `'a -> 'a` in
+  let-poly curried polymorphic HOFs like `fn f -> fn x -> f (f
+  x)`; emit_fn_def / emit_anon_adapter set return_ty at body start
+  / restore at end). Extended Let case to add value type to
+  current_var_types (so closure can capture variables of outer let).
+  Verified (clang native): `let make_adder = fn n -> fn x -> x + n
+  in (make_adder 5) 10` → 15 (capture); `let twice = fn f -> fn x
+  -> f (f x) in twice inc 5` → 7 (curried HOF + polymorphic); `let
+  apply = fn f -> fn x -> f x in apply (fn n -> n * 3) 7` → 21
+  (anon Fun passed as arg); `let compose = fn f -> fn g -> fn x ->
+  f (g x) in ((compose inc) dbl) 5` → 11 (3-level nested closure +
+  2 captures). Added 7 tests (847 passing). env currently leaks via
+  `@malloc` — default region-ization in future slice.
+
+- **Phase 5 #7 Phase A: LLVM IR codegen first-class top-level fn** —
+  Lowers `T1 -> T2` type as `%closure_T1_T2 = type { ptr, ptr }`
+  (env, fn pointer). `closure_struct_name` helper for closure type
+  name; `collect_arrow_types` walks AST + fn signatures to gather
+  all used arrow types; `emit_closure_typedef` generates typedef.
+  Auto-generates env-ignoring adapter `define T2 @<name>_closure_fn
+  (ptr %env_unused, T1 %x) { ret T2 @<name>(T1 %x); }` for each
+  top-level fn (`emit_closure_adapter`). At `emit_expr` `Var name`:
+  if no shadowing in env and registered in `toplevel_fn_names`,
+  inline-constructs closure value with `insertvalue %closure undef,
+  ptr null, 0` + `insertvalue ..., ptr @<name>_closure_fn, 1`. `App
+  f arg`: existing direct-call path preserved (for known top-level
+  fn); otherwise dispatches via `extractvalue %closure %c, 0/1` to
+  get env/fn, then `call T2 %fn_ptr(ptr %env, T1 %arg)` (no fn
+  pointer type cast needed via opaque pointer). Added
+  `current_var_types : (string * ty) list ref`: for polymorphic Var
+  in fn body (parameter staying as `'a -> int` after let-poly), can
+  pull concrete type from resolve_fn_types-derived (sets param's
+  concrete ty at start of `emit_fn_def`, save/restore). Verified
+  (clang native): `let inc = fn x -> x + 1 in let apply = fn f -> f
+  5 in apply inc` → 6; `let apply2 = fn f -> f (f 5) in apply2
+  inc` → 7. Added 7 tests (840 passing). Anonymous Fun (inner `fn
+  x -> ...`) and closure-with-captures (Phase B) in separate slice.
+
+- **Phase 5 #6: LLVM IR codegen variant + match (monomorphic, single
+  payload type)** — Lowers monomorphic variant to LLVM named struct:
+  if all ctors nullary, `%V = type { i32 }`; if payload exists, `%V
+  = type { i32, T }` (`variant_payload_ty` detects single payload
+  type shared by all payload-bearing ctors; Codegen_error if differ).
+  `variant_tags` Hashtbl holds constructor → int tag; set as side
+  effect of `emit_variant_typedef`. `collect_variant_names` walks
+  AST + fn signature + Constr's type_name to gather used variant
+  types (only `Typer.types` arity 0 ones). `Constr cname arg_opt`
+  → `%t0 = insertvalue %V undef, i32 tag, 0` → optional `%t1 =
+  insertvalue %V %t0, T arg, 1` chain constructs SSA struct value.
+  `Match` gets scrutinee's tag with `extractvalue %V %s, 0`; tests
+  each arm sequentially with `icmp eq i32 %tag, N` + `br i1`;
+  fallthrough is `@abort()` + `unreachable`; merges all arm results
+  with `phi <result_ty>` at end. Pattern is P_constr / P_var /
+  P_wild only; payload bind creates payload register with
+  `extractvalue %V %s, 1` and adds to bindings. Added @abort
+  declaration to runtime_decls. Verified (clang native): `type Color
+  = R | G | B; match G with | R -> 0 | G -> 1 | B -> 2` → 1; `type
+  Status = Ok | Err of str; match Err "boom" with | Ok -> 0 | Err m
+  -> str_len m` → 4; `type IntOpt = INone | ISome of int; let v =
+  ISome 42 in match v with | INone -> 0 | ISome n -> n` → 42. Added
+  9 tests (833 passing). Guard / polymorphic variant / recursive
+  variant / nested pattern / or-pattern continue to be Codegen_error.
+
+- **Phase 5 #5: LLVM IR codegen record (monomorphic)** — Lowers
+  monomorphic record (`type Pt = { x: int, y: int }`) to LLVM named
+  struct (`%Pt = type { i32, i32 }`). Added `TyCon (name, []) when
+  Hashtbl.mem Typer.records name -> "%" ^ name` to `llvm_ty_of`;
+  `record_fields` / `field_index` helpers pull declaration-order
+  fields from `Typer.records`. `Record_lit` emit constructed with
+  `insertvalue` chain in declaration order (even if source field
+  order differs from declared, pulls values with `List.assoc_opt`
+  and stacks in declaration order). `Field_get` is `extractvalue %R
+  %p, idx`; `Record_update` starts from base value and stacks each
+  update field via `insertvalue`. `collect_record_names` walks AST
+  + fn signature to gather all used record types (polymorphic
+  records excluded for now, separate slice). `emit_record_typedef`
+  generates `%Name = type { T1, T2, ... }`. Via `bin/main.ml`
+  `infer_program` helper, so Typer.records is already populated.
+  Added `llvm_with_decls` test helper (parallel to
+  `codegen_with_decls`). Verified (clang native): `type Pt = { x:
+  int, y: int }; let p = Pt { x = 3, y = 4 } in p.x + p.y` → 7;
+  Record_update `{ p | x = 100 }` x * y → 400; record-returning fn
+  `let mk = fn x -> Pair { a = x, b = str_len x } in print ((mk
+  "hello").a)` → "hello". Added 6 tests (824 passing). Polymorphic
+  record (`type 'a Box`) stays Codegen_error.
+
+- **Phase 5 #4: LLVM IR codegen tuple** — Lowers tuple to LLVM named
+  struct (`%tuple_int_str = type { i32, ptr }`). `ty_tag` /
+  `tuple_struct_name` helpers (same naming convention as codegen_c
+  generates symbols like `tuple_int_str`); `collect_tuple_shapes`
+  walks AST + fn signature to gather all used tuple types;
+  `emit_tuple_typedef` generates `%name = type { T1, T2, ... }`.
+  `Tuple` node emit constructs struct value in SSA register with
+  `insertvalue` chain (starts from `undef`, stacks each element via
+  `insertvalue %T %prev, Tn vn, idx`). `fst` / `snd` builtin
+  compiled to `extractvalue %tuple_X %p, 0/1` (struct name resolved
+  from arg's `.ty`). `llvm_ty_of (TyTuple ts)` returns
+  `%<tuple_struct_name>`, so tuple-arg / tuple-return function
+  signatures automatically take correct form (`define %tuple_int_int
+  @split(ptr %s)`, `define i32 @sum_pair(%tuple_int_int %p)`).
+  Nested tuple (`((1, 2), 3)` → `%tuple_tuple_int_int_int = type {
+  %tuple_int_int, i32 }`) auto-generated. Verified (clang native):
+  `let p = (1, 2) in fst p + snd p` → 3; `let p = ("hello", 42) in
+  print (fst p)` → "hello"; `let split = fn s -> (s, str_len s) in
+  print (fst (split "hello"))` → "hello"; nested tuple `((1,2), 3)`
+  sum → 6; tuple-arg fn `sum_pair (10, 20)` → 30. Added 8 tests
+  (818 passing).
+
+- **Phase 5 #3: LLVM IR codegen strings + print + ++ + str_len +
+  str-taking/returning functions** — Maps `TyStr` to LLVM `ptr`
+  (opaque pointer). Lifts `Str_lit s` as private constant global
+  `@.str_N = private constant [N x i8] c"...\00"`; generated via
+  `fresh_str_global` helper; escapes non-printable ASCII with `\HH`.
+  Uses global symbol directly as ptr for value (no GEP needed with
+  opaque pointer). Compiles `Bin (Concat, a, b)` to `call ptr
+  @__lang_str_concat(ptr %a, ptr %b)`; `__lang_str_concat` defined
+  inline in LLVM IR (combination of `malloc` + `strlen` + `memcpy`
+  + GEP + `store i8 0`). Compiles `print` builtin to `call i32
+  @puts(ptr %s)` (discards return value; Mere value is 0); `str_len`
+  to `call i64 @strlen(ptr %s)` + `trunc i64 ... to i32`. Added
+  `TyStr → ("ptr", "%s")` to `main_format_of`; generates `@.fmt_s =
+  c"%s\\0A\\00"` global. str-taking/returning functions auto-lowered
+  correctly (`define ptr @f(ptr %s)`). Runtime helpers (`declare ptr
+  @malloc(i64)` etc.) and `__lang_str_concat` body emitted in
+  emit_program in one go; `.ll` file is self-contained. Verified
+  (clang native): `print "Hello, LLVM!"` → "Hello, LLVM!"; `"hello,
+  " ++ "world!"` → "hello, world!"; `str_len "Hello, world!"` →
+  13; `let greet = fn name -> "Hello, " ++ name ++ "!" in print
+  (greet "world")` → "Hello, world!"; `let exclaim = fn s -> s ++
+  "!" in print (exclaim "wow")` → "wow!"; `let pick = fn n -> if n
+  > 0 then "positive" else "negative" in print (pick 5)` →
+  "positive". Added 10 tests (810 passing).
+
+- **Phase 5 #2: LLVM IR codegen function lifting + recursion** —
+  Lifts top-level `let f = fn x -> ...` and `let rec f = ... and g
+  = ...` as LLVM `define iXX @f(iYY %x) { ... }`. Implemented
+  `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` /
+  `resolve_fn_types` in `codegen_llvm.ml` in parallel, same shape
+  as C codegen (combined with LLVM-specific `llvm_ty_of`).
+  `emit_fn_def` emits each function as independent SSA scope
+  (`reg_counter` / `label_counter` reset per-function; `instrs`
+  save/restore). At `App (Var name, arg)`, if `name` is registered
+  in `toplevel_fn_names`, compiled to `%t = call iZZ @name(iYY
+  %arg)` (closure-as-value in future slice). LLVM IR allows forward
+  reference within same module, so forward declaration needed in
+  Phase 4 is unnecessary (mutual recursion works as-is). Verified
+  (clang native): `factorial 10` → 3628800; `fib 15` → 610;
+  `is_even 7` (mutual recursion) → 0. Added 6 tests (800 passing).
+
+- **Phase 5 #1: LLVM IR codegen MVP** — Started second backend that
+  compiles Mere to native binary. Implemented `emit_program :
+  ?main_ty:ty -> Ast.program -> string` in new
+  `lib/codegen_llvm.ml`; converts subset (int / bool / arith / cmp
+  / logic / Neg / If / Let (P_var) / Var / Annot) to LLVM textual
+  IR. Hand-written text generation (no dependency on opam's `llvm`
+  package; directly compile with `clang out.ll`). Name management
+  via SSA register counter (`%t0`, `%t1` ...) and basic block label
+  counter; If goes through `br i1` + label/phi; comparison via
+  `icmp slt/sgt/eq/...`; bool computed in `i1` and zext-extended to
+  `i32` at main end for output via `@printf` (`@.fmt_d =
+  c"%d\\0A\\00"`). Added `-ll <file>` / `-lle <expr>` flags to CLI;
+  shared infer_program helper for both C / LLVM backends. Verified
+  (clang native execution): `let a = 10 in let b = 20 in if a + b
+  > 25 then a * b else 0` → 200; `if 3 > 2 then 100 else 200` →
+  100; `let x = 5 in x * x + 1` → 26; `true && (false || true)`
+  → 1. Added 15 tests (794 passing). Functions / strings / record /
+  variant / closure / region etc. now Codegen_error (same scope as
+  Phase 4 MVP).
+
+- **Phase 4 #21: strings + recursive variant nodes also moved to
+  default region** — Unifies remaining 2 malloc sites under
+  `__lang_default_region`. Replaced `malloc(la + lb + 1)` in
+  `__lang_str_concat` runtime helper with `__lang_region_alloc
+  (&__lang_default_region, la + lb + 1)`; replaced
+  `malloc(sizeof(T_node))` in recursive variant Constr emit
+  (self-referential variant like `Cons (h, t)`) with
+  `__lang_region_alloc(&__lang_default_region, sizeof(T_node))`.
+  Reordered helper ordering in `emit_program` to
+  `region_runtime_helpers → str_concat_helper` so str_concat helper
+  can reference `__lang_default_region` symbol (ordering issue).
+  Now the only remaining malloc on C side is base buffer allocation
+  inside `__lang_region_init`; all user-visible alloc sites ride on
+  bump arena. Batch free with `__lang_region_free(&__lang_default_region)`
+  at `main` end; valgrind clean. Verified (clang native): `let
+  greet = fn name -> "Hello, " ++ name ++ "!" in print (greet
+  "world")` → "Hello, world!"; `sum [1, 2, 3, 4, 5]` → 15 (Cons of
+  recursive list all in region alloc). Added 2 tests + updated 1
+  (779 passing; renamed "Constr mallocs node" to "Constr uses
+  default region").
+
+- **Phase 4 #20: closure env moved to default region** — Added
+  program-lifetime arena `__lang_default_region` at file scope
+  (`static __lang_region __lang_default_region;`); calls
+  `__lang_region_init(&__lang_default_region, 1 << 22)` (4MB) at
+  start of `main`, `__lang_region_free` at end. Switched anonymous
+  closure env struct alloc from `malloc(sizeof(...))` to
+  `__lang_region_alloc(&__lang_default_region, sizeof(...))`.
+  Closures can outlive user's `region R { ... }` (carried out like
+  `make_adder 3 |> add3 4`), so don't coexist with user region;
+  needed to be in separate program-lifetime arena. Per-closure
+  malloc cost gone; batch-freed at `main` end; valgrind also clean.
+  Verified (clang native): `let make_adder = fn n -> fn x -> n + x
+  in let add3 = make_adder 3 in add3 4` → 7; `let compose = fn f
+  -> fn g -> fn x -> f (g x) in compose (fn n -> n + 1) (fn n -> n
+  * 2) 5` → 11 (nested closure with captures all in default
+  region). Remaining leaks: string concat (`++`) and recursive
+  variant node (`Cons`). Added 5 tests + `assert_no_contains`
+  helper (777 passing).
+
+- **Phase 4 #19: region-izing view construction** — Codegen places
+  `view V[R] of T { ... }` on region's bump allocator. View value
+  represented in C as `V*` (pointer type); at construction,
+  allocates in region via `__lang_region_alloc(&__region_R,
+  sizeof(V))`, copies content, returns pointer. `c_type_of (TyCon
+  (V, [TyRef R TyUnit])) -> V*`; `is_view_type` helper distinguishes
+  record / view; `Field_get` uses `->` for view value. View value's
+  lifetime matches region scope (combined with Phase 2.1 escape
+  check + Phase 4.17 region runtime) — **memory model's view
+  feature works fully at runtime level**. Verified (clang native):
+  `view Cell[R] of int { v: int }; region R { let c = Cell { v = 7
+  } in c.v }` → 7. Added 3 tests (772 passing; added Top_view
+  handling to codegen_with_decls helper).
+
+- **Phase 4 #18: `with` Drop execution codegen + typedef ordering
+  cleanup** — C codegen for `with c = v in body`: at scope end,
+  auto-calls c's `close` field via `c.close.fn(c.close.env, 0)`
+  (only when `close: unit -> unit` field exists in Drop type; skip
+  if absent. Multiple `with` are nested in AST, so naturally LIFO).
+  Side: reorganized typedef structure to "all forward decls →
+  closure typedefs → all struct bodies". Logic: for cases where
+  record has `closure_T1_T2` type like `close: unit -> unit` field
+  of Drop type, closure typedef needs record's full definition as
+  function-pointer return; but C can use forward-declared struct as
+  function pointer return type, so closure typedef can be emitted
+  if forward decls come first. Split all variant / record / tuple
+  typedefs into 2 stages of forward decl + body; reorder them in
+  emit_program. Verified (clang native): `drop type Conn = { id:
+  int, close: unit -> unit }; let mk = fn id -> Conn { id = id,
+  close = fn () -> print ("close " ++ show id) } in with c = mk 7
+  in c.id * 10` → "close 7\n70" (close called correctly at scope
+  end). Added 3 tests + updated 6 typedef snapshots to new format
+  (769 passing).
+
+- **Phase 4 #17: region runtime (bump allocator)** — Codegen
+  `region R { body }` as a real bump allocator. Added new C
+  runtime helper `__lang_region` (`{ char* base; char* top; size_t
+  cap; }`) + `__lang_region_init/alloc/free` injected into
+  generated source. `emit_expr Region_block` outputs statement
+  expression `({ __lang_region __region_R; __lang_region_init
+  (&__region_R, 1<<20); __auto_type __r_result = body;
+  __lang_region_free(&__region_R); __r_result; })`. `emit_expr Ref
+  (R, v)` emits `({ __auto_type __ref_v = v; typeof(__ref_v)* __p
+  = __lang_region_alloc(&__region_R, sizeof __ref_v); *__p =
+  __ref_v; __p; })` (bump alloc + copy + return pointer in region).
+  `c_type_of (TyRef _ inner)` to `inner*`. Combined with escape
+  check (typer), memory is batch-freed on region scope exit, but
+  type signature guarantees `&R T` doesn't leak (Phase 2.1 escape
+  check) for safety. **Milestone where memory model went from "type
+  level label" to "real bump allocator"**. Verified (clang
+  native): `region R { let x = &R 5 in 42 }` → 42; `region R { let
+  pair = &R (1, 2) in 99 }` → 99; `type Pt = { x: int }; region R
+  { let p = &R Pt { x = 42 } in 100 }` → 100 (record also placeable
+  in region). Added 5 tests (766 passing).
+
+- **Phase 4 #16: `'a list` show in `[a, b, c]` form + variant
+  payload tuple shape collection** — Special-cases `TyCon ("list",
+  [elem_ty])` in `emit_show_fn`; generates specialized function
+  that strings the whole list with a while loop (`"[]"` if Nil;
+  `[1, 2, 3]` format if Cons; matches Mere interpreter output).
+  Side: extended tuple shape collection to include mono variant
+  payload (`tuple_int_list_int` etc. referenced even in cases like
+  `show ([] : int list)` that doesn't include Cons construction;
+  fixed build failure where necessary struct typedef wasn't
+  emitted). Verified (clang native): `show [1, 2, 3]` → `[1, 2,
+  3]`; `show ["hello", "world"]` → `["hello", "world"]`; `show
+  ([] : int list)` → `[]`. Added 2 tests (761 passing).
+
+- **Phase 4 #15: C codegen or-pattern + match guard** — Flattens
+  `| pat1 | pat2 -> body` into multiple arms via pre-pass
+  `expand_or` of Match emit (constraint that both branches bind
+  same name set guaranteed by typer). Body is duplicated to both
+  but safe as pure expression. `when ...` guard evaluated in arm's
+  bindings scope; falls through if false (`test ? ({ bindings;
+  guard ? body : next; }) : next`). Verified (clang native): `type
+  Col = R | G | B; match G with | R | G -> 1 | B -> 2` → 1; `match
+  7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300`
+  → 200. Nested or-pattern (constructor etc. inside or) continues
+  to be Codegen_error. Added 4 tests + updated 1 (759 passing;
+  replaced "guard rejected" with "guard accepted").
+
+- **Phase 4 #14: C codegen complex patterns** — Rewrote Match
+  pattern compilation as fully recursive `compile_pattern`.
+  Decomposes each pattern into (test_expr, bindings_str); supports
+  nesting constructor / tuple / record inside constructor;
+  implements `P_int` / `P_str` (strcmp == 0) / `P_bool` / `P_unit`
+  / `P_record` (named field destructure) / `P_as` (whole-value
+  bind). `is_ptr_ty` / `payload_ty_for_ctor` / `field_ty` helpers
+  resolve sub-value types and recursively decompose patterns.
+  Verified (clang native): `match 3 with | 0 -> 100 | 1 -> 200 | _
+  -> 300` → 300; `match "hello" with | "hi" -> 1 | "hello" -> 2 |
+  _ -> 3` → 2; `match Cons (Some 5, Nil) with | Nil -> 0 | Cons
+  (None, _) -> 1 | Cons (Some n, _) -> n` → 5 (nested poly
+  variant); `match Point { x = 3, y = 4 } with | Point { x = a, y
+  = b } -> a + b` → 7. Or-pattern and guard continue to be
+  Codegen_error. Added 6 tests + updated 4 substrings to new format
+  (755 passing).
+
+- **Phase 4 #13: C codegen polymorphic record monomorphization** —
+  Specializes `type 'a Box = { v: 'a }` etc. polymorphic records
+  per type (`Box_int`, `Box_str` etc.) using same pattern as
+  variant's Phase 4.11. `polymorphic_records` Hashtbl defers
+  declarations (emit_record_typedef defers if r_params != []);
+  extends `collect_mono_variant_instances` to also cover records;
+  `emit_mono_record_typedef` concretizes field types with
+  subst_params and generates `typedef struct { int v; } Box_int;`.
+  `Record_lit` emit pulls mono name from Record_lit's `.ty` and
+  emits compound literal (`((Box_int){.v = 42})`). Field_get and
+  Record_update naturally work via `__auto_type`. Verified (clang
+  native): `type 'a Box = { v: 'a }; let b = Box { v = 42 } in
+  b.v` → 42; `let bi = Box { v = 42 } in let bs = Box { v = "hi"
+  } in show (bi.v, bs.v)` → `(42, "hi")` (specializes both Box_int
+  and Box_str). Added 3 tests + updated 1 (749 passing; replaced
+  "polymorphic record reject" with "specialize verification").
+
+- **Phase 4 #12: C codegen `show` general builtin** — Auto-generates
+  per-type specialized `show_T` C functions for `show : 'a -> str`
+  by collecting per-call arg types from AST. `collect_show_types`
+  finds `App (Var "show", arg)`; `add_with_deps` recursively
+  registers types arg type depends on (tuple elem / record field /
+  variant payload) (with cycle guard; doesn't infinite-loop on
+  self-referential payload of recursive variant). `emit_show_fn`
+  generates specialized fn per type — int/bool/str/unit trivial;
+  tuple/record composes element show; variant (mono + polymorphic
+  instantiation + recursive) is tag dispatch + payload show.
+  `emit_expr App`'s `Var "show"` dispatches to `show_<tag>(arg)`
+  call resolved by arg type's `ty_tag`. Verified (clang native):
+  `show 42` → "42"; `show (1, "hello")` → `(1, "hello")`; `show
+  (Some 42)` → "Some 42"; `show [1, 2, 3]` → "Cons (1, Cons (2,
+  Cons (3, Nil)))". Based on `asprintf` (malloc leak but consistent
+  with other codegen). Added 7 tests (747 passing).
+
+- **Phase 4 #11: C codegen polymorphic variant monomorphization**
+  — Implemented monomorphization that collects concrete
+  instantiations from AST and fn signatures for `type 'a opt = None
+  | Some of 'a` or `type 'a list = Nil | Cons of 'a * 'a list`
+  etc. polymorphic variants and emits specialized struct
+  (`opt_int`, `list_int` etc.) per instance.
+  `polymorphic_variants` Hashtbl defers declarations;
+  `mono_variant_instances` accumulates found instances;
+  `subst_params` / `subst_variants` for param→arg substitution;
+  `mono_variant_is_recursive` for recursion judgment on concrete
+  types. Extended `c_type_of` and `ty_tag` to handle `TyCon (n,
+  args)` with args (`int list` → `list_int` etc.). `Constr` emit
+  pulls mono name from Constr's `.ty`; Match's `is_ptr` judgment
+  also recursion-checks with mono name. Verified (clang native):
+  `type 'a opt = None | Some of 'a; let v = Some 42 in match v with
+  | None -> 0 | Some n -> n` → 42; `type 'a list = Nil | Cons of
+  'a * 'a list; let rec sum = fn xs -> match xs with | Nil -> 0 |
+  Cons (h, t) -> h + sum t in sum [1, 2, 3]` → 6 (list literal +
+  recursive sum; `[1, 2, 3]` is parser-desugared to `Cons (1, Cons
+  (2, Cons (3, Nil)))`). Added 4 tests (740 passing).
+
+- **Phase 4 #10: C codegen recursive variant + P_tuple pattern** —
+  Switched variants with self-referential payload (e.g. `type ilist
+  = INil | ICons of int * ilist`) to heap-allocated node + ptr
+  typedef (`typedef struct ilist_node ilist_node; typedef
+  ilist_node* ilist; struct ilist_node { ... };`).
+  `variant_is_recursive` detects self-reference in payload;
+  registers in `recursive_variants` Hashtbl. Constr emit
+  malloc-returns ptr with `({ ilist_node* __p = malloc(...);
+  __p->tag = N; __p->payload.CTOR = ...; __p; })`. Match emit
+  switches `.` vs `->` based on scrutinee's type. Expands P_tuple
+  sub-pattern (`CgCons (h, t)`) into `.f0 / .f1` binding sequence.
+  Circular typedef dependency resolved by emitting forward decl +
+  ptr typedef first, then struct body after tuple/record typedefs.
+  Verified (clang native): `type ilist = INil | ICons of int *
+  ilist; let rec sum = fn xs -> match xs with | INil -> 0 | ICons
+  (h, t) -> h + sum t in sum (ICons (1, ICons (2, ICons (3,
+  INil))))` → 6 (linked list sum). Added 5 tests (736 passing).
+
+- **Phase 4 #9 Phase B: C codegen anonymous Fun + closure-with-
+  captures** — Lifts anonymous Fun in expression position as
+  heap-allocated env struct + adapter + closure construction.
+  Capture vars rewritten to `__env_self->name` via
+  `current_env_subst` map; capture types resolved by traversing
+  scope via `current_var_types` (workaround for polymorphic
+  residual problem after let-poly). Closure typedefs emitted in
+  inner→outer order (post-order walk) to avoid circular references.
+  `current_expected_ty` passes context type to Fun emit;
+  estimates inner Fun's type from outer fn's return_ty. Verified
+  (clang native): `let apply = fn f -> fn x -> f x in let inc = fn
+  n -> n + 1 in apply inc 5` → 6 (curried HOF); `let twice = fn f
+  -> fn x -> f (f x) in twice inc 5` → 7; `let make_adder = fn n
+  -> fn x -> x + n in (make_adder 5) 10` → 15 (closure with
+  capture). Added 4 tests + updated 1 (731 passing).
+
+- **Phase 4 #9 (Phase A): C codegen first-class functions** —
+  Represents `T1 -> T2` type function value as C struct
+  `closure_T1_T2 = { void* env; T2 (*fn)(void*, T1); }`. Auto-
+  generates env-ignoring adapter (`f_closure_fn`) + value const
+  (`f_as_value`) for each top-level fn. `c_type_of (TyArrow ...)`
+  maps to closure struct name; `ty_tag` also handles nesting.
+  `emit_expr Var`: at value position if name is top-level fn, emit
+  `f_as_value` (Codegen_error if using inner-lifted in value
+  position). `emit_expr App`: known top-level Var call continues
+  on direct call fast path; otherwise dispatches via closure
+  `({ __auto_type __c = e; __c.fn(__c.env, arg); })`.
+  `collect_arrow_types` walks AST + fn signatures to gather arrow
+  types and auto-generates closure typedefs. Verified (clang
+  native): `let inc = fn x -> x + 1 in let apply = fn f -> f 5 in
+  apply inc` → 6 (top-level fn passed as value to HOF works).
+  Phase B (inner / anonymous fn value-ization) in separate slice.
+  Added 6 tests (727 passing).
+
+- **Phase 4 #8: C codegen closure conversion (defunctionalization)**
+  — Added pre-pass that lifts `let h = fn x -> body in ...` inside
+  function body to top-level. free_vars helper computes free
+  variables (excluding builtin / top-level fn names of typer's
+  initial_env); prepends captured variables to C function's param
+  list (defunctionalization). `emit_expr` Let sees
+  `Hashtbl.mem inner_lifts name` and skips lifted bindings; App
+  passes capture args at call site. Captures are int/bool/str/unit
+  only (tuple/record/function value capture is Codegen_error).
+  Supports multi-level nesting (h captures x and n from 2 levels).
+  Side: changed `resolve_fn_types` to pull monomorphic types at
+  call site via `find_concrete_arrow` for Fun.ty issue after
+  let-poly. Verified: `let outer = fn x -> let h = fn y -> x + y
+  in h 10 in outer 5` → 15; nested 2 levels → 6. Added 4 tests +
+  updated 1 (721 passing; replaced old "closure reject" test with
+  "lift result verification").
+
+- **Phase 4 #7: C codegen variant + match** — Compiles monomorphic
+  variant types (`type Status = Ok | Err of str`) to tagged union
+  (`typedef struct { int tag; union { const char* Err; } payload;
+  } Status;`). `Constr` to compound literal (`((Status){.tag = 1,
+  .payload.Err = "boom"})`). `Match` to ternary chain in statement
+  expression (`__scrut.tag == N ? ({ binding; body; }) : ...` +
+  fallthrough `abort()`). Pattern subset: `P_constr` (nullary or
+  `P_var` / `P_wild` sub); `P_var`; `P_wild`. Guard / polymorphic
+  variant / nested pattern are Codegen_error. Verified (clang
+  native): `type Color = R | G | B; match G with | R -> 0 | G ->
+  1 | B -> 2` → 1; `type Status = Ok | Err of str; match Err
+  "boom" with | Ok -> 0 | Err msg -> str_len msg` → 4. Added 9
+  tests (715 passing).
+
+- **Phase 4 #6: C codegen record support** — Compiles `type Point
+  = { x: int, y: int }` to `typedef struct { int x; int y; } Point;`.
+  Implements Record_lit / Field_get / Record_update (Record_update
+  uses `({ __auto_type __rupd = base; __rupd.f = v; __rupd; })`
+  statement expression pattern). `collect_record_names` walks AST
+  + fn signature to gather used record types and auto-generate
+  typedefs. Extended `compile_to_c` to include top-level decl
+  processing (same as Pipeline.type_of, skips eval; only
+  record/variant/view/drop registration). Verified (clang native):
+  `let p = Point { x = 3, y = 4 } in p.x + p.y` → 7; record update
+  → 102; record-returning fn → 15. Polymorphic record (`type 'a
+  Box = { v: 'a }`) continues to be Codegen_error. Added 7 tests
+  (706 passing).
+
+- **Phase 4 #5: C codegen tuple support + AST type annotation
+  foundation** — As foundation, added `mutable ty : ty option` to
+  `Ast.expr`; `Typer.infer` now records inference results on each
+  node. This lets codegen directly reference per-node types.
+  Compiles `Tuple` to C struct (`typedef struct { ... }
+  tuple_int_int;`) + C99 compound literal `((tuple_int_int){.f0 =
+  1, .f1 = 2})`. Compiles `fst` / `snd` builtin to `.f0` / `.f1`
+  field access. Supports arbitrary element types (int/bool/str +
+  nested tuple); auto-generates struct per shape
+  (`collect_tuple_shapes` walks entire AST + fn signature).
+  Verified (clang native): `let p = (1, 2) in fst p + snd p` → 3;
+  `let p = ("hello", 42) in print (fst p)` → "hello"; `let split
+  = fn s -> (s, str_len s) in print (fst (split "hello"))` →
+  "hello". Added 6 tests (699 passing).
+
+- **Phase 4 #4: C codegen: str-taking / returning functions** —
+  Allows lifted function param / return to also use str (const
+  char*). Added `param_ty` / `return_ty` to `fn_decl`;
+  `lift_fn_skels` extracts skeletons → `resolve_fn_types` flows
+  all lifted fns to typer as one let-rec group for type inference
+  (handles self / mutual recursion) → `c_type_of` maps Ast.ty to
+  C type (int/bool → `int`, str → `const char*`, unit → `int`).
+  Compiles `str_len` builtin to C's `strlen` (App special case).
+  Verified (clang native): `let greet = fn n -> if n > 0 then
+  "pos" else "neg" in print (greet 5)` → "positive"; `let exclaim
+  = fn s -> s ++ "!" in print (exclaim "hello")` → "hello!";
+  `str_len "hello, world!"` → 13. Added 5 tests (693 passing).
+
+- **Phase 4 #3: C codegen string support** — Compiles `Str_lit`
+  to C string literal; `++` via runtime helper `__lang_str_concat`
+  (malloc-based); `print` builtin to `puts` (statement expression
+  returning int 0). Switched `let` to GNU/Clang extension
+  `__auto_type` so same emit works for both int/str values. Made
+  `emit_program` type-aware (`~main_ty`); selects printf's format
+  from main's type (int/bool → `%d`, str → `%s`, unit → printf
+  skip). Verified: `print "hello, world!"` → hello, world!;
+  `"hello" ++ " " ++ "world"` → hello world (all clang native).
+  Malloc leaks (region/GC integration in future slice). Added 6
+  tests / restructured existing codegen tests as fragment
+  inspection (688 passing).
+
+- **Phase 4 #2: C codegen function lifting** — Lifts top-level
+  `let f = fn x -> ...` and `let rec f = fn x -> ... and g = fn
+  y -> ...` as C function (with forward declaration). Compiles
+  `App (Var name, arg)` form direct calls to C `name(arg)`; both
+  self-recursion and mutual recursion work (factorial 10 =
+  3628800, fibonacci 15 = 610, is_even 7 = 0 confirmed via clang
+  native). Closure (`fn ...` inside function body) continues to be
+  Codegen_error. Added 5 tests (681 passing).
+
+- **Phase 4 #1: C codegen MVP** — First step from interpreter to
+  native. Implemented `emit_program : Ast.program -> string` in
+  new `lib/codegen_c.ml`; converts subset of int / bool / arith /
+  cmp / logic / Neg / If / Let (P_var only) / Var / Annot to C
+  expression (let compiled to single C expression via GCC/Clang
+  statement expression `({ ... })`). Added `-c FILE` / `-ce
+  <expr>` flags to CLI; outputs C source to stdout. `clang OUT.c
+  -o BIN && ./BIN` for native execution. Functions / strings /
+  record / variant / region / view etc. now Codegen_error. Added
+  7 tests (677 passing); manual E2E verified via `clang` (`let a
+  = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200).
+
+- **example: examples/pipeline.mere** — Realistic example
+  (~75 lines) combining region / view / effect (builtin Logger /
+  Metrics + cap passing + using sugar) / with Drop. Simple build
+  pipeline: open/close user session with `with session =
+  open_session logger uid`; process each task with `region R {
+  ... }`; inside region build `view Task[R]` to calculate size.
+  Output is session open/close log + per-task [task] log +
+  [METRIC] inc / record + user log + final total. Demonstrates
+  Mere's full feature set working consistently in a practical
+  example.
+
+- **Phase 3.1: `with` Drop semantics** — `with c = v in body`
+  requires v's type to be a Drop type (declared `drop type ...`);
+  Trivial value is type error (use `let`). On eval side, calls v's
+  `close: unit -> unit` field at scope end (no-op if absent).
+  Multiple `with x, y in body` close in LIFO order y → x. Rewrote
+  examples/with_caps.mere based on Drop type. Implemented case (i)
+  of design doc 12_drop_and_with.md. Added 6 tests / restructured
+  6 (670 passing).
+
+- **effect: builtin `Logger` / `Metrics` cap types + `mk_logger`
+  / `mk_metrics` constructor builtins** — Provides cap types as
+  stdlib. Registered `Logger { info, warn, error: str -> unit }`
+  and `Metrics { inc: str -> unit, record: str -> int -> unit }`
+  in typer; added corresponding V_record constructor functions to
+  eval. Users don't need to redefine cap types each time
+  (overrides allowed). Rewrote examples/effects.mere with builtin
+  usage. Added 7 tests (668 passing).
+
+- **effect: `using [cap]` syntax sugar** — Desugars `fn x using
+  [logger] -> body` to `fn logger -> fn x -> body` (caps are
+  outer-most curried args). Eases partial application iteration
+  frequent in cap-passing style (main pattern of Q-003/Q-006
+  solution). Type annotations allowed; multiple caps allowed;
+  combination with regular params allowed. Implements auxiliary
+  design of design doc `10_effect_trial_findings.md`. Added 7
+  tests (661 passing). Rewrote examples/effects.mere in sugar
+  form too.
+
+- **example: examples/effects.mere** — Demonstration of
+  Capability passing pattern (about 75 lines). Declares `Logger`
+  / `Metrics` cap types as records; demos 3 patterns: direct use
+  in low-order function / bucket-brigade / partial application
+  passing to high-order function. Demonstrates that design doc
+  `05_effect_system.md`'s "side effects = passing capability as
+  values" works with current Mere (HM + function args + record
+  + curry) alone — no need for new syntax for effect system.
+
+- **region Phase 2.6**: `Trivial[R]` constraint — Allows declaring
+  Drop type with `drop type Name = ...`. At `&R v` / `R.alloc(v)`
+  / view field construction, walks inner type; if it includes a
+  type registered in `drop_types` registry, type error "Trivial[R]
+  violated". Function type is Trivial (closure value itself is not
+  Drop). Syntactified case (i) of design doc 12_drop_and_with.md.
+  `with` expression + Drop execution in Phase 3. Added 7 tests
+  (654 passing).
+
+- **region Phase 2.5**: `R.alloc(v)` syntactic sugar — Method-call
+  style notation for `&R v`. Parser holds region_stack; inside
+  `region NAME { ... }` body, desugars `NAME.alloc(EXPR)` to `Ref
+  (NAME, EXPR)`. If R is not an in-scope region, treats as
+  regular field access; existing `obj.alloc(...)` patterns
+  unaffected. Added 7 tests (647 passing).
+
+- **region Phase 2.4**: type-level region tag for view values +
+  region propagation for field access / record update — View
+  construction returns `TyCon (name, [TyRef (target_region,
+  TyUnit)])` to embed region in value type; `Field_get` /
+  `Record_update` reads view name + embedded region and uses
+  `subst_region` to substitute field type with actual region.
+  View value itself becomes target of escape check (`Cell[S]`
+  can't be carried out of region S). Added `Name[R]` notation
+  heuristic to pp_ty. Added 5 tests (640 passing). Resolves
+  known limitation "field access returns raw R" from Phase 2.3.
 
 ## 2026-06-16
 
-- **region Phase 2.3**: view 構築の region 強制 + region パラメータ substitution — view を構築できるのは `region { ... }` block 内のみ。構築時に view 宣言の region パラメータ `R` が active region 名に置換され、フィールドに `&R T` がある場合、別名 region でも自動的にタグが揃う。typer に views Hashtbl と active_regions stack を追加、`Region_block` で push/pop、`Record_lit` で view dispatch + `subst_region`。memory-model.md の §5 「view 型」セクションと連携。
-- **region Phase 2.2**: `view V[R] of T { fields };` 宣言 — Q-009 で確定した view 型を構文として導入。`view Node[R] of int { value: int, next: int };` のように region パラメータ `[R]` と (optional な) 内部型 `of T` を取り、`{ field: ty, ... }` でフィールドを宣言。Phase 2.2 では「region 付き record」として扱い (region は記録のみ、強制なし)、`Node { value = 1, next = 0 }` 構築と `n.value` アクセスが動く。意味論の厳格化 (region 内構築のみ、フィールド `&R T` 必須化) は将来 Phase で。設計 doc: `14_view_types.md` の 3 公理 (immutable / region-scoped / structural identity) のうち最初の 2 個を構文で表現する段階。
-- **region Phase 2.1**: `&R v` 値式 + escape check — `&R 5` で値を region tag 付きの参照型に。`region R { body }` の出口で body の型に R が漏れていないかチェックし、漏れていればコンパイル時エラー。これで region は「型システム上のラベル」から「実際の安全性保証」に格上げ。
-- **region / `&R T` Phase 1** — メモリモデル本丸への第一歩。`region R { body }` 式が R を region 名としてスコープに導入、`&R T` を参照型として AST/typer/eval に追加。Phase 1 は **構文** のみ — escape check や Trivial 制約、view 型、`r.alloc(v)` semantics は Phase 2 以降。設計 doc: 11_region_vs_arena.md / 14_view_types.md に対応。
-- **網羅性検査 Phase 1** (Exhaustive モジュール) — bool と variant types の網羅性を warning として検出。`match Some x with | Some n -> ...` で「missing None」を stderr に出力、評価は継続。guarded arm は保守的に「カバーしてない」扱い、as-pattern と or-pattern は透過。lib/exhaustive.ml は Typer に依存しない逆方向 (Typer が register_variants を呼んで populate)。
-- **数学 builtin 8 個** (`pi`/`e` 定数 + `sqrt`/`f_abs`/`f_neg`/`floor`/`ceil`/`round`) — float 算術が一通り揃った。
-- **`int_max`/`int_min` 定数 builtin** — Mere 初の non-function builtin。
-- **`time : unit -> float` + `exit : int -> 'a`** — Unix epoch とプロセス終了。
-- **float 比較 4** (`f_lt`/`f_le`/`f_gt`/`f_ge`)。
-- **CSV パーサ example** (~130 行、RFC 4180 縮小版)。
-- **mini_calc.mere 拡張**: let バインディング + 変数 + env-based eval、shadowing 動作。
-- **list_lib.mere** 追加: Mere 自身で書く list ユーティリティ 12 関数 (map/filter/fold_left/fold_right/length/rev/take/drop/range/replicate/for_all/any)。
-- **float 型導入** — `TyFloat` プリミティブ + `Float_lit` (`1.5` リテラル) + V_float、変換 4 (`float_of_int` / `int_of_float` / `str_of_float` / `float_of_str`) + 算術 4 (`f_add` / `f_sub` / `f_mul` / `f_div`)。int と float の暗黙変換なし。既知制約「float なし」を解消。
-- **file I/O** — `read_file : str -> str` / `write_file : str -> str -> unit`。CLI ツールが書けるように。`examples/word_count.mere` 追加。
-- **`str_unescape` builtin** — `\n` `\t` `\r` `\\` `\"` `\/` を decode。JSON parser で escape 入り文字列対応。
-- **文字リテラル `'X'`** — lexer のみ、長さ 1 の str に。tyvar `'a` と曖昧解消 (closing quote の有無)、`match c with | 'n' -> ...` でディスパッチ可。
-- **list display 改善** — `to_string` で Cons/Nil chain を `[a, b, c]` 表示。JSON parser 出力が劇的に読みやすく。
-- **ドキュメント整備** — README 刷新 + `docs/{tutorial, language-reference, stdlib-reference, patterns}.md` を新設 (1100+ 行)。
-- **`divmod`** — Mere 初の tuple 戻り builtin (`int → int → (int * int)`)。
-- **`square` / `cube`** — int → int の 2 乗 / 3 乗。
-- **`sum_range`** — Gauss 公式で O(1) 総和。
-- **`incr` / `decr`** — int → int の +1 / -1。
-- **`iter_n`** — higher-order 副作用ループ。
-- **多相 `const` / `flip`** — Mere 初の 3-quantified、higher-order 多相 builtin。`apply_value_ref` の forward-ref で実装。
-- **多相 `id` / `swap` / `pair`** — tuple 操作の標準セット完成。
-- **多相 `fst` / `snd`** — Mere 初の 2-quantified scheme builtin。
-- **`try_or`** — Mere 初の error-handling builtin。
-- **`fail` / `show`** — Mere 初の多相 builtin (scheme.quantified)。
-- **as-pattern / or-pattern** — `(a, b) as p`、`| 1 | 2 | 3 -> ...` (binding names/型一致を typer 強制)。
-- **構造的等価性** — `==` / `!=` がタプル / レコード / コンストラクタを再帰比較。
-- **型エイリアス `type Name = T;`** — parse-time substitution、variant/record/alias を `|`/`of` で disambiguate。
-- **関数合成 `<<` / `>>`** — 右結合、`|>` より高優先。
-- **複数型パラメータ `('a, 'b) result`** — 既知制約「型パラメータ 1 個まで」を解消。
-- **top-level let pattern** — `let _ = ...;`、`let (a, b) = ...;` 等が top-level でも、既知制約解消。
-- **if without else** — `if cond then body` (body unit 型)。
-- **マッチガード `| pat when expr -> body`** — 既知制約「ガードなし」を解消。
-- **ブロック式 `{ e1; e2; eN }`** — Let(P_wild) chain への parser 糖。
-- **リストパターン `[a, b, ...t]`** — リテラルと対称、parser 糖。
-- **レコード更新 `{ p | x = 10 }`** — immutable update。
-- **レコード型 `type Point = { x: int, y: int }`** — nominal records、多相、partial pattern。
-- **相互再帰 `let rec ... and ...`** — 既知制約「相互再帰なし」を解消。
-- **リスト リテラル `[1, 2, 3]`** — Cons/Nil chain への parser 糖。
-- **パイプ `|>` / シグネチャエイリアス** — ergonomic 改善。
-- **多引数型付き fn** — `fn (x: int, y: str) -> body` を curry に desugar。
-- **stdlib 大量追加** — print_int / str_of_int / int_of_str / str_len / not / min / max / abs / pow / gcd / lcm / clamp / sign / even / odd / chr / ord / to_upper / to_lower / str_trim / str_rev / str_contains / str_count / str_replace / str_starts_with / str_ends_with / str_repeat / substring / char_at / is_digit / is_alpha / is_space / read_line / print_no_nl / print_err / assert / bool_of_str / str_compare 等多数。
+- **region Phase 2.3**: enforces region of view construction +
+  region parameter substitution — View can be constructed only
+  inside `region { ... }` block. At construction, view
+  declaration's region parameter `R` is substituted with active
+  region name; if field has `&R T`, tag aligns automatically even
+  with different region name. Added views Hashtbl and
+  active_regions stack to typer; push/pop at `Region_block`; view
+  dispatch + `subst_region` at `Record_lit`. Ties in with §5
+  "view type" section of memory-model.md.
+
+- **region Phase 2.2**: `view V[R] of T { fields };` declaration —
+  Introduced view type fixed in Q-009 as syntax. Like `view
+  Node[R] of int { value: int, next: int };`, takes region
+  parameter `[R]` and (optional) internal type `of T`, declares
+  fields with `{ field: ty, ... }`. In Phase 2.2 treated as
+  "region-tagged record" (region is only recorded, not enforced);
+  `Node { value = 1, next = 0 }` construction and `n.value` access
+  work. Strict semantics (construction only inside region;
+  mandatory `&R T` fields) in future Phase. Design doc:
+  `14_view_types.md`'s 3 axioms (immutable / region-scoped /
+  structural identity) at stage of syntactifying first 2.
+
+- **region Phase 2.1**: `&R v` value expression + escape check —
+  `&R 5` turns value into region-tagged reference type. At exit
+  of `region R { body }`, checks if body's type leaks R; compile-
+  time error if leaked. Region promoted from "type-system label"
+  to "actual safety guarantee".
+
+- **region / `&R T` Phase 1** — First step into memory model.
+  `region R { body }` expression introduces R as region name into
+  scope; added `&R T` as reference type to AST/typer/eval. Phase
+  1 is **syntax only** — escape check, Trivial constraint, view
+  type, `r.alloc(v)` semantics from Phase 2 onward. Design doc:
+  corresponds to 11_region_vs_arena.md / 14_view_types.md.
+
+- **Exhaustiveness Phase 1** (Exhaustive module) — Detects bool
+  and variant type exhaustiveness as warnings. `match Some x with
+  | Some n -> ...` outputs "missing None" to stderr but evaluation
+  continues. Guarded arm conservatively "not covered"; as-pattern
+  and or-pattern transparent. lib/exhaustive.ml doesn't depend on
+  Typer (Typer calls register_variants to populate).
+
+- **Math builtins 8** (`pi`/`e` constants + `sqrt`/`f_abs`/`f_neg`/
+  `floor`/`ceil`/`round`) — Float arithmetic basics complete.
+
+- **`int_max`/`int_min` constant builtins** — Mere's first
+  non-function builtins.
+
+- **`time : unit -> float` + `exit : int -> 'a`** — Unix epoch
+  and process termination.
+
+- **Float comparison 4** (`f_lt`/`f_le`/`f_gt`/`f_ge`).
+
+- **CSV parser example** (~130 lines, reduced RFC 4180).
+
+- **mini_calc.mere extension**: let binding + variables + env-
+  based eval; shadowing works.
+
+- **list_lib.mere** added: 12 list utility functions written in
+  Mere itself (map/filter/fold_left/fold_right/length/rev/take/
+  drop/range/replicate/for_all/any).
+
+- **Float type introduced** — `TyFloat` primitive + `Float_lit`
+  (`1.5` literal) + V_float; 4 conversions (`float_of_int` /
+  `int_of_float` / `str_of_float` / `float_of_str`) + 4 arithmetic
+  (`f_add` / `f_sub` / `f_mul` / `f_div`). No implicit int/float
+  conversion. Resolves known limitation "no float".
+
+- **File I/O** — `read_file : str -> str` / `write_file : str ->
+  str -> unit`. Can write CLI tools. Added `examples/word_count
+  .mere`.
+
+- **`str_unescape` builtin** — Decodes `\n` `\t` `\r` `\\` `\"`
+  `\/`. Escape-string support for JSON parser.
+
+- **Character literal `'X'`** — Lexer only; length 1 str.
+  Disambiguates with tyvar `'a` (closing quote presence); `match
+  c with | 'n' -> ...` for dispatch.
+
+- **List display improvement** — `to_string` displays Cons/Nil
+  chain as `[a, b, c]`. JSON parser output dramatically more
+  readable.
+
+- **Documentation overhaul** — README rewrite + newly added
+  `docs/{tutorial, language-reference, stdlib-reference,
+  patterns}.md` (1100+ lines).
+
+- **`divmod`** — Mere's first tuple-return builtin (`int → int →
+  (int * int)`).
+
+- **`square` / `cube`** — int → int 2nd / 3rd power.
+
+- **`sum_range`** — O(1) sum via Gauss formula.
+
+- **`incr` / `decr`** — int → int +1 / -1.
+
+- **`iter_n`** — Higher-order side-effect loop.
+
+- **Polymorphic `const` / `flip`** — Mere's first 3-quantified,
+  higher-order polymorphic builtins. Implemented via forward-ref
+  of `apply_value_ref`.
+
+- **Polymorphic `id` / `swap` / `pair`** — Standard set of tuple
+  ops complete.
+
+- **Polymorphic `fst` / `snd`** — Mere's first 2-quantified
+  scheme builtins.
+
+- **`try_or`** — Mere's first error-handling builtin.
+
+- **`fail` / `show`** — Mere's first polymorphic builtins
+  (scheme.quantified).
+
+- **as-pattern / or-pattern** — `(a, b) as p`, `| 1 | 2 | 3 ->
+  ...` (typer enforces binding name/type match).
+
+- **Structural equality** — `==` / `!=` recursively compare
+  tuples / records / constructors.
+
+- **Type alias `type Name = T;`** — Parse-time substitution;
+  disambiguates variant/record/alias via `|`/`of`.
+
+- **Function composition `<<` / `>>`** — Right-associative;
+  higher precedence than `|>`.
+
+- **Multiple type parameters `('a, 'b) result`** — Resolves known
+  limitation "up to 1 type parameter".
+
+- **Top-level let pattern** — `let _ = ...;`, `let (a, b) = ...;`
+  etc. at top-level; resolves known limitation.
+
+- **If without else** — `if cond then body` (body unit type).
+
+- **Match guard `| pat when expr -> body`** — Resolves known
+  limitation "no guard".
+
+- **Block expression `{ e1; e2; eN }`** — Parser sugar for
+  Let(P_wild) chain.
+
+- **List pattern `[a, b, ...t]`** — Symmetric to literal; parser
+  sugar.
+
+- **Record update `{ p | x = 10 }`** — Immutable update.
+
+- **Record type `type Point = { x: int, y: int }`** — Nominal
+  records; polymorphic; partial pattern.
+
+- **Mutual recursion `let rec ... and ...`** — Resolves known
+  limitation "no mutual recursion".
+
+- **List literal `[1, 2, 3]`** — Parser sugar for Cons/Nil chain.
+
+- **Pipe `|>` / signature alias** — Ergonomic improvements.
+
+- **Multi-arg typed fn** — `fn (x: int, y: str) -> body` desugars
+  to curry.
+
+- **Massive stdlib additions** — print_int / str_of_int /
+  int_of_str / str_len / not / min / max / abs / pow / gcd / lcm
+  / clamp / sign / even / odd / chr / ord / to_upper / to_lower
+  / str_trim / str_rev / str_contains / str_count / str_replace
+  / str_starts_with / str_ends_with / str_repeat / substring /
+  char_at / is_digit / is_alpha / is_space / read_line /
+  print_no_nl / print_err / assert / bool_of_str / str_compare
+  and many more.
 
 ---
 
-## 2026-06-15 〜 06-16 (週前半)
+## 2026-06-15 — 06-16 (early week)
 
-- 主要な拡張: 演算子拡充 (`/ %` `<= >= > !=` `&& ||`)、let pattern、`with` 式、多相型 (`'a opt`)、タプル、sum types + パターンマッチ。
-- 設計 doc: Q-008 (region/arena 統合)、Q-009 (view 型 3 公理)、Q-010 (region 版 std)、Q-011 (Drop 順序)。Mere のメモリモデル設計地図が完成。
-
----
-
-## 2026-06-06 (着手日)
-
-- OCaml 4-phase trial を経てホスト言語 OCaml 決定 (Q-001 resolved)
-- 1 日で「整数 + let + bool + if + 関数 + 再帰 + 双方向型検査 + REPL」の最小コア完成 (24 tests)
-- 文字列 + print + `++` 連結 + unit (slice 1)、REPL (slice 2)、複数 top-level decl (slice 8)
-- **Hindley-Milner 型推論 + let-polymorphism**: Algorithm W + occurs check + generalize/instantiate を実装。注釈なし関数の推論、多相 id、多相 compose、let-poly 全て動作 (slice 9、29 tests)。
+- Main extensions: operator expansion (`/ %` `<= >= > !=` `&& ||`),
+  let pattern, `with` expression, polymorphic types (`'a opt`),
+  tuples, sum types + pattern matching.
+- Design docs: Q-008 (region/arena integration), Q-009 (view type
+  3 axioms), Q-010 (region-version std), Q-011 (Drop order).
+  Mere's memory model design map complete.
 
 ---
 
-## 累計 (2026-06-16 時点)
+## 2026-06-06 (start date)
 
-- 設計 doc 4 件 (Q-008/009/010/011)
-- 実装スライス **62 個**
-- テスト **567 個** (初回 35 → 567、16 倍)
-- builtin **68 個**
-- 既知制約 **8 個解消** (相互再帰 / ガード / 多 type param / top-level let pattern / list display / char literal / file I/O / float)
+- After OCaml 4-phase trial, fixed host language as OCaml (Q-001
+  resolved).
+- In 1 day, completed minimum core "integer + let + bool + if +
+  function + recursion + bidirectional type check + REPL" (24
+  tests).
+- Strings + print + `++` concat + unit (slice 1); REPL (slice 2);
+  multiple top-level decls (slice 8).
+- **Hindley-Milner type inference + let-polymorphism**: implemented
+  Algorithm W + occurs check + generalize/instantiate. Inference
+  of annotation-less functions, polymorphic id, polymorphic
+  compose, let-poly all work (slice 9, 29 tests).
 
 ---
 
-## 未着手 (将来)
+## Cumulative (as of 2026-06-16)
 
-- **`&T` 参照** — 借用注釈 (`&shared write` 等) → メモリモデル本丸
-- **`region R { ... }` / `view V[R] of T`** — Q-008/009 の実装
-- **エフェクトシステム** — capability 型と effect 追跡
-- **ネイティブ codegen** — LLVM or Wasm
-- **網羅性検査 Phase 2** — int/str/float/tuple/record の精密な網羅性、redundancy check
-- **行内 unicode / Unicode source** — 現状 ASCII 限定
-- **モジュールシステム** — ファイル分割 + namespace
-- **依存型 / refinement types** — 04_fundamental_tradeoffs.md の段階導入
-- **row polymorphism** — record update に annotation 不要にする
-- **多行 REPL** — REPL は単一行のみ
+- Design docs: 4 (Q-008/009/010/011)
+- Implementation slices: **62**
+- Tests: **567** (initial 35 → 567, 16×)
+- Builtins: **68**
+- Known limitations resolved: **8** (mutual recursion / guard /
+  multi-type-param / top-level let pattern / list display / char
+  literal / file I/O / float)
+
+---
+
+## Not yet started (future)
+
+- **`&T` reference** — borrow annotation (`&shared write` etc.)
+  → core of memory model
+- **`region R { ... }` / `view V[R] of T`** — implementation of
+  Q-008/009
+- **Effect system** — capability types and effect tracking
+- **Native codegen** — LLVM or Wasm
+- **Exhaustiveness check Phase 2** — precise exhaustiveness for
+  int/str/float/tuple/record; redundancy check
+- **Inline unicode / Unicode source** — currently ASCII only
+- **Module system** — file split + namespace
+- **Dependent types / refinement types** — staged introduction
+  per 04_fundamental_tradeoffs.md
+- **Row polymorphism** — no annotation needed for record update
+- **Multi-line REPL** — REPL is single-line only
+

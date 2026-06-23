@@ -1,10 +1,10 @@
 # Patterns / cookbook (mere)
 
-実際に Mere でプログラムを書く時に頻出するイディオム集。
+Common idioms encountered when actually writing Mere programs.
 
 ---
 
-## 1. ガード付き defensive プログラミング
+## 1. Guarded defensive programming
 
 ```
 let safe_div = fn (a: int, b: int) ->
@@ -12,11 +12,11 @@ let safe_div = fn (a: int, b: int) ->
   else a / b;
 ```
 
-`fail` は多相 (`str -> 'a`) なので分岐合流で正しく統合される。`assert (cond) "msg"` も同様の用途。
+`fail` is polymorphic (`str -> 'a`), so it unifies correctly at branch merges. `assert (cond) "msg"` serves a similar purpose.
 
 ---
 
-## 2. Result 型でエラーを値として扱う
+## 2. Treat errors as values via the Result type
 
 ```
 type ('a, 'b) result = Ok of 'a | Err of 'b;
@@ -32,26 +32,26 @@ match parse_age "42" with
 | Err e -> "error: " ++ e
 ```
 
-`try_or` で panic を catch し、Result 型に詰め替える。
+Catch panics with `try_or` and repack them into a Result type.
 
 ---
 
-## 3. リストの典型操作 (再帰)
+## 3. Typical list operations (recursion)
 
 ```
 type 'a list = Nil | Cons of 'a * 'a list;
 
-// 合計
+// sum
 let rec sum = fn xs -> match xs with
   | [] -> 0
   | [h, ...t] -> h + sum t;
 
-// 長さ
+// length
 let rec len = fn xs -> match xs with
   | [] -> 0
   | [_, ...t] -> 1 + len t;
 
-// map (人手で書く)
+// map (hand-written)
 let rec map = fn (f, xs) -> match xs with
   | [] -> []
   | [h, ...t] -> Cons (f h, map f t);
@@ -59,15 +59,13 @@ let rec map = fn (f, xs) -> match xs with
 map (fn x -> x * x) [1, 2, 3, 4]    // [1, 4, 9, 16]
 ```
 
-注: Phase 36 で `list_filter` / `list_map` / `list_fold` / `list_sum` / `list_max`
-等の汎用 list helper が prelude に入った (累計 34 entry)。詳細は
-[stdlib-reference.md](stdlib-reference.md) を参照。
+Note: Phase 36 added general-purpose list helpers (`list_filter` / `list_map` / `list_fold` / `list_sum` / `list_max` etc.) to the prelude (34 entries total). See [stdlib-reference.md](stdlib-reference.md) for details.
 
 ---
 
-## 4. accumulator-style 再帰 (tail-recursive 風)
+## 4. Accumulator-style recursion (tail-recursive flavor)
 
-直接再帰だと逆順蓄積になる場合、最後に `rev` で順番を戻す:
+When direct recursion accumulates in reverse, finish with `rev`:
 ```
 let rec rev_aux = fn (xs, acc) -> match xs with
   | [] -> acc
@@ -82,7 +80,7 @@ let rec map_acc = fn (f, xs, acc) -> match xs with
 
 ---
 
-## 5. パイプで読みやすい変換チェーン
+## 5. Readable transformation chains via pipe
 
 ```
 "  42  "
@@ -92,11 +90,11 @@ let rec map_acc = fn (f, xs, acc) -> match xs with
   |> show           // "43"
 ```
 
-`|>` は左結合・最低優先度なので、let/if 等の上に括弧なしで乗る。
+`|>` is left-associative and lowest precedence, so it works above let/if without parens.
 
 ---
 
-## 6. 関数合成でポイントフリー
+## 6. Point-free style with function composition
 
 ```
 let show_inc = str_of_int << (fn x -> x + 1);
@@ -106,33 +104,33 @@ let process = str_trim >> to_upper >> (str_replace " " "_");
 process "  hello world  "                    // "HELLO_WORLD"
 ```
 
-`<<` は右から左、`>>` は左から右。両方右結合。
+`<<` is right-to-left; `>>` is left-to-right. Both right-associative.
 
 ---
 
-## 7. cap-passing (capability) パターン
+## 7. Cap-passing (capability) pattern
 
-複数の依存をひとまとめに渡す:
+Bundle multiple dependencies in one go:
 ```
 signature ctx = (db: int, log: int);
 
 let save_user = fn (...ctx, name: str) ->
-  // db, log がスコープに入る
+  // db and log come into scope
   print ("saving " ++ name ++ " (db=" ++ show db ++ ", log=" ++ show log ++ ")");
 
 let log_event = fn (...ctx, evt: str) ->
   print ("event: " ++ evt ++ " (log=" ++ show log ++ ")");
 
-// 呼び出し時は curry で展開
+// Call sites unroll via currying
 save_user 100 10 "alice";
 log_event 100 10 "logged-in";
 ```
 
-`signature` 宣言は parse-time で展開されるので、関数呼び出しは普通の curry。
+`signature` declarations expand at parse time, so the call sites are ordinary curried applications.
 
 ---
 
-## 8. レコードの immutable update
+## 8. Immutable record update
 
 ```
 type Config = { name: str, port: int, debug: bool };
@@ -143,15 +141,13 @@ let dev_cfg = { default_cfg | debug = true, port = 3000 };
 let prod_cfg = { default_cfg | name = "app-prod" };
 ```
 
-元レコードは変わらない (immutable)。複数フィールドを 1 回で update できる。
+The base record doesn't change (immutable). Multiple fields can be updated at once.
 
 ---
 
-## 8.5. コレクション内 record の「1 要素だけ更新」
+## 8.5. "Update only one element" inside a collection of records
 
-`Vec` / `OwnedVec` は append-only、record は immutable なので、コレクション
-内の特定 record だけを書き換える直接手段はない。代わりに **`vec_map` +
-`{ t | f = v }` で「条件に合う要素だけ差し替えた新コレクション」を作る**:
+`Vec` / `OwnedVec` are append-only and records are immutable, so there's no direct way to mutate a specific record in a collection. Instead, **use `vec_map` + `{ t | f = v }` to build a "new collection with conditional elements replaced"**:
 
 ```mere
 type Task = { id: int, text: str, done: bool };
@@ -160,52 +156,45 @@ let mark_done = fn tasks -> fn target_id ->
   region R {
     let src = owned_vec_to_vec tasks in
     let dst = vec_map src (fn (t: Task) ->
-      if t.id == target_id then { t | done = true }   // ← 差分更新
+      if t.id == target_id then { t | done = true }   // ← targeted update
       else t) in
     vec_to_owned dst
   };
 ```
 
-ポイント:
+Points:
 
-- `{ t | done = true }` は `Task { id = t.id, text = t.text, done = true }`
-  と等価だが、変更しない field を書かなくて済むので update 意図が明確
-- 結果は **新 `OwnedVec`** なので caller が受け取って bind し直す必要がある
-  (次節 8.6 の同名 rebinding を併用)
-- `fn (t: Task) -> ...` の **明示注釈は必須**。HM は closure 引数が
-  どの record か (field 名から) 逆引きしないので、`t.done` で型エラーに
-  なる
+- `{ t | done = true }` is equivalent to `Task { id = t.id, text = t.text, done = true }` but skips the fields that don't change, making the update intent explicit.
+- The result is a **new `OwnedVec`**, so the caller must rebind (see §8.6's same-name rebinding).
+- The **explicit annotation `fn (t: Task) -> ...` is required**. HM doesn't reverse-engineer which record a closure parameter belongs to (from the field names used), so `t.done` would otherwise fail to type.
 
 ---
 
-## 8.6. 不変更新の連鎖は同名 rebinding で書く
+## 8.6. Chain immutable updates with same-name rebinding
 
-`mark_done` のように新コレクションを返す関数を続けて使うときは、
-**同じ名前で rebinding** すれば自然に書ける:
+When chaining functions that return a new collection (like `mark_done`), **rebinding with the same name** reads naturally:
 
 ```mere
 let tasks = owned_vec_new () in
 let __ = owned_vec_push tasks (Task { id = 1, text = "buy milk", done = false }) in
 let __ = owned_vec_push tasks (Task { id = 2, text = "write report", done = false }) in
 
-// 同名 rebinding で「タスク 1 と 2 を完了に」
+// Same-name rebinding to "mark tasks 1 and 2 done"
 let tasks = mark_done tasks 1 in
 let tasks = mark_done tasks 2 in
 ```
 
-これは ML 系の自然な書き方で、interpreter / C / LLVM / Wasm の 4 backend
-すべてで動く (codegen は内部的に 2-step 形に展開して C の `__auto_type`
-self-init 制約を回避している)。
+This is the natural ML-family style and works across all 4 backends — interpreter / C / LLVM / Wasm (codegen internally expands to a 2-step form to avoid C's `__auto_type` self-init constraint).
 
 ---
 
-## 9. リスト構築の慣用句
+## 9. List construction idioms
 
 ```
-// 構文糖
+// Sugar
 let xs = [1, 2, 3, 4];
 
-// プログラム生成
+// Programmatic
 let rec range = fn (lo: int, hi: int) ->
   if lo > hi then []
   else Cons (lo, range (lo + 1) hi);
@@ -215,18 +204,18 @@ range 1 5                                    // [1, 2, 3, 4, 5]
 
 ---
 
-## 10. ネスト構造の destructure
+## 10. Destructuring nested structures
 
 ```
 type 'a list = Nil | Cons of 'a * 'a list;
 type 'a opt  = None | Some of 'a;
 
 match [Some 1, None, Some 3] with
-| [Some a, _, Some b] -> a + b              // 単一 arm で深く分解
+| [Some a, _, Some b] -> a + b              // deep destructure in a single arm
 | _                   -> -1
 ```
 
-`as-pattern` で部分構造と全体を同時に bind:
+Use `as-pattern` to bind a substructure and the whole at once:
 ```
 match [1, 2, 3, 4] with
 | [a, b, ...rest] as whole -> (a + b, whole)
@@ -235,10 +224,10 @@ match [1, 2, 3, 4] with
 
 ---
 
-## 11. パーサで「次の位置」を引き回す
+## 11. Threading "next position" through a parser
 
 ```
-// パーサは (str, int) を取り (value, next_int) を返す
+// Parser takes (str, int), returns (value, next_int)
 let parse_num = fn (s: str, i: int) ->
   let rec scan = fn (j: int) ->
     if j >= str_len s || not (is_digit (char_at s j)) then j
@@ -248,17 +237,17 @@ let parse_num = fn (s: str, i: int) ->
   if end_pos == i then fail "expected digit"
   else (int_of_str (substring s i end_pos), end_pos);
 
-// destructure で「次の位置」を更新しながらチェーン
+// Destructure to thread "next position" through the chain
 let (a, i) = parse_num s 0 in
 let (b, i) = parse_num s (i + 1) in
 a + b
 ```
 
-`contrib/json/json.mere` で実際にこのパターンを使っている。
+`contrib/json/json.mere` actually uses this pattern.
 
 ---
 
-## 12. デバッグ出力は `show` 一本
+## 12. Debug print is `show`
 
 ```
 let _ = print ("xs = " ++ show xs);              // "xs = [1, 2, 3]"
@@ -266,16 +255,16 @@ let _ = print ("user = " ++ show user);          // "user = User { name = ..., a
 let _ = print ("result = " ++ show (parse_json input));
 ```
 
-`show : 'a -> str` は多相なので、record/sum/list/tuple なんでも内部の `to_string` で文字列化する。Cons/Nil chain は `[a, b, c]` 形式で短く出力される。
+`show : 'a -> str` is polymorphic, so records/sums/lists/tuples all stringify via the internal `to_string`. Cons/Nil chains print in the concise `[a, b, c]` form.
 
 ---
 
-## 13. 副作用ループは `iter_n`
+## 13. Side-effect loops via `iter_n`
 
 ```
 iter_n 5 (fn () -> print "===");
 
-// 何かを print して何回繰り返すか
+// Print something some number of times
 let echo = fn (n: int, s: str) ->
   iter_n n (fn () -> print s);
 
@@ -284,7 +273,7 @@ echo 3 "hello"
 
 ---
 
-## 14. ブロック式で順序付き副作用
+## 14. Ordered side effects with block expressions
 
 ```
 {
@@ -295,16 +284,16 @@ echo 3 "hello"
 }
 ```
 
-`{ e1; e2; ...; eN }` は `let _ = e1 in let _ = e2 in ... in eN` の構文糖。最後の式が値。
+`{ e1; e2; ...; eN }` is sugar for `let _ = e1 in let _ = e2 in ... in eN`. The final expression is the value.
 
 ---
 
-## 14.5. Phase 36 sugar の慣用句
+## 14.5. Phase 36 sugar idioms
 
-### `?` / `?!` で nested match を flat に
+### Flatten nested matches with `?` / `?!`
 
 ```mere
-// 旧: nested match で None / Err を伝播
+// Old: nested match for None / Err propagation
 let safe = fn x ->
   match parse x with
   | None -> None
@@ -316,7 +305,7 @@ let safe = fn x ->
       | None -> None
       | Some c -> Some (a + b + c);
 
-// 新: ? で early-return
+// New: ? for early-return
 let safe = fn x ->
   let a = parse x ? in
   let b = step1 a ? in
@@ -324,44 +313,42 @@ let safe = fn x ->
   Some (a + b + c);
 ```
 
-Result 版は `?!` で同じパターン。`examples/calc.mere` の parser が
-良い実例 (138 行 / `?!` chain 5 箇所)。
+Result version uses `?!` with the same pattern. `examples/calc.mere`'s parser is a good real example (138 lines / 5 `?!` chain sites).
 
-### list comprehension で filter + map をまとめる
+### Combine filter + map with list comprehension
 
 ```mere
-// 旧: 二段
+// Old: two stages
 let xs = list_map (1..100) (fn x -> x * x) in
 let ys = list_filter xs (fn x -> x % 2 == 0);
 
-// 新: 一発で
+// New: in one shot
 let ys = [x * x | x <- 1..100, (x * x) % 2 == 0];
 
-// multi-gen で cartesian
+// Multi-gen for cartesian
 let pairs = [(a, b) | a <- 1..5, b <- 1..5, a + b == 6];
 ```
 
-### `for-in-do` で副作用ループ、`while-do` で fn body 内の loop
+### `for-in-do` for side-effect loops; `while-do` for loops inside fn bodies
 
 ```mere
-// 出力だけしたい
+// Just print
 for x in 1..10 do print (show x);
 
-// 累積ループは map_set / owned_vec_push 等で
+// Accumulating loops via map_set / owned_vec_push etc.
 for x in xs do
   let _ = owned_vec_push buf (transform x) in ();
 
-// while: fn body 内なら使える
+// while: usable inside an fn body
 let consume_stream = fn stream ->
   while !(stream_eof stream) do
     let x = stream_next stream in
     let _ = process x in ();
 ```
 
-注: `while` は現状 fn body 内のみ codegen 対応 (top-level main で
-直接書くと unsupported)。
+Note: `while` currently has codegen support only inside fn bodies (top-level main is unsupported).
 
-### `if let` で `Option` の単発取り出し
+### Single-shot `Option` extraction with `if let`
 
 ```mere
 if let Some n = map_get config "timeout" then
@@ -370,36 +357,35 @@ else
   use_default ();
 ```
 
-### 文字列補間でログ出力をシンプルに
+### Simpler log output via string interpolation
 
 ```mere
-// 旧: ++ chain
+// Old: ++ chain
 print ("user=" ++ name ++ ", age=" ++ show age ++ ", role=" ++ role);
 
-// 新: 補間
+// New: interpolation
 print "user={name}, age={show age}, role={role}";
 ```
 
-注意点:
-- ネストした文字列リテラルは禁止 (`"x = {show \"abc\"}"` → エラー)。
-  一度 let に逃がせば OK
-- `\{` で literal 中括弧を escape
-- `{}` の中身は任意の expr (関数適用 / 演算 / match も OK)
+Caveats:
+- Nested string literals are forbidden (`"x = {show \"abc\"}"` → error). Escape via let.
+- `\{` escapes a literal `{`.
+- The interior of `{}` is any expr (function applications / arithmetic / match all OK).
 
-### 範囲 + ::, <|, @@ で式を読みやすく
+### Range + ::, <|, @@ for readable expressions
 
 ```mere
 // range + list_map
 list_map (1..10) (* 2)                       // op section
 0 :: 1 :: 2 :: 3 :: []                       // explicit list construction
-print <| "result: " ++ show answer           // 逆 pipe
+print <| "result: " ++ show answer           // reverse pipe
 print @@ "lengthy message that goes way " ++
   "over one line — @@ avoids needing parens"
 ```
 
 ---
 
-## 15. 多相 helper の活用
+## 15. Using polymorphic helpers
 
 ```
 fst (pair "hello" 42)            // "hello"
@@ -411,254 +397,210 @@ flip (fn a -> fn b -> a - b) 3 10   // 7 (= sub 10 3)
 
 ---
 
-## アンチパターン / 罠
+## Anti-patterns / gotchas
 
-### 1. リテラル `-1` を関数引数で渡したい時
+### 1. Passing the literal `-1` as a function argument
+
 ```
-abs -1               // 構文上は (abs - 1) と読まれる (引き算)
-abs (- 1)            // OK: 括弧で囲む (空白を 1 つ入れる)
-abs (-1)             // 現在の lexer は `-` の後の数字を負数 lit にしない
+abs -1               // syntactically read as (abs - 1) (subtraction)
+abs (- 1)            // OK: parens (with one space)
+abs (-1)             // The current lexer doesn't recognize `-` followed by digits as a negative literal
 ```
 
-### 2. ~~文字単一比較が冗長~~ → 解消 (文字リテラル + match)
+### 2. ~~Verbose single-char comparisons~~ → fixed (char literals + match)
+
 ```
-// 旧:
+// Old:
 if char_at s i == "n" then ... else if char_at s i == "t" then ...
 
-// 新: char literal `'X'` + match
+// New: char literal `'X'` + match
 match char_at s i with
 | 'n' -> ...
 | 't' -> ...
 | _   -> ...
 ```
 
-### 3. ~~`match` 網羅性は実行時チェック~~ → Phase 1 で警告対応
+### 3. ~~Match exhaustiveness is checked at runtime~~ → Phase 1 added warnings
+
 ```
 match opt with
 | Some n -> n
 // stderr: "line X, col Y: warning: non-exhaustive match (missing None)"
-// 評価は継続するが、None が来たら runtime Eval_error
+// Evaluation proceeds, but a runtime Eval_error occurs if None arrives
 ```
-bool と variant type 関する網羅性は compile-time に warning として検出される。int/str/tuple/record はまだ wildcard arm が必要。完全網羅化したければ `| _ -> default` か `| None -> fail "..."` を書く。
 
-### 4. record update には base の型が必要
+Exhaustiveness for bool and variants is detected at compile time as a warning. int/str/tuple/record still need a wildcard arm. To enforce full coverage, write `| _ -> default` or `| None -> fail "..."`.
+
+### 4. Record update needs the base's type
+
 ```
-fn p -> { p | x = 0 }                   // p の型が不明で型エラー
-fn (p: Point) -> { p | x = 0 }          // 注釈で OK
+fn p -> { p | x = 0 }                   // p's type is unknown → type error
+fn (p: Point) -> { p | x = 0 }          // OK with annotation
 ```
-row polymorphism がないので、関数引数の record は注釈必須。
 
-### 5. top-level fn 名が libc / libm / C キーワードと衝突する (C codegen)
+Without row polymorphism, record-typed function args need annotations.
 
-C codegen は top-level fn を C 関数として直接 emit するため、 macOS / Linux
-の libc / libm にすでに存在する名前 + C 言語の予約語と被ると compile error
-になる。 Phase 32 〜 38 で実際にぶつかった例:
+### 5. Top-level fn names collide with libc / libm / C keywords (C codegen)
 
-| Mere の名前 | 衝突先 |
+C codegen emits top-level fns directly as C functions, so names that already exist in macOS / Linux's libc / libm or are C language keywords cause compile errors. Real collisions found in Phases 32-38:
+
+| Mere name | Collides with |
 |---|---|
-| `div` | `stdlib.h` の `div(int, int)` (商と剰余を返す) |
-| `mergesort` | macOS BSD `stdlib.h` の `mergesort(...)` |
-| `pow` / `sqrt` / `sin` / `cos` / `exp` / `log` | `math.h` の libm 関数 |
+| `div` | `stdlib.h`'s `div(int, int)` (returns quotient + remainder) |
+| `mergesort` | macOS BSD `stdlib.h`'s `mergesort(...)` |
+| `pow` / `sqrt` / `sin` / `cos` / `exp` / `log` | `math.h` libm functions |
 | `system` / `getenv` / `setenv` / `rand` / `srand` | `stdlib.h` |
 | `time` / `clock` | `time.h` |
 | `read` / `write` / `open` / `close` | POSIX I/O |
-| `short` / `long` / `int` / `char` / `float` / `double` | C キーワード (`__auto_type short = ...` が syntax error) |
-| `signed` / `unsigned` / `register` / `static` / `auto` | C 記憶クラス・修飾子 |
-| `goto` / `return` / `break` / `continue` | C 制御フロー keyword |
+| `short` / `long` / `int` / `char` / `float` / `double` | C keywords (`__auto_type short = ...` is a syntax error) |
+| `signed` / `unsigned` / `register` / `static` / `auto` | C storage classes / modifiers |
+| `goto` / `return` / `break` / `continue` | C control-flow keywords |
 
-**回避策**: 1-2 文字短くする (`mergesort` → `msort`、 `div` → `divi`、
-`short` → `small_doc`)、 動詞句にする (`sort_list` / `power_int`)、 接頭辞
-(`mere_sort`) など。 interpreter は影響を受けないので動作確認はできるが、
-codegen を試した時に発覚する。 **Phase 38.A3 で linter が parser 通過時点で
-warning を出す** ように対応済 ([lib/pipeline.ml:42-82](../lib/pipeline.ml))。
+**Workarounds**: shorten by 1-2 chars (`mergesort` → `msort`, `div` → `divi`, `short` → `small_doc`), use a verb phrase (`sort_list` / `power_int`), or add a prefix (`mere_sort`), etc. The interpreter is unaffected, so verification looks fine until codegen is attempted. **Phase 38.A3 added a linter that warns at parse time** ([lib/pipeline.ml:42-82](../lib/pipeline.ml)).
 
-**完全な reserved name 一覧 (約 110 名前) は [docs/reserved-names.md](reserved-names.md) を参照**。
+**The full reserved-name list (~110 names) is in [docs/reserved-names.md](reserved-names.md)**.
 
-### 6. 空 list literal `[]` は polymorphic `'a list` で codegen NG
+### 6. The empty list literal `[]` is polymorphic `'a list` and breaks codegen
 
 ```mere
-let xs = [];          // 推論: 'a list
-let _ = some_use xs;  // 後で int に推論されても、 codegen は xs の型を見て 'a leak
+let xs = [];          // inferred: 'a list
+let _ = some_use xs;  // even if later inferred to int, codegen sees the 'a leak in xs's type
 ```
 
-C / LLVM codegen は concrete element type が要るが、 narrow value restriction
-(Phase 36) が空 list に対しても generalize するため leak する。 **回避**:
+C / LLVM codegen need a concrete element type, but the narrow value restriction (Phase 36) still generalizes empty lists. **Workaround**:
 
 ```mere
-let xs = (Nil: int list);                     // 推奨: explicit annotation
-let xs: int list = Nil;                       // 同等 (片方が動けば良い)
+let xs = (Nil: int list);                     // recommended: explicit annotation
+let xs: int list = Nil;                       // equivalent (either works)
 ```
 
-empty list を bind するときは「最初の要素の型」を annotation で固定する。
-非空 list (`[1, 2, 3]`) は要素から推論されるため annotation 不要。
+When binding an empty list, fix the element type with an annotation. Non-empty lists (`[1, 2, 3]`) are inferred from elements, so no annotation is needed.
 
-### 7. `Map[K, V]` は 2 つしか書けない、 必要なのは `Map[R, K, V]` (3 引数)
+### 7. `Map[K, V]` only takes two args; you need `Map[R, K, V]` (3 args)
 
-Mere の Map は region パラメータを持つ。 だから type annotation には R を
-入れる必要がある:
+Mere's Map has a region parameter, so type annotations must include R:
 
 ```mere
 // NG
 let f = fn (m: Map[str, int]) -> map_get m "k";
 // type error: expected `Map['c, 'b, 'a]`, got `(str, int) Map`
 
-// 通る (R は型変数として書く)
+// Works (write R as a type variable)
 let f = fn (m: Map[R, str, int]) -> map_get m "k";
-// → ただし R が actual region に合わないと別の型エラーになるケースも
+// → but mismatch with the actual region can still cause separate type errors
 
-// 一番楽: 注釈を書かず推論に任せる
+// Easiest: skip annotations and let inference handle it
 let f = fn m -> map_get m "k";
 ```
 
-ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必須なので
-3 引数。 公開時に user の最初の躓きどころなので、 patterns / tutorial に
-明記しておく。
+ML-familiar users tend to write K and V only, but Mere requires the region — three args. This is a common stumbling block for first-time users, so it's documented in patterns / tutorial.
 
-### 8. ~~inner-lifted fn の closure capture が anonymous Fun 経由で漏れる~~ ✅
+### 8. ~~Closure capture leaks for inner-lifted fns through anonymous Fun~~ ✅
 
-✅ **2026-06-23 Phase 39.A2 + Phase 45 で完全解決**:
+✅ **Fully resolved by Phase 39.A2 + Phase 45 (2026-06-23)**:
 
-- Phase 39.A2: `list_iter (...) visit` のように inner-lifted fn を value 位置で
-  「外側の anonymous Fun でない場所」 で使う case を 3 backend で動くように
-  (env を default region に alloc + adapter 経由で lifted fn を呼ぶ closure value)
-- Phase 45: **inner-lifted fn 同士の相互参照** を解決 — `lift_inner_fns` の末尾に
-  **transitive capture closure** 算出 step を追加。 lifted fn A が B を call し
-  B が `base` を capture する場合、 A も `base` を transitive に capture して
-  env に乗せる。 また、 direct captures から inner-lifted fn 名を除外し
-  (runtime value ではないため)、 emit_expr 側の既存 dispatch (App (Var n, arg)
-  で `__lifted_X(caps, arg)` を直接 emit) と整合させる。 C / LLVM / Wasm 3
-  backend に同じアルゴリズムを実装。
+- Phase 39.A2: in cases like `list_iter (...) visit` where inner-lifted fns are used in value position "outside an anonymous Fun", the 3 backends now work (env is allocated in the default region + a closure value calls the lifted fn through an adapter).
+- Phase 45: **mutual references between inner-lifted fns** are resolved — added a **transitive capture closure** step at the end of `lift_inner_fns`. When lifted fn A calls B and B captures `base`, A also transitively captures `base` and puts it in the env. Also, inner-lifted fn names are excluded from direct captures (since they're not runtime values), aligning with emit_expr's existing dispatch (where `App (Var n, arg)` directly emits `__lifted_X(caps, arg)`). The same algorithm is implemented in C / LLVM / Wasm.
 
-これで `let rec helper = fn x -> ... let rec caller = fn y -> helper y ...`
-のような pattern が 4 backend で動く。 markdown_to_html の `find_double` /
-`find_single` を module 外側 top-level fn として書く workaround は **不要に
-なった** (ただし既存 code はそのまま残置、 module-internal に戻す refactor は
-future)。
+This makes patterns like `let rec helper = fn x -> ... let rec caller = fn y -> helper y ...` work in all 4 backends. The markdown_to_html workaround that wrote `find_double` / `find_single` as module-external top-level fns is **no longer needed** (the existing code is preserved as-is; a future refactor can move them back into the module).
 
 
 
-関数の中で `let rec foo = fn ...` を定義し、 そこから outer scope の変数を
-参照しつつ、 `list_iter ... (fn v -> foo v)` のような anonymous closure
-経由で呼ぶと、 C codegen が `foo` 内の closure capture を anonymous closure
-の env に持ち越せず、 `error: use of undeclared identifier 'x'` で fail。
+When you define `let rec foo = fn ...` inside a function, reference outer-scope variables, and then call it via an anonymous closure (e.g. `list_iter ... (fn v -> foo v)`), C codegen couldn't carry `foo`'s closure captures into the anonymous closure's env, failing with `error: use of undeclared identifier 'x'`.
 
 ```mere
-// NG (C codegen で fail)
+// NG (fails in C codegen)
 let dfs = fn graph ->
   let visited = map_new () in
   let rec visit = fn u ->
-    let _ = map_set visited (show u) 1 in        // visited は outer scope
-    list_iter (neighbors graph u) (fn v -> visit v) in   // anonymous Fun が visit を call
+    let _ = map_set visited (show u) 1 in        // visited is in outer scope
+    list_iter (neighbors graph u) (fn v -> visit v) in   // anonymous Fun calls visit
   visit 0;
 ```
 
-**回避策 (3 つ)**:
+**Workarounds (three)**:
 
-1. **iterative + explicit stack/queue** (Map で管理) に書き直す。 dfs_bfs.mere /
-   topological_sort.mere の実装パターン
-2. **explicit recursion で list を消化**: `list_iter (fn v -> visit v)` の代わりに
-   `visit_list` のような mutual recursive fn を書く
-3. **outer scope の state を引数として明示的に渡す**: closure capture を
-   完全に避け、 `visit visited graph u` の形にする
+1. Rewrite as **iterative + explicit stack/queue** (managed via Map). The dfs_bfs.mere / topological_sort.mere implementation pattern.
+2. **Explicit recursion to consume the list**: write a mutually recursive fn like `visit_list` instead of `list_iter (fn v -> visit v)`.
+3. **Pass outer-scope state explicitly as an argument**: avoid closure capture entirely, e.g. `visit visited graph u`.
 
-`list_iter (neighbors xs u) visit` のように **closure を作らず builtin に
-直接 fn 値を渡す** ことができれば一番きれい。 が、 inner-lifted fn を
-value 位置で使うのは現状 unsupported (DEFERRED §1.2 関連)、 partial app
-synthesizer (Phase 38.C) は builtin に限定されている。
+The cleanest would be `list_iter (neighbors xs u) visit` — pass the fn value directly to the builtin without making a closure. But using inner-lifted fns in value position is currently unsupported (DEFERRED §1.2 related); the partial-app synthesizer (Phase 38.C) is limited to builtins.
 
-### 9. `substring s start end` は `end` が exclusive 位置、 length ではない
+### 9. `substring s start end` — `end` is an exclusive position, not a length
 
-直感的に `substring s 4 (str_len s - 4)` と書きがちだが、 第 3 引数は
-**位置** (exclusive)、 length ではない。 範囲が逆転すると runtime error。
+Intuitively, you might write `substring s 4 (str_len s - 4)`, but the 3rd argument is a **position** (exclusive), not a length. Reversed ranges cause runtime errors.
 
 ```mere
 // NG
 substring "### Subsection" 4 (str_len "### Subsection" - 4)
-// → substring 4 10 → eval error: range [4, 10) on "### Subsection" の意図と違う
-//   実は 4 から 10 までを取りたいなら正しいが、 "Subsection" を取りたい
-//   (= 4 から 14 まで) なら間違い
+// → substring 4 10 → eval error: range [4, 10) on "### Subsection" — not what you want
+//   That's correct if you want chars 4..10, but if you want "Subsection"
+//   (= chars 4..14) it's wrong
 
-// 正しい
+// Right
 substring "### Subsection" 4 (str_len "### Subsection")
-// → "Subsection" (4 から最後まで)
+// → "Subsection" (from 4 to the end)
 ```
 
-シグネチャ: `substring : str -> int -> int -> str` で `(s, start, end)`。
-end は exclusive、 つまり `s[start..end)`。 Python 流 slicing と同じ。
+Signature: `substring : str -> int -> int -> str` taking `(s, start, end)`. `end` is exclusive — `s[start..end)`. Same as Python slicing.
 
-### 10. 単引数 builtin (`int_of_str` 等) を value 位置で使うと C codegen unbound
+### 10. Single-arg builtins (`int_of_str` etc.) used in value position become unbound in C codegen
 
 ```mere
 list_map (str_split s ",") int_of_str
 // codegen error: use of undeclared identifier 'int_of_str'
 ```
 
-Phase 38.C で `vec_push` / `map_set` 等の curried collection builtin は
-value 位置で使えるよう synthesize されるが、 **`int_of_str` / `str_len` /
-`ord` / `show` 等の単引数 builtin は対象外** (1-arg なので Phase 35 nullary
-factory eta-wrap とも違うルート)。 そのまま C 関数として未定義。
+Phase 38.C made curried collection builtins like `vec_push` / `map_set` usable in value position via synthesis, but **single-arg builtins like `int_of_str` / `str_len` / `ord` / `show` aren't covered** (1-arg, so different from Phase 35's nullary factory eta-wrap path). They show up as undefined C functions.
 
-**回避**:
+**Workaround**:
 
 ```mere
 list_map (str_split s ",") (fn x -> int_of_str x)
 ```
 
-`fn x -> ...` で wrap すれば、 既存の anonymous Fun adapter machinery が
-closure 化を担当して正しく動く。 1 文字増えるだけの軽い workaround。
+Wrapping in `fn x -> ...` lets the existing anonymous-Fun adapter machinery handle the closure conversion. Only one character extra — a light workaround.
 
-将来的には Phase 38.C の synthesize_curried_eta を 1-arg builtin にも拡張
-すれば不要になる (low-priority、 issue 駆動)。
+A future extension of Phase 38.C's synthesize_curried_eta to 1-arg builtins would make this unnecessary (low priority; issue-driven).
 
-### 12. list literal 内 record literal は `Type {…}` 必須 (型名 prefix を付ける)
+### 12. Record literals inside list literals require `Type {…}` (the type prefix)
 
-list literal 中の record literal は **必ず `TypeName { ... }` の形** で書く。
-field-only の `{ x = 1, y = 2 }` だと parse 時に「list の構造の途中」と読まれて
-意図と違う場所で literal が途切れる:
+Record literals inside list literals **must always be written `TypeName { ... }`**. The field-only form `{ x = 1, y = 2 }` is parsed as if it were "middle of list structure" and cuts the literal short:
 
 ```mere
 type Point = { x: int, y: int };
 
-// NG (parse error または奇妙な型エラー)
+// NG (parse error or odd type errors)
 let ps = [{ x = 1, y = 2 }, { x = 3, y = 4 }];
 
-// OK: 各 record literal に Type prefix
+// OK: each record literal gets a Type prefix
 let ps = [Point { x = 1, y = 2 }, Point { x = 3, y = 4 }];
 ```
 
-理由: `[` の直後の `{ … }` を独立 record literal として recover する経路が
-parser にない。 record literal を expression として確実に閉じるには `TypeName {`
-が必要で、 mid-list の record でも同じく prefix が要る。
+Reason: the parser has no recovery path that interprets the `{ ... }` immediately after `[` as a standalone record literal. To reliably close a record literal as an expression, `TypeName {` is needed; mid-list records require the same prefix.
 
-**さらに**: record type 名は **大文字始まり** (`Point` / `Task` / `User`) で書くと
-literal-only contexts (list element / match arm の右辺) で曖昧性が出にくく、
-patterns / examples とも一貫する。 小文字始まりの型名 (`type point = { ... }`)
-は constructor 構文と区別しづらく、 task_scheduler.mere で `type task` から
-`type Task` への rewrite が必要になった (2026-06-23 dogfood)。
+**Furthermore**: write record type names as **uppercase-starting** (`Point` / `Task` / `User`) to reduce ambiguity in literal-only contexts (list elements, the RHS of match arms) and to stay consistent with patterns / examples. Lowercase type names (`type point = { ... }`) are hard to distinguish from constructor syntax; task_scheduler.mere needed the rewrite `type task` → `type Task` (2026-06-23 dogfood).
 
-### 11. 3-tuple 以上の destructure は `fst`/`snd` でなく `let (a, b, c) = ...`
+### 11. Destructure 3-tuples or larger via `let (a, b, c) = ...`, not `fst`/`snd`
 
-`fst` / `snd` は 2-tuple 専用。 3-tuple 以上のアクセスはパターンで
-destructure する:
+`fst` / `snd` are 2-tuple only. For 3-tuples and larger, destructure via patterns:
 
 ```mere
 let r = ext_gcd 30 18;     // r: int * int * int
-// NG (型エラー)
+// NG (type error)
 let g = fst r in
-let x = fst (snd r) in     // snd : (int * int * int) -> ? — 通らない
+let x = fst (snd r) in     // snd : (int * int * int) -> ? — won't pass
 
 // OK
 let (g, x, y) = ext_gcd 30 18 in ...
 ```
 
-3-tuple は内部的に `(a, b, c)` として一つの tuple (`int * int * int`) で、
-`(a, (b, c))` という入れ子 pair ではない。 fst/snd は OCaml 流に 2-tuple
-専用の builtin として定義されている。
+A 3-tuple is internally one tuple (`int * int * int`), not a nested pair `(a, (b, c))`. fst/snd are defined as 2-tuple-only builtins in the OCaml tradition.
 
 ---
 
-## 関連ドキュメント
+## See also
 
-- 全構文の参照: [language-reference.md](language-reference.md)
-- 全 builtin: [stdlib-reference.md](stdlib-reference.md)
-- 起動の手順: [tutorial.md](tutorial.md)
+- Full syntax: [language-reference.md](language-reference.md)
+- All builtins: [stdlib-reference.md](stdlib-reference.md)
+- Getting started: [tutorial.md](tutorial.md)

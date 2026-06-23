@@ -1,109 +1,75 @@
-# Reserved names — Mere top-level fn 名と C codegen の衝突
+# Reserved names — Mere top-level fn names and C codegen collisions
 
-Mere の C codegen は **top-level fn を C 関数として直接 emit する**。 そのため、
-top-level の `let` / `let rec` の binding 名が **macOS / Linux の libc / libm にすでに
-存在する関数名** や **C 言語の予約語** と衝突すると、 codegen 段階では成功するが
-`clang` / `gcc` で **compile error** になる。
+Mere's C codegen **emits top-level fns directly as C functions**. As a result, if a top-level `let` / `let rec` binding name **collides with an existing function in libc / libm on macOS / Linux** or with a **C language keyword**, codegen succeeds but `clang` / `gcc` then fail with a **compile error**.
 
-interp / LLVM / Wasm の挙動は影響を受けない (= interp で動いた program が C
-codegen で fail する) ため、 発見が遅れがち。 そこで **Phase 38.A3 の linter**
-が parser 通過時点で warning を出す。 本ドキュメントはその全リストと回避策の
-リファレンス。
+The interp / LLVM / Wasm backends are unaffected (so a program that runs in interp can fail in C codegen). Because this is easy to miss, the **Phase 38.A3 linter** issues a warning at parse time. This document is the full list of reserved names plus avoidance patterns.
 
-> **TL;DR**: 下表のいずれかと衝突する名前を top-level に書くと、 codegen 時に
-> warning + C compile error。 回避は **接頭辞 (`m_` / `mere_`) / 接尾辞 (`_` /
-> `_v`) / 動詞句 (`run_*` / `*_list`)** のいずれか。
+> **TL;DR**: writing a top-level binding that collides with any name in the table below produces a warning + C compile error at codegen time. Avoid it via a **prefix (`m_` / `mere_`) / suffix (`_` / `_v`) / verb phrase (`run_*` / `*_list`)**.
 
-## 1. 衝突一覧 (約 110 名前)
+## 1. Collision list (~110 names)
 
-実装は [`lib/pipeline.ml:42`](../lib/pipeline.ml) の `reserved_c_names` を
-参照。 該当の名前を `let foo = ...` で定義すると Phase 38.A3 linter が
-warning を出力する。
+The implementation is in [`lib/pipeline.ml:42`](../lib/pipeline.ml) under `reserved_c_names`. Defining a top-level binding with one of these names triggers a Phase 38.A3 linter warning.
 
-### 1.1 C 言語キーワード (約 30 個)
+### 1.1 C keywords (~30)
 
-`short` / `long` / `int` / `char` / `float` / `double` / `signed` / `unsigned` /
-`register` / `static` / `auto` / `extern` / `const` / `volatile` / `restrict` /
-`inline` / `goto` / `return` / `break` / `continue` / `switch` / `case` /
-`default` / `do` / `while` / `for` / `if` / `else` / `sizeof` / `typedef` /
-`struct` / `union` / `enum` / `void`
+`short` / `long` / `int` / `char` / `float` / `double` / `signed` / `unsigned` / `register` / `static` / `auto` / `extern` / `const` / `volatile` / `restrict` / `inline` / `goto` / `return` / `break` / `continue` / `switch` / `case` / `default` / `do` / `while` / `for` / `if` / `else` / `sizeof` / `typedef` / `struct` / `union` / `enum` / `void`
 
-最も hit しやすい: **`case`** (match arm の helper を書くと出やすい)、
-**`default`** / **`type`** / **`return`** (DSL 風命名で出やすい)。
+Most likely to hit: **`case`** (often when writing match-arm helpers), and **`default`** / **`type`** / **`return`** (common in DSL-style naming).
 
-### 1.2 stdlib.h (libc 約 22 個)
+### 1.2 stdlib.h (libc, ~22)
 
-`div` / `ldiv` / `exit` / `abort` / `atexit` / `atof` / `atoi` / `atol` /
-`free` / `malloc` / `calloc` / `realloc` / `system` / `getenv` / `setenv` /
-`putenv` / `unsetenv` / `rand` / `srand` / `abs` / `labs` / `qsort` /
-`bsearch` / `mergesort`
+`div` / `ldiv` / `exit` / `abort` / `atexit` / `atof` / `atoi` / `atol` / `free` / `malloc` / `calloc` / `realloc` / `system` / `getenv` / `setenv` / `putenv` / `unsetenv` / `rand` / `srand` / `abs` / `labs` / `qsort` / `bsearch` / `mergesort`
 
-最も hit しやすい: **`div`** (有理数 / 行列 / GCD 系で出やすい)、
-**`rand`** (random 系 helper)、 **`abs`** (builtin がある絶対値関数を
-shadowing したくなる)。
+Most likely to hit: **`div`** (rationals / matrices / GCD-style code), **`rand`** (random helpers), **`abs`** (people often shadow the builtin absolute-value function).
 
-### 1.3 math.h (libm 約 17 個)
+### 1.3 math.h (libm, ~17)
 
-`pow` / `sqrt` / `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` /
-`exp` / `log` / `log10` / `log2` / `ceil` / `floor` / `round` / `trunc` /
-`fabs` / `fmod` / `hypot` / `sinh` / `cosh` / `tanh`
+`pow` / `sqrt` / `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` / `exp` / `log` / `log10` / `log2` / `ceil` / `floor` / `round` / `trunc` / `fabs` / `fmod` / `hypot` / `sinh` / `cosh` / `tanh`
 
-これらは Mere builtin としても同名で定義されている (見えるところでは `pow` /
-`sqrt` 等)。 **user が同名 top-level を書くと shadow して衝突**。 回避は
-`mere_pow` / `power_int` 等。
+These are also defined as Mere builtins with the same names (e.g. `pow` / `sqrt`). **A same-named user top-level binding shadows and collides**. Avoid with `mere_pow` / `power_int` etc.
 
-### 1.4 time.h (libc 約 9 個)
+### 1.4 time.h (libc, ~9)
 
-`time` / `clock` / `ctime` / `asctime` / `gmtime` / `localtime` / `mktime` /
-`difftime` / `strftime`
+`time` / `clock` / `ctime` / `asctime` / `gmtime` / `localtime` / `mktime` / `difftime` / `strftime`
 
-最も hit しやすい: **`time`** (builtin がある時刻取得関数の shadow)。
+Most likely to hit: **`time`** (shadowing the builtin time-fetching function).
 
-### 1.5 POSIX I/O (約 18 個)
+### 1.5 POSIX I/O (~18)
 
-`read` / `write` / `open` / `close` / `lseek` / `stat` / `fstat` / `fopen` /
-`fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `rewind` / `printf` /
-`scanf` / `fprintf` / `fscanf` / `sprintf` / `sscanf` / `puts` / `gets` /
-`fputs` / `fgets` / `putchar` / `getchar`
+`read` / `write` / `open` / `close` / `lseek` / `stat` / `fstat` / `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `rewind` / `printf` / `scanf` / `fprintf` / `fscanf` / `sprintf` / `sscanf` / `puts` / `gets` / `fputs` / `fgets` / `putchar` / `getchar`
 
-最も hit しやすい: **`read`** / **`write`** (file I/O wrapper を書くと出る)、
-**`printf`** (debug helper を書くと出る)。
+Most likely to hit: **`read`** / **`write`** (when writing file-I/O wrappers); **`printf`** (debug helpers).
 
-### 1.6 misc libc (約 15 個)
+### 1.6 misc libc (~15)
 
-`strlen` / `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` /
-`strchr` / `strrchr` / `strstr` / `strdup` / `strerror` / `memcpy` / `memmove` /
-`memset` / `memcmp` / `memchr` / **`main`**
+`strlen` / `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strchr` / `strrchr` / `strstr` / `strdup` / `strerror` / `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` / **`main`**
 
-`main` は特に注意 (実行 entry point として C が予約済)。 Mere の top-level
-expression は自動的に `main` 関数を成すので、 user が `let main = ...` を
-書くと **必ず衝突**。
+`main` is especially important — C reserves it as the execution entry point. A Mere top-level expression automatically becomes the `main` function, so a user `let main = ...` is **always a conflict**.
 
-## 2. 回避パターン (3 つ)
+## 2. Avoidance patterns (3)
 
-| パターン | 例 (衝突する名前 → 回避名) | 用途 |
+| Pattern | Example (collision name → safe name) | Use case |
 |---|---|---|
-| **接尾辞** | `case` → `case_` / `case_v` / `run_case`  | 1 文字付加で済む。 `case_v` は linter message が提示する例 (深い意味なし) |
-| **接頭辞** | `div` → `divi` / `mere_div`、 `pow` → `power_int` / `m_pow` | 名前空間化のニュアンスが出る。 contrib lib は `mere_` 接頭辞推奨 |
-| **動詞句** | `mergesort` → `sort_list`、 `pow` → `power_of` | 自然言語として最も読みやすい。 lib API には推奨 |
+| **Suffix** | `case` → `case_` / `case_v` / `run_case` | One-character addition suffices. `case_v` is the example the linter message suggests (no deep meaning) |
+| **Prefix** | `div` → `divi` / `mere_div`; `pow` → `power_int` / `m_pow` | Carries a namespacing nuance; the `mere_` prefix is recommended for contrib libs |
+| **Verb phrase** | `mergesort` → `sort_list`; `pow` → `power_of` | The most natural-language-readable; recommended for lib APIs |
 
-**推奨方針**:
-- **個人 helper / 一時 fn**: 接尾辞 (`case_` / `_v`)
-- **lib として公開する fn (contrib)**: 動詞句 (`run_case` / `power_of`)
-- **module 化済 lib の内部 fn**: 接頭辞 (`m_div`) で module 系を示唆
+**Recommended approach**:
+- **Personal helpers / one-off fns**: suffix (`case_` / `_v`)
+- **Public lib fns (contrib)**: verb phrase (`run_case` / `power_of`)
+- **Internal fns of a module-ified lib**: prefix (`m_div`) to suggest the module's family
 
-## 3. 関連
+## 3. See also
 
-- **linter 実装**: [`lib/pipeline.ml:42-82`](../lib/pipeline.ml) (Phase 38.A3)
-- **patterns.md §5**: 摘要版 (本ドキュメントの圧縮)
-- **language-reference.md**: Mere 言語予約語 (`let` / `fn` / `match` / `if` 等)
-  は別 (parser 側で reject される、 binding 名にできない)
+- **Linter implementation**: [`lib/pipeline.ml:42-82`](../lib/pipeline.ml) (Phase 38.A3)
+- **patterns.md §5**: condensed version of this doc
+- **language-reference.md**: Mere language reserved words (`let` / `fn` / `match` / `if` etc.) are separate — they're rejected by the parser and can't be used as binding names.
 
-## 4. 将来拡張 (DEFERRED)
+## 4. Future extensions (DEFERRED)
 
-| stage | 内容 |
+| Stage | Content |
 |---|---|
-| A. 自動 rename suggestion | linter message が「`pow` だと `power`、 `case` だと `case_` を推奨」 のような名前固有 sugges を出す (現状は generic `_` / `m_` / `_v` 提案のみ) |
-| B. namespace 化 | module 内なら同名 top-level も OK にする (現状は module rewrite 後の `M.case` も C 関数として emit されるので NG) |
+| A. Auto-rename suggestions | The linter would suggest name-specific replacements like "`pow` → `power`" or "`case` → `case_`" (currently only generic `_` / `m_` / `_v` are suggested) |
+| B. Namespacing | Allow same-named top-level bindings inside modules (currently `M.case` after module rewrite is still emitted as a C function, so it's blocked) |
 
-これらは公開後 issue 駆動で。
+Both are issue-driven work for after public release.

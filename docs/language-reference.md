@@ -1,73 +1,66 @@
 # Language reference (mere)
 
-現在実装されている Mere の構文と意味論 (2026-06-22 / Phase 36 時点)。
-`&T` 参照 / `region` / `view` / effect / FFI / 4 backend codegen はすべて
-実装済。Phase 36 で 13 種の syntactic sugar (range / op section / `::` /
-`<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` /
-`for-in-do` / `while-do`) が入り、ML 系として書きやすさが大きく向上。
+The syntax and semantics of Mere as currently implemented (as of 2026-06-22 / Phase 36). `&T` references / `region` / `view` / effects / FFI / 4-backend codegen are all implemented. Phase 36 added 13 kinds of syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` / `for-in-do` / `while-do`), substantially improving ergonomics in the ML-family tradition.
 
 ---
 
-## 1. 字句
+## 1. Lexical
 
-### コメント
+### Comments
 ```
-// 行コメント (改行まで)
+// Line comment (to end of line)
 ```
 
-### リテラル
-| 種類 | 例 |
+### Literals
+| Kind | Example |
 |---|---|
-| 整数 | `0`、`42`、`-5` (構文上は `Neg (Int_lit 5)`) |
-| 浮動小数 | `1.5`、`3.14`、`0.0` (digits.digits、bare `1.` は不可) |
-| 真偽 | `true`、`false` |
-| 文字列 | `"hello"`、escape は `\n` `\t` `\\` `\"` |
-| 文字 (length-1 str) | `'X'`、escape は `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
-| ユニット | `()` |
+| Integer | `0`, `42`, `-5` (syntactically `Neg (Int_lit 5)`) |
+| Float | `1.5`, `3.14`, `0.0` (digits.digits; bare `1.` is not a float) |
+| Boolean | `true`, `false` |
+| String | `"hello"`; escapes are `\n` `\t` `\\` `\"` |
+| Char (length-1 str) | `'X'`; escapes are `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
+| Unit | `()` |
 
-文字リテラル `'X'` は単に長さ 1 の str (Mere は独立した char 型を持たない)。`match c with | 'n' -> ...` 等のディスパッチで便利。`'a opt` 等の型変数構文と曖昧にならないように、lexer は `'X'` (閉じ quote あり) か `'NAME` (閉じ quote なし、英字始まり) かで分岐する。
+A char literal `'X'` is just a length-1 str (Mere has no separate char type). Convenient for dispatch like `match c with | 'n' -> ...`. To avoid ambiguity with the type variable syntax (`'a opt` etc.), the lexer distinguishes `'X'` (closing quote present) from `'NAME` (no closing quote; alphabetic start).
 
-### 識別子
-- 先頭が小文字 or `_`、続きは英数 / `_`
-- 大文字始まりは「コンストラクタ / レコード / 型名」として parser が区別
-- 型変数: `'a`、`'b` 等 (`'` + 小文字始まり ident)
+### Identifiers
+- Start with a lowercase letter or `_`; continue with alphanumerics / `_`.
+- Uppercase-leading is recognized by the parser as "constructor / record / type name".
+- Type variables: `'a`, `'b`, etc. (`'` + lowercase-leading ident).
 
-### キーワード
+### Keywords
 ```
 let rec and in if then else true false fn type signature
 match with when of as _ for do while
 module open import extern using region view drop
 ```
 
-### 演算子・記号
+### Operators and symbols
 ```
-+ - * / %                算術
-== != < <= > >=          比較
-&& ||                    論理 (短絡)
-++                       文字列結合
-|> << >>                 パイプ・関数合成
-<|                       逆パイプ (Phase 36): f <| x = f x
-@@                       低優先度 apply (Phase 36): f @@ x = f x
-::                       cons 演算子 (Phase 36): h :: t = Cons (h, t)
++ - * / %                arithmetic
+== != < <= > >=          comparisons
+&& ||                    logic (short-circuit)
+++                       string concatenation
+|> << >>                 pipe / function composition
+<|                       reverse pipe (Phase 36): f <| x = f x
+@@                       low-precedence apply (Phase 36): f @@ x = f x
+::                       cons operator (Phase 36): h :: t = Cons (h, t)
 ..                       range literal (Phase 36): a..b = [a, ..., b-1]
-?                        Option 早期 return (Phase 36)
-?!                       Result 早期 return (Phase 36)
+?                        Option early return (Phase 36)
+?!                       Result early return (Phase 36)
 <-                       list comprehension generator (Phase 36)
 \                        lambda shorthand (Phase 36): \x -> e
-->                       関数型・arm 区切り
-=                        束縛
-: ; , .                  注釈・終端・区切り・field
-( ) { } [ ]              グルーピング
+->                       function type / match-arm separator
+=                        binding
+: ; , .                  annotation / terminator / separator / field
+( ) { } [ ]              grouping
 ...                      signature spread / list tail
-|                        match 区切り・variant 区切り・record update・list comp
+|                        match separator / variant separator / record update / list comp
 ```
 
-### 文字列補間 (Phase 36)
+### String interpolation (Phase 36)
 
-文字列リテラル中 `{expr}` は補間: lexer が再帰的にトークン化し、parser
-では `"a {x} b"` を `"a " ++ show_or_str x ++ " b"` 相当に展開 (実際は
-`expr` の型に応じて `++` chain)。リテラル中の `\{` で escape、ネストした
-文字列リテラルは禁止 (一度 let で束縛して回避)。
+Inside string literals, `{expr}` is interpolation: the lexer tokenizes recursively, and the parser expands `"a {x} b"` into something like `"a " ++ show_or_str x ++ " b"` (actually a `++` chain depending on `expr`'s type). `\{` escapes a literal brace; nested string literals inside the interpolation are forbidden (work around by binding via `let` first).
 ```
 let n = 42 in print "answer = {show n}"        // "answer = 42"
 print "escape: \{not interpolated\}"            // "escape: {not interpolated}"
@@ -75,64 +68,62 @@ print "escape: \{not interpolated\}"            // "escape: {not interpolated}"
 
 ---
 
-## 2. 型
+## 2. Types
 
-### プリミティブ
+### Primitives
 ```
 int   float   bool   str   unit
 ```
 
-`float` は IEEE 754 倍精度。リテラルは `1.5` のように小数点 + 数字を含むものが float、`1` は int (bare `1.` は float ではなく `1` + `.field` 候補)。`int` と `float` は別の型で、暗黙変換なし — `float_of_int` / `int_of_float` で明示変換、算術は `f_add` / `f_sub` / `f_mul` / `f_div` を使う。
+`float` is IEEE 754 double. Literals with a decimal point and digits (e.g. `1.5`) are float; `1` is int (bare `1.` is not float but `1` + a potential `.field`). `int` and `float` are distinct types with no implicit coercion — use `float_of_int` / `int_of_float` explicitly; arithmetic uses `f_add` / `f_sub` / `f_mul` / `f_div`.
 
-### 合成型
+### Composite types
 ```
-t1 -> t2         関数型 (右結合: a -> b -> c == a -> (b -> c))
-t1 * t2 * ...    タプル型
-t list           型コンストラクタ (postfix application)
-(t1, t2) result  多 type-arg
-'a               型パラメータ (declaration 内、annotation 内)
-&R t             region 付き参照型 (Phase 1: 構文のみ、semantic check は将来)
+t1 -> t2         function type (right-assoc: a -> b -> c == a -> (b -> c))
+t1 * t2 * ...    tuple type
+t list           type constructor (postfix application)
+(t1, t2) result  multi type-arg
+'a               type parameter (in declaration / annotation)
+&R t             region-tagged reference type (Phase 1: syntax only; semantic checks come later)
 ```
 
 ---
 
-## 3. 式
+## 3. Expressions
 
-### リテラル / 識別子
+### Literals / identifiers
 ```
 42   true   "hi"   ()
-x    (変数参照)
+x    (variable reference)
 ```
 
-### 算術 / 比較 / 論理
+### Arithmetic / comparison / logic
 ```
-1 + 2 * 3                7         (* / 優先)
-10 / 3                   3         (整数除算、0 div で Eval_error)
-10 % 3                   1         (剰余、0 div で Eval_error)
-"a" ++ "b"               "ab"      (文字列結合)
+1 + 2 * 3                7         (* / has higher precedence)
+10 / 3                   3         (integer division; 0 div is Eval_error)
+10 % 3                   1         (mod; 0 div is Eval_error)
+"a" ++ "b"               "ab"      (string concat)
 5 <= 5                   true
 1 != 2                   true
-true && false            false     (短絡: 左 false なら右 評価しない)
+true && false            false     (short-circuit: don't eval RHS if LHS is false)
 false || true            true
 not true                 false     (builtin)
 ```
 
-### Phase 36 syntactic sugar 概要
+### Phase 36 syntactic sugar at a glance
 
-すべて parser または lexer で desugar されるため、AST 以降は影響なし。
-各形式の優先度は §6 参照。
-
+All desugar at the parser or lexer level, so the AST and beyond are unaffected. Per-form precedence is in §6.
 ```
-0..5                     // range: [0, 1, 2, 3, 4] (= list_iota だが parser 直接生成)
+0..5                     // range: [0, 1, 2, 3, 4] (parser directly generates this; effectively list_iota)
 1 :: 2 :: []             // cons: Cons (1, Cons (2, Nil))
 (+ 1)                    // op section: fn x -> x + 1
-(* 2)                    // (- 1) は単項 - と曖昧なので括弧優先
-(< 10)                   // 比較系の section も OK
+(* 2)                    // (- 1) is ambiguous with unary -, so parenthesize
+(< 10)                   // comparison sections also work
 \x -> x + 1              // lambda shorthand: = fn x -> x + 1
-\(a, b) -> a + b         // tuple destructure 可
-f <| x                   // 逆 pipe: = f x
-f @@ x                   // 低優先度 apply: = f x、改行跨ぎで読みやすい
-"x = {show n}"           // 文字列補間 (lexer level、§1 参照)
+\(a, b) -> a + b         // tuple destructure OK
+f <| x                   // reverse pipe: = f x
+f @@ x                   // low-precedence apply: = f x; readable across line breaks
+"x = {show n}"           // string interpolation (lexer level; see §1)
 
 [expr | x <- xs, p x]                       // list comprehension (single gen + filter)
 [expr | x <- xs, y <- ys, p x y]            // multi-generator (cartesian)
@@ -140,29 +131,29 @@ f @@ x                   // 低優先度 apply: = f x、改行跨ぎで読みや
 
 if let pat = e then yes_branch else no_branch
   // = match e with | pat -> yes_branch | _ -> no_branch
-  // (else は省略不可、両 branch 同型)
+  // (else is required; both branches share the same type)
 
 for x in xs do body                         // = list_iter xs (\x -> body)
-                                            // body は unit 型必須
+                                            // body must be unit-typed
 while cond do body                          // = let rec __while_N = fn () ->
                                             //     if cond then (body; __while_N ()) else () in
                                             //   __while_N ()
-                                            // 注: 現状 fn body 内のみ動作 (top-level は codegen 非対応)
+                                            // Note: currently only runs inside an fn body (top-level is codegen-unsupported)
 ```
 
-### Option / Result 早期 return (`?` / `?!`、Phase 36)
+### Option / Result early-return (`?` / `?!`, Phase 36)
 
-`let pat = e? in body` 形式で:
-- `e?` (Option): `e` が `Some v` なら `pat` に `v` を束縛して `body`、`None` なら enclosing fn から `None` を即 return
-- `e?!` (Result): `e` が `Ok v` なら束縛、`Err e` なら enclosing fn から `Err e` を即 return
+`let pat = e? in body` form:
+- `e?` (Option): if `e` is `Some v`, bind `v` to `pat` and evaluate `body`; if `None`, the enclosing fn immediately returns `None`.
+- `e?!` (Result): if `e` is `Ok v`, bind; if `Err e`, the enclosing fn immediately returns `Err e`.
 
-両者は parser が Match に展開する:
+Both desugar to Match in the parser:
 ```
 let v = parse_int s ? in body
   ≈ match parse_int s with | Some v -> body | None -> None
 ```
 
-### let バインディング
+### let bindings
 ```
 let x = 5 in x + 1                 // ident
 let _ = side_effect in 1           // wildcard
@@ -170,7 +161,7 @@ let (a, b) = (3, 4) in a + b       // tuple destructure
 let (a, (b, c)) = (1, (2, 3)) in a + b + c
 ```
 
-### let rec / 相互再帰
+### let rec / mutual recursion
 ```
 let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5
 
@@ -181,57 +172,57 @@ in is_even 10
 
 ### if-then-else / if-then
 ```
-if cond then a else b               // 通常の if、a と b は同型
-if cond then print "msg"            // 副作用専用、body は unit 型必須
+if cond then a else b               // standard if; a and b share the same type
+if cond then print "msg"            // side-effect-only; body must be unit-typed
 ```
 
-### with (Drop ありリソースのスコープ束縛、Phase 3.1)
+### with (scope-bound resources with Drop, Phase 3.1)
 
-`with c = v in body` は **Drop ありリソース** (DB connection / file handle / mutex 等) 用。bound value の型は `drop type ...` で宣言された Drop 型でなければならない (Trivial 値は `let`)。スコープ末で値の `close: unit -> unit` field が呼ばれる (field が無ければ no-op)。複数 binding は **LIFO 順** で close 実行。
+`with c = v in body` is for **resources with Drop** (DB connections / file handles / mutexes etc.). The bound value's type must be a `drop type ...`-declared Drop type (use `let` for Trivial values). At scope end, the value's `close: unit -> unit` field is invoked (no-op if absent). Multiple bindings close in **LIFO order**.
 ```
 drop type Conn = { id: int, close: unit -> unit };
 let mk_conn = fn id ->
   Conn { id = id, close = fn () -> print ("close " ++ show id) };
 
 with c = mk_conn 1 in c.id
-// 結果: 1。scope 末で "close 1" が出力される
+// Result: 1. At scope end, "close 1" is printed.
 
 with c1 = mk_conn 1, c2 = mk_conn 2 in c1.id + c2.id
-// 結果: 3。"close 2" → "close 1" の順で出力 (LIFO)
+// Result: 3. Prints "close 2" → "close 1" (LIFO).
 
-with x = 5 in x + 1    // ERROR: int は Drop 型ではない。`let` を使う
+with x = 5 in x + 1    // ERROR: int isn't a Drop type. Use `let`.
 ```
 
-設計 doc: `internal design notes` の案 (i)「region は Trivial 厳格、Drop ありは `with` で管理」を実装。
+Design notes: implements option (i) from the private notes — "region is strict-Trivial; Drop is managed via `with`".
 
-### region (Phase 2: 構文 + 値式 `&R v` + escape check)
+### region (Phase 2: syntax + value expression `&R v` + escape check)
 
-メモリ管理の概念・比較・Mere 全体の戦略は [memory-model.md](memory-model.md) を参照。
+See [memory-model.md](memory-model.md) for the memory-management concepts, comparisons, and Mere's overall strategy.
 ```
-region R { body }                   // R を region 名としてスコープに導入、body を評価
-region R { region S { ... } }       // ネスト可
+region R { body }                   // bring R into scope as a region name; evaluate body
+region R { region S { ... } }       // nesting OK
 
-fn (x: &R int) -> x                  // `&R T` 参照型 (R が region 名)
-&R 5                                 // 値式: 5 を `&R int` として tag
-let x: &R int = &R 5 in ...          // 明示注釈と組合せ
-```
-
-**現状の意味論 (Phase 2)**:
-- `region R { body }` は R を内部スコープに束縛して body を評価。R 自体は unit 値の placeholder。
-- `&R T` は region 付き参照型として型システムに表現される。
-- `&R v` は値式で、v を `&R T` 型にラップする (interpreter は値そのまま)。
-- **escape check 有効**: `region R { body }` の body の型に R が現れていたらコンパイル時エラー — region 外に `&R T` 値が漏れない。
-- 将来 (Phase 3 以降) に: `r.alloc(v)` method 形式 (`&R v` の sugar)、`Trivial[R]` 制約、`with` + Drop の統合、子 region と promote 等が乗る。
-
-**escape check の例**:
-```
-region R { 42 }                      // OK: int は R を含まない
-region R { let x = &R 5 in 42 }      // OK: 内部で `&R int` 使うが結果は int
-region R { &R 5 }                    // ERROR: 結果が `&R int`、R が外に漏れる
-region R { (&R 1, 2) }               // ERROR: tuple 内に `&R int`
+fn (x: &R int) -> x                  // `&R T` reference type (R is a region name)
+&R 5                                 // value expression: tag 5 as `&R int`
+let x: &R int = &R 5 in ...          // combined with explicit annotation
 ```
 
-**`R.alloc(v)` sugar (Phase 2.5)**: region 内で `R.alloc(expr)` は `&R expr` の糖衣構文。R が lexically enclosing な region 名のときだけ desugar される (通常の `obj.alloc(...)` field access はそのまま動く)。
+**Current semantics (Phase 2)**:
+- `region R { body }` binds R into the inner scope and evaluates body. R itself is a unit-value placeholder.
+- `&R T` is the region-tagged reference type as expressed in the type system.
+- `&R v` is a value expression that wraps v at `&R T` (interpreter passes the value through).
+- **Escape check active**: if R appears in the body's type of `region R { body }`, it's a compile-time error — `&R T` values can't leak out of the region.
+- Future (Phase 3+): the `r.alloc(v)` method form (sugar for `&R v`), the `Trivial[R]` constraint, `with` + Drop integration, child regions and promotion, etc.
+
+**Escape check examples**:
+```
+region R { 42 }                      // OK: int doesn't contain R
+region R { let x = &R 5 in 42 }      // OK: `&R int` used inside, but result is int
+region R { &R 5 }                    // ERROR: result is `&R int`; R leaks out
+region R { (&R 1, 2) }               // ERROR: `&R int` inside a tuple
+```
+
+**`R.alloc(v)` sugar (Phase 2.5)**: inside a region, `R.alloc(expr)` is syntactic sugar for `&R expr`. The desugaring only happens when R is a lexically enclosing region name (ordinary `obj.alloc(...)` field accesses keep working).
 ```
 region R {
   let x = R.alloc(5) in              // == let x = &R 5 in ...
@@ -240,39 +231,39 @@ region R {
 }
 ```
 
-**`Trivial[R]` 制約 (Phase 2.6)**: region に置ける値は **Drop semantics を持たない型** (Trivial) のみ。Drop 型は `drop type Name = ...` で宣言し、region 配置 (`&R v` / `R.alloc(v)` / view フィールド) で Drop 型を含むと型エラーになる。これは「region の一括解放を可能にするための制約」で、Drop が必要な cap (DB connection / file handle 等) は将来の `with` 式で別途管理する。
+**`Trivial[R]` constraint (Phase 2.6)**: only types **without Drop semantics** (Trivial) can be placed in a region. Drop types are declared with `drop type Name = ...`; including such a type in a region (`&R v` / `R.alloc(v)` / view fields) is a type error. This is "a constraint that allows bulk region freeing"; caps that need Drop (DB connections / file handles etc.) are separately managed by a future `with` expression.
 ```
 drop type Conn = { id: int };
 
-let c = Conn { id = 1 } in c.id      // OK: region 外なら Drop 型も普通に使える
+let c = Conn { id = 1 } in c.id      // OK: Drop types are usable outside a region
 
 region R {
   &R Conn { id = 1 }                  // ERROR: Trivial[R] violated
 }
 
 view Holder[R] { c: Conn };
-region S { Holder { c = ... } }       // ERROR: view field has Drop type
+region S { Holder { c = ... } }       // ERROR: view field has a Drop type
 
 region R {
-  &R (fn (c: Conn) -> c.id)           // OK: function 型は closure 値として Trivial
+  &R (fn (c: Conn) -> c.id)           // OK: function types are Trivial (closure values)
 }
 ```
 
-**`Trivial[R]` は暗黙的にデフォルト**: 通常の型 (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure 等) は **自動的に `Trivial[R]`** として扱われる。 user が `impl Trivial[R] for X { }` のような構文で明示宣言する必要は **無い** (将来の trait システム導入時に検討、 internal design notes §3 参照)。 唯一の例外が `drop type` で宣言された型で、 これらは構造的に含まれる位置すべてで Trivial[R] を破る (`contains_drop_type` walker、 `lib/typer.ml`)。 つまり判定アルゴリズムは "default-Trivial + drop-blacklist" の単純な scheme。 trait システム本格導入 (DEFERRED §3.1) と explicit `impl Trivial[R]` 構文 (同 §6.1) は連動する設計だが、 現状実装には影響しない。
+**`Trivial[R]` is implicitly the default**: ordinary types (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure etc.) are **automatically `Trivial[R]`**. Users do **not** need to declare `impl Trivial[R] for X { }` (a future trait system may revisit this; see the private internal design notes §3). The sole exception is types declared with `drop type` — they break Trivial[R] at every position they structurally appear (`contains_drop_type` walker in `lib/typer.ml`). So the judgment scheme is the simple "default-Trivial + drop-blacklist". Full trait-system rollout (DEFERRED §3.1) and explicit `impl Trivial[R]` syntax (§6.1) are linked in the design but don't affect the current implementation.
 
-### view (Phase 2.4: 宣言 + region 強制 + 型 tag 伝播)
+### view (Phase 2.4: declaration + region enforcement + type-tag propagation)
 
 ```
-view V[R] of T { f1: T1, f2: T2, ... };   // region R 上の view 型 (内部型 T 指定)
-view V[R] { f1: T1, ... };                // `of T` は省略可
+view V[R] of T { f1: T1, f2: T2, ... };   // view type over region R (with explicit inner type T)
+view V[R] { f1: T1, ... };                // `of T` is optional
 ```
 
-`view V[R] of T { ... }` は **region パラメータ付きのデータ宣言**。Phase 2.4 では:
+`view V[R] of T { ... }` is a **data declaration with a region parameter**. In Phase 2.4:
 
-- view 構築は `region { ... }` block 内でのみ可能 (region 外で `V { ... }` を書くと型エラー)
-- 構築時、view の region パラメータ `R` は最内側の active region 名に置換され、view 値の型は `V[<region>]` 形式になる
-- フィールドアクセス `v.f1` と record update `{ v | f1 = e1 }` は record と同じく使え、`&R T` 型のフィールドも構築時 region に substitute された型として取り出せる
-- view 値自体は escape check の対象 — 構築 region 外には出せない
+- View construction is only allowed inside a `region { ... }` block (writing `V { ... }` outside is a type error).
+- At construction, the view's region parameter `R` is substituted with the innermost active region's name, and the view value's type becomes `V[<region>]`.
+- Field access `v.f1` and record update `{ v | f1 = e1 }` work like records; `&R T` fields are retrieved with the type substituted to the construction-time region.
+- The view value itself is subject to escape checking — cannot leave the construction region.
 
 ```
 view Node[R] of int { value: int, next: int };
@@ -287,53 +278,53 @@ region S {
   take_s s.item                         // s.item : &S int → 99
 }
 
-region S { Slot { item = &T 42 } }     // ERROR (region 不一致)
+region S { Slot { item = &T 42 } }     // ERROR (region mismatch)
 region S { Cell { v = 1 } }            // ERROR: Cell[S] cannot leave region S
 ```
 
-**将来 Phase で厳格化される予定**:
-- 同一 region 内の循環構築 (mutable な構築 phase + immutable な使用 phase の二段階)
-- Q-009 の "structural identity by region" 公理 (同一 region 内の同型 view を同一視)
+**Planned tightening for later phases**:
+- Cyclic construction within the same region (two-phase: mutable construction + immutable use).
+- Q-009's "structural identity by region" axiom (identifying same-typed views inside a region).
 
-詳細は [memory-model.md](memory-model.md) と `internal design notes` 参照。
+See [memory-model.md](memory-model.md) and the private internal design notes.
 
-### 関数 + `using [cap]` 構文糖
+### Functions + `using [cap]` syntactic sugar
 
-`using [cap1, cap2, ...]` は cap-passing スタイルで頻発する partial application パターンを緩和する構文糖。caps は outer-most curried args として展開される。
+`using [cap1, cap2, ...]` is a sugar that eases the repeated partial-application patterns of cap-passing style. Caps are expanded as the outermost curried args.
 ```
 fn x using [logger] -> body
 // ≡ fn logger -> fn x -> body
 ```
 
-これにより caller は `f cap` で cap を embedding した `T -> U` を即座に得られ、`map` 等の高階関数に渡せる:
+Callers can immediately get a `T -> U` with the cap embedded via `f cap`, ready to pass to higher-order functions like `map`:
 ```
 let log_x = fn x using [logger] -> logger (show x);
 let bound = log_x my_logger;    // bound : int -> unit
 iter bound [1, 2, 3];
 ```
 
-- 型注釈可: `fn x using [c: int -> int] -> c x`
-- 複数 cap: `fn x using [logger: Logger, metrics: Metrics] -> ...`
-- 通常 params と組合せ: `fn (x: int) using [c: Logger] -> c.info (show x)`
-- 空 `using []` は parse error
+- Type annotations OK: `fn x using [c: int -> int] -> c x`
+- Multiple caps: `fn x using [logger: Logger, metrics: Metrics] -> ...`
+- Combined with normal params: `fn (x: int) using [c: Logger] -> c.info (show x)`
+- Empty `using []` is a parse error.
 
-### 関数
+### Functions
 ```
-fn x -> x + 1                       // 単引数 (型推論)
-fn (x: int) -> x + 1                // 単引数 (型注釈)
-fn (x: int, y: int) -> x + y        // 多引数 (curry に desugar)
-fn (a, b, c) -> a + b * c           // 多引数、無注釈
-fn () -> 42                         // 引数なし (内部で _u : unit)
+fn x -> x + 1                       // single arg (type-inferred)
+fn (x: int) -> x + 1                // single arg (annotated)
+fn (x: int, y: int) -> x + y        // multi-arg (desugared to currying)
+fn (a, b, c) -> a + b * c           // multi-arg, no annotations
+fn () -> 42                         // no args (internally _u : unit)
 ```
 
-### 適用 / 部分適用
+### Application / partial application
 ```
 inc 5
 add 3 4                             // = (add 3) 4
-let inc1 = (+) 1 in ...             // 演算子の funct 化は未対応 (今は curry fn で代替)
+let inc1 = (+) 1 in ...             // turning operators into functions is not yet supported (use a curried fn)
 ```
 
-### タプル / レコード / リスト
+### Tuples / records / lists
 ```
 (1, 2, 3)                           // tuple
 
@@ -342,11 +333,11 @@ let p = Point { x = 3, y = 4 } in p.x + p.y           // record
 let p2 = { p | x = 100 } in p2.x                       // record update
 
 type 'a list = Nil | Cons of 'a * 'a list;
-[1, 2, 3]                           // list 構文糖 = Cons (1, Cons (2, Cons (3, Nil)))
+[1, 2, 3]                           // list literal sugar = Cons (1, Cons (2, Cons (3, Nil)))
 []                                  // = Nil
 ```
 
-### sum types / コンストラクタ / match
+### Sum types / constructors / match
 ```
 type 'a opt = None | Some of 'a;
 
@@ -361,7 +352,7 @@ match xs with
 | [a, b, c]   -> "exactly three"
 
 match x with
-| (a, b) as p when a < b -> p         // as-pattern: whole を p に bind
+| (a, b) as p when a < b -> p         // as-pattern: bind whole to p
 | _                      -> (0, 0)
 
 match day with
@@ -370,26 +361,26 @@ match day with
 | _                 -> "invalid"
 ```
 
-### ブロック / 副作用シーケンス
+### Block / side-effect sequencing
 ```
 { }                                 // → unit
-{ e1; e2; e3 }                      // → eN、e1..e_(N-1) は捨てる (let _ = ... in chain)
+{ e1; e2; e3 }                      // → eN; e1..e_(N-1) are discarded (sugar for let _ = ... in chains)
 ```
 
-### 関数合成 / パイプ
+### Function composition / pipe
 ```
-5 |> inc |> dbl                     // = dbl (inc 5)、左結合、最低優先
-inc << dbl                          // = fn x -> inc (dbl x)、右結合
-inc >> dbl                          // = fn x -> dbl (inc x)、右結合
-```
-
-### 型注釈 (annotation)
-```
-(42 : int)                          // 表現的だが既存型と一致必須
-((fn x -> x + 1) : int -> int) 5    // 関数の型注釈
+5 |> inc |> dbl                     // = dbl (inc 5); left-assoc; lowest precedence
+inc << dbl                          // = fn x -> inc (dbl x); right-assoc
+inc >> dbl                          // = fn x -> dbl (inc x); right-assoc
 ```
 
-### Signature alias (関数引数束ね)
+### Type annotation
+```
+(42 : int)                          // expressive; must agree with the existing type
+((fn x -> x + 1) : int -> int) 5    // function-typed annotation
+```
+
+### Signature alias (function-argument bundling)
 ```
 signature ctx = (db: int, log: int);
 
@@ -399,24 +390,24 @@ save 100 10 5                       // 115
 
 ---
 
-## 4. パターン
+## 4. Patterns
 
-| 種類 | 構文 | 例 |
+| Kind | Syntax | Example |
 |---|---|---|
-| ワイルドカード | `_` | `_` |
-| 変数 | `name` | `n`、`xs` |
-| 整数 | `N` | `0`、`42` |
-| 真偽 | `true` / `false` | |
-| 文字列 | `"..."` | `"foo"` |
-| unit | `()` | |
-| タプル | `(p1, p2, ...)` | `(a, b)`、`(a, (b, c))` |
-| コンストラクタ | `Name` or `Name sub_pat` | `None`、`Some x`、`Cons (h, t)` |
-| リスト | `[]` / `[a, b, c]` / `[h, ...t]` / `[..._]` | |
-| レコード | `Name { f1 = p1, f2 = p2 }` | `Point { x = 0, y = py }`、partial OK |
+| Wildcard | `_` | `_` |
+| Variable | `name` | `n`, `xs` |
+| Integer | `N` | `0`, `42` |
+| Boolean | `true` / `false` | |
+| String | `"..."` | `"foo"` |
+| Unit | `()` | |
+| Tuple | `(p1, p2, ...)` | `(a, b)`, `(a, (b, c))` |
+| Constructor | `Name` or `Name sub_pat` | `None`, `Some x`, `Cons (h, t)` |
+| List | `[]` / `[a, b, c]` / `[h, ...t]` / `[..._]` | |
+| Record | `Name { f1 = p1, f2 = p2 }` | `Point { x = 0, y = py }`; partial OK |
 | as | `pat as name` | `Cons (h, t) as whole` |
-| or | `p1 | p2` | `1 | 2 | 3`、両 branch は同 names + 同型を bind |
+| or | `p1 | p2` | `1 | 2 | 3`; both branches bind the same names + types |
 
-### ガード (in match)
+### Guards (in match)
 ```
 match x with
 | n when n > 0 -> "positive"
@@ -425,19 +416,19 @@ match x with
 
 ---
 
-## 5. Top-level 宣言
+## 5. Top-level declarations
 
 ### let / let rec
 ```
-let x = 5;                          // ident 形
-let (a, b) = (3, 4);                // pattern 形
-let _ = print "init";               // wildcard でも OK
+let x = 5;                          // ident form
+let (a, b) = (3, 4);                // pattern form
+let _ = print "init";               // wildcard is fine
 
 let rec fact = fn n -> ... ;
 let rec is_even = ... and is_odd = ... ;
 ```
 
-### type 宣言
+### Type declarations
 
 ```
 // 1. Sum type (variant)
@@ -454,86 +445,86 @@ type Pair = int * int;
 type 'a Stack = 'a list;
 ```
 
-判別:
-- `=` の直後が `{` → record
-- 先頭 `|`、または大文字 ident + (`|`/`of`) → variant
-- それ以外 → alias
+Disambiguation:
+- `=` followed by `{` → record.
+- Leading `|`, or uppercase ident followed by `|` / `of` → variant.
+- Otherwise → alias.
 
 ### signature
 
 ```
 signature ctx = (db: int, log: int);
-// fn (...ctx, x: int) -> ... で展開される (parse-time)
+// Expanded by `fn (...ctx, x: int) -> ...` (parse-time)
 ```
 
 ---
 
-## 6. 演算子優先度 (低 → 高)
+## 6. Operator precedence (low → high)
 
-| 優先度 | 演算子 | 結合性 |
+| Precedence | Operators | Associativity |
 |---|---|---|
-| 1 (低) | `let`, `if`, `fn`, `match`, `with`, `for`, `while` | - |
-| 2 | `@@` (低優先度 apply、Phase 36) | 右 |
-| 3 | `|>` / `<|` (Phase 36) | 左 / 右 |
-| 4 | `<<`, `>>` | 右 |
-| 5 | `||` | 左 |
-| 6 | `&&` | 左 |
-| 7 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 非結合 |
-| 8 | `::` (cons、Phase 36) | 右 |
-| 9 | `..` (range、Phase 36) | 非結合 |
-| 10 | `+`, `-`, `++` | 左 |
-| 11 | `*`, `/`, `%` | 左 |
+| 1 (low) | `let`, `if`, `fn`, `match`, `with`, `for`, `while` | - |
+| 2 | `@@` (low-precedence apply, Phase 36) | right |
+| 3 | `|>` / `<|` (Phase 36) | left / right |
+| 4 | `<<`, `>>` | right |
+| 5 | `||` | left |
+| 6 | `&&` | left |
+| 7 | `==`, `!=`, `<`, `<=`, `>`, `>=` | non-associative |
+| 8 | `::` (cons, Phase 36) | right |
+| 9 | `..` (range, Phase 36) | non-associative |
+| 10 | `+`, `-`, `++` | left |
+| 11 | `*`, `/`, `%` | left |
 | 12 | unary `-` | - |
-| 13 | `?` / `?!` (postfix、Phase 36) | postfix |
-| 14 | function application | 左 |
-| 15 (高) | atom / `(...)` / `[...]` / `{...}` / `.field` / op section `(+ N)` / `\x -> e` / `"...{expr}..."` | - |
+| 13 | `?` / `?!` (postfix, Phase 36) | postfix |
+| 14 | function application | left |
+| 15 (high) | atom / `(...)` / `[...]` / `{...}` / `.field` / op section `(+ N)` / `\x -> e` / `"...{expr}..."` | - |
 
-`expr : type` (annotation) は最外で 1 回適用される。
-
----
-
-## 7. 評価モデル
-
-- **正格評価** (call-by-value)、ただし `&&` と `||` は短絡
-- **可変なし** (immutable)、再代入できない、`with` も新しいバインディングを作る
-- **closure 取り込み** は値参照 (環境を closure に閉じ込める)
-- **エラー**: 型エラーは compile-time、`fail`/`assert`/`div by zero`/`unmatched match` 等は実行時 `Eval_error`
-
-### Copy セマンティクス (暗黙的にデフォルト)
-
-Mere は Rust の `Copy` trait のような explicit な「コピー可能型」 マーカーを **持たない**。 代わりに以下の暗黙ルール:
-
-- **値型 (int / float / bool / str / unit / list / tuple / variant / record / closure)**: `let x = v in ...` で同名 / 別名のリバインドが自由、 引数として何度も渡せる ("Copy" 扱い)。 実装的には immutable な値の **構造共有 + GC なし region alloc** で実現
-- **region-bound 参照型 (`&R T` / `Vec[R, T]` / `Map[R, K, V]` / `StrBuf[R]`)**: region の生存期間中は自由に複製可能 (内部はポインタ + region 一括解放)
-- **`drop type ...` で宣言された Drop 型 (`Conn` / `File` 等)**: region に置けない (Trivial[R] 違反)、 `with` 構文で scope-bound に管理。 ただし region 外では **let rebind 可能** (Linear 強制無し、 close は scope 末で自動)
-- **`OwnedVec[T]`**: linear-ish。 Phase 38.G-1 Level 1 で auto Drop (lexical scope 末で `free`)、 `let v2 = v1` のような alias は構文上可能だが Drop が二重に走る等の問題があり、 user 側で `vec_to_owned` 等で明示変換するイディオムを推奨
-
-つまり Mere の Copy/Linear 区別は **Drop 型 / OwnedVec / それ以外** の 3 層で実現済で、 explicit Copy/Linear trait annotation は不要。 将来 `T: Copy` / `T: Linear` の type bound を導入する設計余地は残しているが (trait システム §3.1 と連動)、 dogfood signal 不在のため defer 確定 (同 §6.4)。
+`expr : type` (annotation) is applied once at the outermost level.
 
 ---
 
-## 8. 既知の制約 (2026-06-22)
+## 7. Evaluation model
 
-旧版で「未実装」だった項目は Phase 14-36 で順次実装され、現状は以下のみ残る:
+- **Strict (call-by-value)**; `&&` and `||` are short-circuit.
+- **No mutation**; rebinding is not allowed; `with` also creates a new binding.
+- **Closure capture** is by value-reference (the environment is closed in the closure).
+- **Errors**: type errors are compile-time; `fail`/`assert`/`div by zero`/unmatched match etc. are runtime `Eval_error`.
 
-- **網羅性検査は Phase 1** (bool + variant types のみ): 非網羅は **warning** を stderr に出力、評価は継続 (case 漏れは runtime fallthrough エラー)
-- **int / str / float / tuple / record の網羅性**は wildcard arm が必要 (精密な検査は将来)
-- **文字列 escape** は `\n \t \\ \"` + Phase 36 で `\{` (補間の中括弧 escape) のみ。Unicode escape (`\uXXXX`) なし
-- **整数は固定幅**: int は OCaml の `int` (host 依存、通常 63 bit)、任意精度なし。LLVM/Wasm では i64 / i32
-- **float は MVP**: IEEE 754 倍精度、`f_add` 系の関数 prefix。`+.` のような中置版は未実装
-- **文字列補間でネスト文字列リテラル禁止**: `"x = {show \"abc\"}"` は lexer エラー (let 経由で回避)
-- **`while` は fn body 内のみ**: top-level main で `while` を直接書くと codegen 非対応 (top-level Let_rec 制約)
-- **REPL の `:type EXPR` は値式のみ**: top-level decl の型表示は `:show NAME` で可能
-- **FFI 型範囲は MVP**: `int / bool / str / unit` のみ (float / tuple / record / variant / callback は defer、Phase 32)
-- **ポリモーフィズム**: HM 推論 + let-polymorphism + 多相 user let-rec の per-instantiation 特殊化 (Phase 23.3 / 25.5 / 26.4)。Phase 36 で **narrow value restriction** 導入 (mutable container を含む型は let-bind 時に generalize しない)
+### Copy semantics (implicitly default)
 
-## 9. ステータス概要
+Mere has **no explicit "copyable" marker** like Rust's `Copy` trait. Instead, the following implicit rules:
 
-- **1529 tests passing** (test/test_basic.ml)
-- **4 backend feature parity**: interpreter + C / LLVM IR / Wasm runtime
-- 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) で **diff = 0 PERFECT 一致**
-- 詳細は [Changelog](changelog.md) / [Codegen](codegen.md) を参照
+- **Value types (int / float / bool / str / unit / list / tuple / variant / record / closure)**: free to rebind under the same or different names with `let x = v in ...`, pass repeatedly as arguments ("Copy" treatment). Implementation-wise this is **structural sharing + GC-less region alloc** of immutable values.
+- **Region-bound reference types (`&R T` / `Vec[R, T]` / `Map[R, K, V]` / `StrBuf[R]`)**: freely duplicable during the region's lifetime (internally a pointer + bulk-freed with the region).
+- **Drop types declared with `drop type ...` (`Conn` / `File` etc.)**: can't be placed in a region (Trivial[R] violation); managed scope-bound by `with`. Outside a region, **let rebind is permitted** (no Linear enforcement; close runs automatically at scope end).
+- **`OwnedVec[T]`**: linear-ish. Phase 38.G-1 Level 1 added auto-Drop (`free` at lexical scope end). `let v2 = v1`-style aliasing is syntactically possible but problematic (double Drop), so users are encouraged to use idioms like `vec_to_owned` for explicit conversion.
+
+So Mere's Copy/Linear distinction is realized via three layers — **Drop types / OwnedVec / everything else** — without explicit Copy/Linear trait annotations. Design room remains to introduce `T: Copy` / `T: Linear` type bounds later (linked to the trait system §3.1), but with no dogfood signal, it's confirmed-deferred (same §6.4).
 
 ---
 
-詳細な動作確認は `examples/` と `test/test_basic.ml` を参照。
+## 8. Known constraints (2026-06-22)
+
+Items previously listed as "not implemented" were implemented incrementally through Phases 14-36; the following remain:
+
+- **Exhaustiveness check is Phase 1** (bool + variants only): non-exhaustive → **warning** to stderr; evaluation proceeds (case omissions become runtime fallthrough errors).
+- **For int / str / float / tuple / record**, a wildcard arm is required (precise checks come later).
+- **String escapes** are only `\n \t \\ \"` plus Phase 36's `\{` (interp brace escape). No Unicode escape (`\uXXXX`).
+- **Integers are fixed-width**: int is OCaml's `int` (host-dependent, normally 63 bits); no arbitrary precision. LLVM/Wasm use i64 / i32.
+- **Float is MVP**: IEEE 754 double; `f_add`-style function prefixes; no `+.` infix.
+- **No nested string literals in interpolation**: `"x = {show \"abc\"}"` is a lexer error (work around via let).
+- **`while` only inside fn bodies**: writing `while` directly under top-level main is codegen-unsupported (top-level Let_rec constraint).
+- **REPL `:type EXPR` is value-expressions only**: type display of top-level decls is available via `:show NAME`.
+- **FFI types are MVP**: `int / bool / str / unit` only (float / tuple / record / variant / callback deferred, Phase 32).
+- **Polymorphism**: HM inference + let-polymorphism + per-instantiation specialization of polymorphic user let-recs (Phase 23.3 / 25.5 / 26.4). Phase 36 introduced a **narrow value restriction** (don't generalize on let-bind when the type contains a mutable container).
+
+## 9. Status summary
+
+- **1529 tests passing** (test/test_basic.ml).
+- **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime.
+- 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) match **diff = 0 PERFECT**.
+- See [Changelog](changelog.md) / [Codegen](codegen.md) for details.
+
+---
+
+For detailed behavior, see `examples/` and `test/test_basic.ml`.

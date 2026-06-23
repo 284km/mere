@@ -5,63 +5,56 @@
 
 > *Make Explicit Region-bound Effects.*
 
-新プログラミング言語 **Mere** (古英語の「湖」、4 文字、region メタファー)
-の OCaml 実装。ML 系 mini lang として実用域に到達し、メモリモデル
-(region/view/Trivial[R])・エフェクトシステム (cap passing + 借用注釈
-細分化)・3 バックエンド (C / LLVM IR / Wasm) の codegen まで全部
-feature-parity で動く段階。
+OCaml implementation of **Mere**, a new programming language (Old English for "lake"; 4 letters; region metaphor). An ML-family mini language that has reached a practical level — its memory model (region / view / Trivial[R]), effect system (capability passing + refined borrow annotations), and three codegen backends (C / LLVM IR / Wasm) all work at feature parity.
 
-旧仮称: `lang-ml` (2026-06-19 に Mere に確定、NAMING.md 参照)。
+Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19; see NAMING.md).
 
-## ステータス (2026-06-22 時点)
+## Status (as of 2026-06-22)
 
 - **1529 tests passing**
-- **4 backend feature parity**: interp + C / LLVM IR / Wasm runtime
-  すべてが 16 realistic examples (~1500 LoC) で **diff = 0 PERFECT 一致**
-  (Phase 24-27)、Phase 36 で実例集を 118 本まで拡張
-- メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
-  3 codegen backend すべてで動く
-- エフェクトシステム: cap-passing パターン + `signature ... = (...)` 引数束ね + `using [cap]` sugar + builtin Logger / Metrics
-- 借用注釈の細分化: `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` の 4 mode + borrow checker (place expression + if/match 分岐の伝播 + conflict matrix 完全網羅)
-- Q-010 標準コレクション: `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` が **interpreter + 3 backend** で動作 (Phase 15.x)
-- ポリモーフィズム: HM 推論 + let-poly + **多相 user let-rec の per-instantiation 特殊化** (Phase 23.3 / 25.5 / 26.4) + Phase 36 で narrow value restriction (mutable container を含む型を let-bind した時は generalize しない)
-- inner-fn lifting: `let rec inner = fn ... -> ...` を top-level に持ち上げ + 自由変数を prepend (Phase 25.3 / 26.3)
-- top-level 値 binding: `let total = mk_metrics();` のような非-fn let を fn body から参照可 (Phase 30.2 で 3 backend に global 化)
-- Wasm runtime: `scripts/run_wasm.js` (Node.js host harness, puts / read_file / write_file) で runtime 実行検証 (Phase 27.2)
-- FFI: `extern fn <name>: <ty>;` で libc 関数を 4 backend から直接呼出 (Phase 32、curried multi-arg 対応、int/bool/str/unit 型のみ MVP)
-- 言語 surface: `module M { ... }` (入れ子可) + `M.f` qualified access、`import "./path";` (importer-relative + canonical) によるファイル分割、`open M;`
-- **Phase 36 syntactic sugar (13 種)**: range `a..b` / operator section `(+ 1)` / cons `1 :: xs` / reverse pipe `f <| x` / apply `f @@ x` / lambda shorthand `\x -> ...` / string interpolation `"x = {show n}"` / `?` (Option) / `?!` (Result) early-return / list comprehension `[f x | x <- xs, p x]` / `if let pat = e then ... else ...` / `for x in xs do body` / `while cond do body`
-- **Phase 36 prelude 強化 (16 entry 追加)**: `range` / `list_filter` / `list_take` / `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` / `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` / `list_product` / `list_max` / `list_min` (累計 34 entry)
-- REPL: multi-line 入力、`:env` / `:show` / `:load` / `:reset`、Rust 風 code frame でエラー表示
-- 設計コンテキストは別リポ `internal design notes` (private)
+- **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); Phase 36 expanded the example set to 118.
+- Memory model: region / view / Trivial[R] / `with` Drop work at the type level, in the interpreter, and in all three codegen backends.
+- Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.
+- Refined borrow annotations: 4 modes `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place expressions + if/match branch propagation + full conflict matrix coverage).
+- Q-010 standard collections: `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` work in **interpreter + all 3 backends** (Phase 15.x).
+- Polymorphism: HM inference + let-poly + **per-instantiation specialization of polymorphic user let-recs** (Phase 23.3 / 25.5 / 26.4) + Phase 36's narrow value restriction (don't generalize when let-binding a type that contains a mutable container).
+- Inner-fn lifting: `let rec inner = fn ... -> ...` is lifted to top level with free variables prepended (Phase 25.3 / 26.3).
+- Top-level value bindings: non-fn lets like `let total = mk_metrics();` are accessible from fn bodies (Phase 30.2 globalizes them across all 3 backends).
+- Wasm runtime: validated at runtime via `scripts/run_wasm.js` (Node.js host harness — puts / read_file / write_file) (Phase 27.2).
+- FFI: `extern fn <name>: <ty>;` calls libc functions directly from all 4 backends (Phase 32; supports curried multi-arg; MVP types are int/bool/str/unit only).
+- Language surface: `module M { ... }` (nestable) + `M.f` qualified access; `import "./path";` (importer-relative + canonical) for file splitting; `open M;`.
+- **Phase 36 syntactic sugar (13 kinds)**: range `a..b`, operator section `(+ 1)`, cons `1 :: xs`, reverse pipe `f <| x`, apply `f @@ x`, lambda shorthand `\x -> ...`, string interpolation `"x = {show n}"`, `?` (Option) / `?!` (Result) early-return, list comprehension `[f x | x <- xs, p x]`, `if let pat = e then ... else ...`, `for x in xs do body`, `while cond do body`.
+- **Phase 36 prelude expansion (16 entries)**: `range` / `list_filter` / `list_take` / `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` / `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` / `list_product` / `list_max` / `list_min` (34 entries total).
+- REPL: multi-line input, `:env` / `:show` / `:load` / `:reset`, Rust-style code frame error display.
+- Design context lives in a private notes repo.
 
-## 動く機能ハイライト
+## Feature highlights
 
-| カテゴリ | 内容 |
+| Category | Details |
 |---|---|
-| 型システム | Hindley-Milner 推論、let-polymorphism、多相 builtin |
-| プリミティブ | `int`、`float` (IEEE 754)、`bool`、`str`、`unit` |
-| データ | tuple、record、sum types、list 構文糖 `[1, 2, 3]` (show 出力も `[..]` 形式) |
-| 制御 | `if-then-else`、`if-then` (unit)、`match` + guard `when` + as-pattern + or-pattern |
-| パターン | wildcard / var / lit / 文字 `'X'` / tuple / constructor / list `[h, ...t]` / record / as / or |
-| 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
-| 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int 算術)、float は `f_add` 等 |
-| 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
-| メモリモデル | region (`region R { ... }`) / view (`view V[R] of T { ... }`) / `&R T` 参照 / escape check / Trivial[R] 制約 / `R.alloc(v)` sugar |
-| 借用注釈 | `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place + if/match 伝播) |
-| エフェクト | capability passing (cap = record の値)、`signature` 引数束ね + spread、`using [cap]` sugar、builtin Logger / Metrics |
-| with Drop | `with c = ... in body` で scope 末に `close` field 自動呼出、複数 binding は LIFO |
-| エラー処理 | `Result` 型 + `result_map` / `result_and_then` / `result_or_else` (prelude)、`fail "msg"` / `try_or default fn` で例外的 fail catch |
-| モジュール | `module M { ... }` (入れ子)・`M.f` 参照・内部短縮名 rewrite・`open M;`・module 内 type/record OK |
-| import | `import "./path";` で別ファイル取込み (importer-relative + canonical) |
-| collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) — **insertion-order な Map iter** (Phase 27.1) |
-| stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 (`str_split` / `str_join` / `str_compare` / `str_index_of` 等) / 数値 / 多相 helper / float / error / Logger・Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く + Wasm runtime 実行検証 (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 + 高階 API + 変換 + `len` ad-hoc poly + 多相 user let-rec の per-instantiation 特殊化 (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level 値 binding を file-scope global 化 (Phase 30.2) |
-| FFI | `extern fn <name>: <ty>;` で libc 関数を 4 backend (interp + C/LLVM/Wasm) から呼出。curried multi-arg、int / bool / str / unit 型 (Phase 32) |
-| REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
-| エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案 (record field / qualified name 含む)、型変換 hint |
+| Type system | Hindley-Milner inference, let-polymorphism, polymorphic builtins |
+| Primitives | `int`, `float` (IEEE 754), `bool`, `str`, `unit` |
+| Data | tuple, record, sum types, list literal sugar `[1, 2, 3]` (also pretty-printed by `show`) |
+| Control | `if-then-else`, `if-then` (unit), `match` + `when` guards + as-patterns + or-patterns |
+| Patterns | wildcard / var / lit / char `'X'` / tuple / constructor / list `[h, ...t]` / record / as / or |
+| Functions | multi-arg typed fn / mutually recursive `let rec ... and ...` / higher-order / closures |
+| Operators | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int arithmetic); float uses `f_add` etc. |
+| Name management | `let _ = ...;`, `let (a, b) = ...;`, `signature`, `type X = T` (alias) |
+| Memory model | region (`region R { ... }`) / view (`view V[R] of T { ... }`) / `&R T` reference / escape check / Trivial[R] constraint / `R.alloc(v)` sugar |
+| Borrow annotations | `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place + if/match propagation) |
+| Effects | capability passing (cap = record value), `signature` argument bundling + spread, `using [cap]` sugar, builtin Logger / Metrics |
+| with Drop | `with c = ... in body` auto-invokes the `close` field at scope end; multiple bindings close LIFO |
+| Error handling | `Result` type + `result_map` / `result_and_then` / `result_or_else` (prelude); `fail "msg"` / `try_or default fn` for catchable failures |
+| Modules | `module M { ... }` (nestable), `M.f` references, internal short-name rewrite, `open M;`, type/record decls allowed inside modules |
+| import | `import "./path";` pulls in another file (importer-relative + canonical) |
+| Collections | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + higher-order API (iter/map/fold/filter/to_list/to_owned) — **insertion-order Map iter** (Phase 27.1) |
+| stdlib | 90+ builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
+| codegen | C / LLVM IR / Wasm (WAT) backends at parity + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
+| FFI | `extern fn <name>: <ty>;` calls libc functions from all 4 backends (interp + C / LLVM / Wasm). Curried multi-arg; types int / bool / str / unit (Phase 32). |
+| REPL | persistent env, multi-line input, `:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
+| Error UX | Rust-style multi-line code frame, ANSI colors (TTY only), Levenshtein-based typo suggestions (including record fields and qualified names), type-conversion hints |
 
-## クイック例
+## Quick examples
 
 ```sh
 $ dune exec ./bin/mere.exe -- -e '5 |> (fn x -> x + 1) |> show'
@@ -74,63 +67,48 @@ $ dune exec ./bin/mere.exe -- -e 'type opt = None | Some of int; match Some 42 w
 43
 
 $ dune exec ./bin/mere.exe -- examples/module_basic.mere
-# `module Math { ... }` + Math.inc / Math.square / Math.pow を呼ぶ
+# Calls Math.inc / Math.square / Math.pow from `module Math { ... }`
 
 $ dune exec ./bin/mere.exe -- examples/import_demo.mere
-# import "examples/lib_list_ops.mere"; ListOps.sum [1..5] を計算
+# import "examples/lib_list_ops.mere"; computes ListOps.sum [1..5]
 
 $ dune exec ./bin/mere.exe -- contrib/json/json.mere
-# JSON パーサ in Mere (140 行、 Phase 40 で contrib/ に格上げ) のセルフテストが走る
+# Runs the self-test of the JSON parser in Mere (140 lines; promoted to contrib/ in Phase 40)
 
 $ dune exec ./bin/mere.exe -- examples/pipeline.mere
-# region/view/effect/with の全機能を組合せた realistic example
+# A realistic example combining region / view / effects / `with`
 
 $ dune exec ./bin/mere.exe -- examples/toy_sql.mere
-# 1165 行の toy SQL engine (tokenizer + parser + executor + JOIN)、
-# 4 backend (interp + C + LLVM + Wasm) で 59 tests を diff=0 一致
+# 1165-line toy SQL engine (tokenizer + parser + executor + JOIN);
+# 59 tests pass with diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 $ dune exec ./bin/mere.exe -- examples/calc.mere
-# Phase 36: recursive descent な arithmetic parser + `?!` Result chain。
-# `1 + 2 * 3` → 7、`(1 + 2) * 3` → 9、`10 / 0` → ERR division
+# Phase 36: recursive-descent arithmetic parser + `?!` Result chain.
+# `1 + 2 * 3` → 7; `(1 + 2) * 3` → 9; `10 / 0` → ERR division
 
 $ dune exec ./bin/mere.exe -- examples/maze_solver.mere
-# Phase 36: ASCII 8x12 maze の BFS pathfinding + path 可視化
+# Phase 36: BFS pathfinding through an ASCII 8x12 maze + path visualization
 ```
 
-## ドキュメント
+## Documentation
 
-- **[Tutorial](docs/tutorial.md)** — 初めての方はここから (`module` / `import` / REPL 含む)
-- **[Language reference](docs/language-reference.md)** — 構文と意味論
-- **[Stdlib reference](docs/stdlib-reference.md)** — builtin の表
-- **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
-- **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
-- **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
-- **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く `.mere` ファイル群 ([examples/README.md](examples/README.md) で
-  カテゴリ別索引)。基本的な FizzBuzz / word count から、
-  Q-010 collection の codegen demo (`vec_codegen_*.mere` /
-  `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`)、
-  realistic application (4 backend で PERFECT 一致): `template_engine` / `word_freq` /
-  `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`
-  まで、**1165 行の `toy_sql`** (toy SQL engine — Phase 29 dogfood で書いた
-  59 tests、4 backend PERFECT)、そして Phase 36 で追加した 47 本の sugar
-  dogfood example: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` /
-  `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` /
-  `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` /
-  `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` ほか
-- `contrib/` — **lib 候補** ([contrib/README.md](contrib/README.md))。 `examples/`
-  より一段「再利用前提」 の Mere code。 現在 `contrib/json/` (parser + writer) と
-  `contrib/markdown/` (HTML / text / TOC converter)。 pkg manager 完成後に
-  graduate して別 repo へ。 詳細は
-  internal design notes §3
+- **[Tutorial](docs/tutorial.md)** — start here (includes `module` / `import` / REPL)
+- **[Language reference](docs/language-reference.md)** — syntax and semantics
+- **[Stdlib reference](docs/stdlib-reference.md)** — builtin tables
+- **[Patterns / cookbook](docs/patterns.md)** — common idioms
+- **[Memory model](docs/memory-model.md)** — memory management options, region/view, current and future
+- **[Codegen](docs/codegen.md)** — three-backend (C / LLVM IR / Wasm) strategy + per-slice table
+- **[Changelog](docs/changelog.md)** — milestones from project start (2026-06-06) onward
+- `examples/` — runnable `.mere` files ([examples/README.md](examples/README.md) has a categorized index). From basics (FizzBuzz / word count) and Q-010 collection codegen demos (`vec_codegen_*.mere` / `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`), to realistic applications (PERFECT diff = 0 on all 4 backends): `template_engine` / `word_freq` / `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`; **a 1165-line `toy_sql`** (Phase 29 dogfood; 59 tests; 4-backend PERFECT); and the 47 sugar-dogfood examples added in Phase 36: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` / `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` and more.
+- `contrib/` — **library candidates** ([contrib/README.md](contrib/README.md)). One step more "reuse-oriented" than `examples/`. Currently `contrib/json/` (parser + writer) and `contrib/markdown/` (HTML / text / TOC converter). These will graduate to separate repos once a package manager is in place.
 
-## ビルド・実行
+## Build / run
 
 ```sh
 dune build
 dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
-dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
+dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # print the type
 dune exec ./bin/mere.exe -- -r                       # REPL
 dune runtest                                         # 1529 tests
 
@@ -142,66 +120,42 @@ clang out.c -o out && ./out                          # → 10
 dune exec ./bin/mere.exe -- -lle '1 + 2 * 3' | llc - -o sum.s
 clang sum.s -o sum && ./sum                          # → 7
 
-# Wasm codegen (要 wabt / Node.js)
+# Wasm codegen (requires wabt / Node.js)
 dune exec ./bin/mere.exe -- -we '1 + 2 * 3' > sum.wat
 wat2wasm sum.wat -o sum.wasm
-node scripts/run_wasm.js sum.wasm                    # → 7 (host harness 経由)
+node scripts/run_wasm.js sum.wasm                    # → 7 (via the host harness)
 ```
 
-3 backend (C / LLVM / Wasm) はすべて feature parity で、int / 関数 / 文字列 /
-tuple / record / variant / closure / 多相 / 再帰 variant / 複雑 pattern /
-show / region / view / `with` Drop / list pretty-print / Q-010 collection 4 種
-(Vec / OwnedVec / StrBuf / Map) / 多相 user let-rec / inner-fn lifting /
-top-level 値 binding の global 化 / `str_compare` の sign-normalized 出力
-まで通る (Phase 15.x 〜 31.0 で逐次 parity 化、16 realistic examples で
-diff = 0 PERFECT 一致を維持)。
+All three backends (C / LLVM / Wasm) match at feature parity — ints, functions, strings, tuples, records, variants, closures, polymorphism, recursive variants, complex patterns, `show`, region, view, `with` Drop, list pretty-printing, the four Q-010 collections (Vec / OwnedVec / StrBuf / Map), polymorphic user let-recs, inner-fn lifting, top-level value bindings globalized, and `str_compare`'s sign-normalized output (parity reached incrementally through Phases 15.x → 31.0; 16 realistic examples retain diff = 0 PERFECT).
 
-## レイアウト
+## Layout
 
 ```
 mere/
-├── bin/mere.ml         # CLI エントリ
-├── lib/                # コア処理系 (library: mere)
+├── bin/mere.ml         # CLI entry point
+├── lib/                # Core (library: mere)
 │   ├── loc.ml / ast.ml / lexer.ml / parser.ml
-│   ├── typer.ml        # HM 推論 + sum types + records + let-poly + borrow checker
-│   ├── eval.ml         # ツリーウォーキング interpreter
+│   ├── typer.ml        # HM inference + sum types + records + let-poly + borrow checker
+│   ├── eval.ml         # tree-walking interpreter
 │   ├── codegen_c.ml    # C codegen
 │   ├── codegen_llvm.ml # LLVM IR codegen
 │   ├── codegen_wasm.ml # Wasm (WAT) codegen
 │   ├── pipeline.ml     # process / type_of (?base_dir for importer-relative)
-│   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
-│   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
+│   ├── repl.ml         # interactive REPL (multi-line / :env / :show / :load / :reset)
+│   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
 ├── test/test_basic.ml  # 1529 tests
-├── scripts/run_wasm.js # Wasm runtime host harness (Node.js, puts / read_file / write_file)
-├── examples/           # *.mere サンプル群
+├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
+├── examples/           # *.mere sample programs
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```
 
-## 設計コンテキスト (別リポ)
+## Name
 
-設計判断は `internal design notes` (private) で進行:
+**Mere** = Old English for "lake". The region metaphor (a body of water bounded from its surroundings), the minimal ML-family ring, and a modest "just a ..." nuance. The former tentative name `lang-ml` was finalized to Mere on 2026-06-19, at the milestone when the design core (effect / type / memory) all worked.
 
-- `00_design_principles.md` — 言語哲学
-- `01_memory_model.md` — 5 戦略 (owned / borrowed / region (= arena) / view / stack)
-- `05_effect_system.md` — capability passing
-- `OPEN_QUESTIONS.md` — Q-001〜Q-011 全 resolved / narrowed
-- `implementation_status.md` — slice ごとの進捗
-- `SUMMARY.md` — 到達点を外向けに集約
-- `DEFERRED.md` — 後回しにした実装項目の一覧 (codegen / NLL / trait システム等)
-- `NAMING.md` — 仮称 `lang-ml` から正式名 Mere への命名経緯
-- `11_region_vs_arena.md` 〜 `14_view_types.md` — メモリモデル deep dive
+## License
 
-## 名前
+**MIT License** (see [LICENSE](LICENSE)).
 
-**Mere** = 古英語の "湖"。region (周囲から区切られた水域) のメタファー、
-ML 系の minimal な響き、`mere = ただの〜` のニュアンスに込めた謙虚さ。
-旧仮称 `lang-ml`、設計の核 (effect / type / memory) が動いた節目で
-2026-06-19 に確定。
-
-## ライセンス
-
-**MIT License** ([LICENSE](LICENSE) 参照)。
-
-contribution については [CONTRIBUTING.md](CONTRIBUTING.md) を参照
-(将来の MIT OR Apache-2.0 dual license 化の余地を確保する文言あり)。
+For contributions see [CONTRIBUTING.md](CONTRIBUTING.md) (contains language that leaves room for future MIT OR Apache-2.0 dual licensing).

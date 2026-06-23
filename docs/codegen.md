@@ -1,361 +1,319 @@
-# コード生成 (codegen)
+# Code generation (codegen)
 
-Mere のコード生成戦略と、現状の `mere` 実装での扱い、将来の予定。設計の核となる **メモリモデル / エフェクトシステム** の "威力発揮" が codegen に依存しているため、Phase 4 として段階的に進めている。
+Mere's code-generation strategy, the current state in `mere`, and what's planned. Because the **memory model** and **effect system** at Mere's core only show their real power once codegen is in place, Phase 4 progresses through this in slices.
 
 ---
 
-## 1. codegen とは
+## 1. What is codegen?
 
-ソース言語の AST (or 型付け済み AST) を **別の言語または機械命令** に変換する処理。
+The process of transforming the source-language AST (or typed AST) into **another language or machine instructions**.
 
 ```
        parser              typer             codegen
-ソース  ───▶  AST   ───▶  typed AST   ───▶  ターゲット
+source  ───▶  AST   ───▶  typed AST   ───▶  target
 "1+2"        Bin(+,1,2)    .ty = TyInt        "1 + 2" (C)
                                               "i32.add" (Wasm)
-                                              "addq" (x86 アセンブリ)
+                                              "addq" (x86 assembly)
 ```
 
-言語処理系の最終段。Mere-ml は parser → typer → **eval** (tree-walking interpreter) で完結していた状態から、**eval と並列で codegen** を持つ実装に拡張中。
+The last stage of a compiler. Mere-ml started as parser → typer → **eval** (tree-walking interpreter); it now also has codegen running **in parallel with eval**.
 
 ---
 
-## 2. なぜ必要か
+## 2. Why do we need it?
 
-### 性能
+### Performance
 
-| 方式 | 実行モデル |
+| Mode | Execution model |
 |---|---|
-| tree-walking interpreter | AST を毎回 traverse、env lookup、closure 値の box/unbox、OCaml GC 経由 |
-| C codegen (今) | C コンパイラが生成した native binary、レジスタ割当て、関数呼出は call 一発 |
-| LLVM/Wasm (将来) | さらに最適化 (inlining、dead code elim、loop unroll) が乗る |
+| Tree-walking interpreter | Traverses the AST each time, looks up env, boxes/unboxes closure values, runs through OCaml's GC |
+| C codegen (current) | Runs the native binary produced by the C compiler — register allocation, function calls are one `call` instruction |
+| LLVM / Wasm (future) | Adds more optimization (inlining, dead-code elim, loop unrolling) |
 
-### 配布
+### Distribution
 
-interpreter 方式: `mere` バイナリ + `program.mere` を一緒に配布が必要  
-codegen 方式: `program.mere` を compile すれば単体実行可能なバイナリが手に入る
+Interpreter mode: distribute both the `mere` binary and `program.mere`.
+Codegen mode: compile `program.mere` once and you have a self-contained binary.
 
-### メモリモデルの威力発揮
+### Letting the memory model shine
 
-Mere の **region / view / Trivial[R] / `with` Drop** の設計 ([memory-model.md](memory-model.md)) は今、型レベルのラベルとしては動くが、実体は OCaml の GC が裏で管理している。
+Mere's **region / view / Trivial[R] / `with` Drop** design ([memory-model.md](memory-model.md)) currently exists as type-level labels; under the hood, OCaml's GC actually manages memory.
 
 ```
-// 現状 (interpreter):
+// Current (interpreter):
 region R { let n = R.alloc(Node { ... }) in ... }
-// 実態: OCaml heap に普通の object として alloc、GC が拾う
+// Reality: an ordinary object allocated on OCaml's heap, collected by the GC
 
-// codegen 後:
-// region R は bump allocator を push/pop し、scope を抜けたら一括解放
-// Drop の LIFO 実行も Drop list の機械化された逆順走査になる
+// After codegen:
+// region R push/pops a bump allocator and frees everything on scope exit
+// Drop's LIFO execution becomes a mechanical reverse-order walk over a Drop list
 ```
 
-memory-model.md で書いた通り:
-> region の本来の威力 (bump allocator、一括解放、cache 局所性) は**ネイティブ codegen** が乗ったときに出る
+As memory-model.md says:
+> Region's real power (bump allocator, bulk free, cache locality) only emerges with **native codegen**.
 
-### 自立した言語になる
+### Becoming a self-contained language
 
-interpreter 方式だと「Mere は OCaml の上で動く」状態。codegen で native binary を吐けるようになれば「Mere は Mere 単体で完結する言語」になる。設計目標の「ネイティブ (LLVM) + Wasm 両方」(`internal design notes`) のためにも必要。
+In interpreter mode, "Mere runs on top of OCaml." Once we can emit native binaries via codegen, "Mere is a self-contained language." This is required by the design goal of "both native (LLVM) and Wasm" in the internal design notes.
 
 ---
 
-## 3. Mere の codegen 戦略
+## 3. Mere's codegen strategy
 
-### 多段アプローチ
+### Multi-stage approach
 
-| Phase | ターゲット | 状態 | 理由 |
+| Phase | Target | Status | Why |
 |---|---|---|---|
-| 4 (今) | **C** | 進行中 | 中間言語として最も簡単、clang/gcc が手元にある |
-| 5 (将来) | **LLVM IR** | 未着手 | 最適化機会↑、native + JIT 両方サポート |
-| or | **Wasm** | 未着手 | ブラウザ実行 + WASI で自立バイナリ |
+| 4 (current) | **C** | In progress | The simplest intermediate language; clang/gcc are right there |
+| 5 (future) | **LLVM IR** | Not started | More optimization opportunities; supports both native and JIT |
+| or | **Wasm** | Not started | Browser execution + WASI for self-contained binaries |
 
-### なぜ C を経由するか
+### Why go through C?
 
-- LLVM / Wasm を直接吐くより簡単 (C は「移植可能な assembly」と呼ばれる)
-- C コンパイラが既に手元にある (clang/gcc が macOS/Linux 標準)
-- region runtime や GC ヘルパを C で書いて FFI 接続できる
-- 後で LLVM IR に切り替える際の「正解」になる (出力比較ができる)
+- Easier than emitting LLVM / Wasm directly (C is "portable assembly").
+- A C compiler is already on hand (clang/gcc are standard on macOS/Linux).
+- Region runtime and GC helpers can be written in C and FFI-bound.
+- When we later switch to LLVM IR, the C output serves as a "ground truth" for comparison.
 
-### AST 型注釈基盤 (Phase 4 第五で導入)
+### Per-AST type annotations (introduced in Phase 4 slice 5)
 
-`Ast.expr` に `mutable ty : ty option` を追加し、`Typer.infer` が各ノードに推論結果を記録するように。これにより codegen がノードごとの型を直接参照でき、tuple shape や fn signature の推論が cleanly に書ける。LLVM/Wasm 移行時にも同じ基盤が使える。
+`Ast.expr` gains a `mutable ty : ty option`; `Typer.infer` records the inferred type on each node. This lets codegen directly read each node's type — tuple shape inference and fn signature inference become clean. The same foundation will be used for LLVM / Wasm migration.
 
 ---
 
-## 4. mere での現状 (2026-06-22、Phase 4〜36 完了段階)
+## 4. Current state in mere (as of 2026-06-22, after Phases 4-36)
 
-interpreter で書ける Mere プログラムの**主要構文ほぼ全て** + **Q-010
-collection (Vec / OwnedVec / StrBuf / Map)** + **FFI (`extern fn`)** +
-**float (3 backend)** + **Phase 36 の 13 syntactic sugar** が 3 backend
-(C / LLVM IR / Wasm) で native compile + 実行可能。テスト **1529 件 passing**、E2E では
-factorial / fibonacci / 連結リスト sum / make_adder closure / 多相
-variant + record / pattern match (nested / guard / or) に加えて、Phase 15
-で Vec[R, T] の全要素型 / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K =
-int / bool / str / tuple / record / 全 variant) / 高階 API (vec_set / iter
-/ fold / map / filter) / 変換 (vec_to_owned / owned_vec_to_vec /
-vec_to_list) / len ad-hoc polymorphism / with-OwnedVec scope-Drop までが
-3 backend で動く。
+**Nearly the entire Mere syntax that's expressible in the interpreter** + **Q-010 collections (Vec / OwnedVec / StrBuf / Map)** + **FFI (`extern fn`)** + **float (3 backends)** + **Phase 36's 13 syntactic sugars** is native-compilable and runnable in 3 backends (C / LLVM IR / Wasm). **1529 tests pass**. End-to-end: factorial, fibonacci, linked-list sum, `make_adder` closures, polymorphic variant + record, pattern match (nested / guard / or). Phase 15 added all element types for Vec[R, T] / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K = int / bool / str / tuple / record / all variants) / higher-order API (vec_set / iter / fold / map / filter) / conversions (vec_to_owned / owned_vec_to_vec / vec_to_list) / `len` ad-hoc polymorphism / with-OwnedVec scope-Drop — all in 3 backends.
 
-**Phase 24-27 (2026-06-21、29 slice 連続) で 4 backend feature parity を
-達成**: 16 realistic examples (~2500 LoC; 内 toy_sql.mere は単独で 1165
-LoC) が **interp + C + LLVM + Wasm runtime で diff = 0 PERFECT 一致**。
-Phase 27.2 で `scripts/run_wasm.js` (Node.js host harness with puts /
-read_file / write_file imports) を追加、Wasm が実 runtime で実行検証
-できるように。Phase 28-30 で dogfood (toy_sql) → codegen bug 3 件発掘
-(DEFERRED §1.10 record field × nested lambda capture / §1.11 env_subst
-shadow / §1.12 builtin shadow) → 全部 fix (3 backend で揃えた)。Phase 31.0
-で str_compare を 3 backend に移植 (sign-normalize -1/0/1)。
+**Phases 24-27 (2026-06-21, 29 consecutive slices) reached 4-backend feature parity**: 16 realistic examples (~2500 LoC; toy_sql.mere alone is 1165 LoC) **match diff = 0 PERFECT across interp + C + LLVM + Wasm runtime**. Phase 27.2 added `scripts/run_wasm.js` (Node.js host harness providing puts / read_file / write_file imports), so Wasm is now runtime-verifiable. Phases 28-30 used dogfood (toy_sql) → unearthed 3 codegen bugs (DEFERRED §1.10 record field × nested-lambda capture / §1.11 env_subst shadow / §1.12 builtin shadow) → all fixed (across all 3 backends). Phase 31.0 ported str_compare to the 3 backends (sign-normalized -1/0/1).
 
-### Phase 32-36 で追加された codegen capability (2026-06-22)
+### Codegen capabilities added in Phases 32-36 (2026-06-22)
 
-| 機能 | Phase | backend 状況 |
+| Feature | Phase | Backend status |
 |---|---|---|
-| `extern fn <name>: <ty>;` (FFI、curried multi-arg) | 32.0-32.6 | 4 backend |
-| float MVP (Float_lit / `f_add` etc / `f_neg` / `__lang_str_of_float`) | 34.1 (C) / 34.2 (LLVM) / 34.3 (Wasm) | 4 backend |
-| libm dispatch (sqrt/sin/cos/tan/f_pow/atan2) | 34.4-34.5 | 4 backend |
-| nullary factory builtin の first-class value 化 (eta-wrap) | 35.1 (C) / 35.2 (LLVM) / 35.3 (Wasm) | 4 backend (DEFERRED §1.2 A1) |
-| Phase 36 sugars (range / op section / `::` / `<|` / `@@` / `\` / interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) | 36 | 4 backend (parser/lexer level desugar) |
-| narrow value restriction (mutable container を含む型を let-bind 時に generalize しない) | 36 (typer) | 全 backend |
-| C codegen deep list literal の O(2^N) fix (Constr emit 内 `emit_expr arg` 1 回キャッシュ) | 36 (DEFERRED §1.15) | C |
-| `strbuf_to_str` の region escape 時 dangling pointer fix (`__lang_default_region` alloc に切替) | 36 (DEFERRED §1.16) | C / LLVM |
-| `type result` user shadow が `List.combine` で落ちる fix | 36 (DEFERRED §1.17) | C |
-| Phase 30.2 top-level global の初期化順 fix (source-order inline init) | 36 (DEFERRED §1.18) | 3 backend |
-| nested lambda が top-level fn 参照で unbound (closure_wrapper_forward_decls + fn_closure_table_idx pre-populate) | 36 (DEFERRED §1.19) | C / LLVM / Wasm |
-| polymorphic variant 内 user record の forward decl (unified topo sort) | 36 (DEFERRED §1.20) | C |
-| Wasm memory 16 → 64 pages (4MB) | 36 | Wasm |
-| 16 new prelude entries (range / list_filter / list_take / list_drop / list_find / list_append / list_concat / list_flat_map / list_zip / list_for_all / list_any / list_member / list_sum / list_product / list_max / list_min) | 36 (prelude) | 4 backend |
+| `extern fn <name>: <ty>;` (FFI; curried multi-arg) | 32.0-32.6 | All 4 backends |
+| Float MVP (Float_lit / `f_add` etc. / `f_neg` / `__lang_str_of_float`) | 34.1 (C) / 34.2 (LLVM) / 34.3 (Wasm) | All 4 backends |
+| libm dispatch (sqrt / sin / cos / tan / f_pow / atan2) | 34.4-34.5 | All 4 backends |
+| Nullary factory builtins as first-class values (eta-wrap) | 35.1 (C) / 35.2 (LLVM) / 35.3 (Wasm) | All 4 backends (DEFERRED §1.2 A1) |
+| Phase 36 sugars (range / op section / `::` / `<|` / `@@` / `\` / interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) | 36 | All 4 backends (parser/lexer-level desugar) |
+| Narrow value restriction (don't generalize when let-binding types that contain mutable containers) | 36 (typer) | All backends |
+| Fix for O(2^N) C codegen on deep list literals (cache `emit_expr arg` once in Constr emit) | 36 (DEFERRED §1.15) | C |
+| `strbuf_to_str` dangling-pointer fix on region escape (switch to `__lang_default_region` alloc) | 36 (DEFERRED §1.16) | C / LLVM |
+| Fix for user-shadowed `type result` crashing in `List.combine` | 36 (DEFERRED §1.17) | C |
+| Phase 30.2 top-level global init-order fix (source-order inline init) | 36 (DEFERRED §1.18) | 3 backends |
+| Nested lambda referencing top-level fn becoming unbound (closure_wrapper_forward_decls + fn_closure_table_idx pre-populate) | 36 (DEFERRED §1.19) | C / LLVM / Wasm |
+| User records inside polymorphic variants forward-decl fix (unified topo sort) | 36 (DEFERRED §1.20) | C |
+| Wasm memory bumped 16 → 64 pages (4 MB) | 36 | Wasm |
+| 16 new prelude entries (range / list_filter / list_take / list_drop / list_find / list_append / list_concat / list_flat_map / list_zip / list_for_all / list_any / list_member / list_sum / list_product / list_max / list_min) | 36 (prelude) | All 4 backends |
 
-### Phase 22-31 で追加された codegen capability
+### Codegen capabilities added in Phases 22-31
 
-| 機能 | Phase | backend 状況 |
+| Feature | Phase | Backend status |
 |---|---|---|
-| `try_or` (fail catch) | 22.2 (C) / 25.2 (LLVM) / 26.2 (Wasm) | 4 backend |
-| str_split / str_join / str_count | 22 (C) / 25.9 (LLVM) / 26.5 (Wasm) | 4 backend |
-| str_compare (sign-normalize -1/0/1) | 31.0 | 4 backend |
-| 多相 user let-rec の per-instantiation specialization | 23.3 (C) / 25.5 (LLVM) / 26.4 (Wasm) | 4 backend |
-| show_str escape (`\n`, `\"` 等) | 23.5 (C) / 25.6 (LLVM) / 26.6 (Wasm) | 4 backend |
-| variant boxed payload (`{i32 tag, ptr payload}`) | 24 (C 統一) / 25.0 (LLVM) / 26.0 (Wasm) | 4 backend |
-| inner let-rec lifting (anon closure 経由でも sibling 解決) | 22.2 (C) / 25.3 (LLVM) / 26.3 (Wasm) | 4 backend |
-| skel dedup (user-def が prelude を shadow) | 24.2 (C) / 25.7 (LLVM) / 26.3 (Wasm) | 4 backend |
-| Map iter insertion order | 27.1 (interp 統一で 3 backend に波及) | 4 backend |
-| Wasm runtime auto-print main result | 27.2 | Wasm |
-| unit main_ty で `"()"` を print | 25.11 (LLVM) / 27.0 (C 逆移植) / 26.x (Wasm) | 4 backend |
-| Wasm の StrBuf 内包 (StrBuf in variant payload) | 27.3 | Wasm |
-| pattern binding を arm body の current_var_types に prepend | 28.1 (C、LLVM Phase 25.3 の逆移植) | 4 backend |
-| builtin (is_alpha/is_digit/is_space) を user-def が shadow | 30.0 | 3 backend (C/LLVM/Wasm) |
-| closure 内 captured 名の let shadow (env_subst dance) | 30.1 (C) | C |
-| top-level 非-fn let を file-scope global 化 | 30.2a (C) / 30.2b (LLVM) / 30.2c (Wasm) | 3 backend |
-| Wasm memory 1 → 16 pages (1MB) | 29.1 | Wasm |
-| `extern fn <name>: <ty>;` (FFI、libc 関数呼出、curried multi-arg) | 32.0-32.6 | 4 backend |
+| `try_or` (fail catch) | 22.2 (C) / 25.2 (LLVM) / 26.2 (Wasm) | All 4 backends |
+| str_split / str_join / str_count | 22 (C) / 25.9 (LLVM) / 26.5 (Wasm) | All 4 backends |
+| str_compare (sign-normalized -1/0/1) | 31.0 | All 4 backends |
+| Per-instantiation specialization of polymorphic user let-recs | 23.3 (C) / 25.5 (LLVM) / 26.4 (Wasm) | All 4 backends |
+| show_str escapes (`\n`, `\"`, etc.) | 23.5 (C) / 25.6 (LLVM) / 26.6 (Wasm) | All 4 backends |
+| Variant boxed payload (`{i32 tag, ptr payload}`) | 24 (C unification) / 25.0 (LLVM) / 26.0 (Wasm) | All 4 backends |
+| Inner let-rec lifting (sibling resolution even via anon closures) | 22.2 (C) / 25.3 (LLVM) / 26.3 (Wasm) | All 4 backends |
+| Skel dedup (user-defined shadows prelude) | 24.2 (C) / 25.7 (LLVM) / 26.3 (Wasm) | All 4 backends |
+| Map iter in insertion order | 27.1 (interp unification, propagated to 3 backends) | All 4 backends |
+| Wasm runtime auto-print of main result | 27.2 | Wasm |
+| Unit main_ty prints `"()"` | 25.11 (LLVM) / 27.0 (C reverse-port) / 26.x (Wasm) | All 4 backends |
+| Wasm StrBuf containment (StrBuf in variant payload) | 27.3 | Wasm |
+| Prepending pattern bindings to current_var_types in arm bodies | 28.1 (C; LLVM Phase 25.3 reverse-port) | All 4 backends |
+| User-defined fn shadowing builtin (is_alpha/is_digit/is_space) | 30.0 | 3 backends (C/LLVM/Wasm) |
+| `let` shadowing of captured names in closures (env_subst dance) | 30.1 (C) | C |
+| Top-level non-fn let → file-scope global | 30.2a (C) / 30.2b (LLVM) / 30.2c (Wasm) | 3 backends |
+| Wasm memory bumped 1 → 16 pages (1 MB) | 29.1 | Wasm |
+| `extern fn <name>: <ty>;` (FFI for libc; curried multi-arg) | 32.0-32.6 | All 4 backends |
 
-### 動くこと
+### What works
 
-| カテゴリ | サポート |
+| Category | Support |
 |---|---|
-| プリミティブ | int / bool / str / unit |
-| 算術 | `+ - * / %` (int)、`-` (Neg) |
-| 比較 | `== != < <= > >=` (int → int 0/1) |
-| 論理 | `&& \|\|` (C の short-circuit にそのまま) |
-| 文字列 | リテラル / `++` 連結 / `print` / `str_len` |
-| 制御 | `if-then-else` (C ternary)、`let` (GCC/Clang `__auto_type` で型を吸収) |
-| 関数 | top-level fn の lifting (`let f = ...` / `let rec f = ... and g = ...`)、forward decl で自己再帰 / 相互再帰、str を取る / 返す関数 |
-| Region | `region R { body }` を bump allocator (`__lang_region`) で実装、`&R v` (および `R.alloc(v)` sugar) が region 内に値を allocate、scope を抜けると一括解放。escape check (typer) + 実体ある runtime で region の本領発揮 |
-| with Drop | `with c = v in body` を codegen、scope 末で `c.close ()` 相当を自動呼出 (Drop 型に `close: unit -> unit` field があれば)。複数 with は AST が nested なので自然に LIFO 順 |
-| View | `view V[R] of T { ... }` を region 上の bump alloc + ポインタ表現 (`V*`) に。Record_lit が `__lang_region_alloc(&__region_R, sizeof(V))` + copy + ptr return、field access は `->`。view 値の lifetime は region scope と一致 |
-| Tuple | C struct (`tuple_int_str` 等を shape ごとに自動生成) + C99 compound literal、`fst` / `snd` builtin |
-| Record | 単相 `type Point = { x: int, y: int }` → `typedef struct {...} Point;`、construction (`Point { x = 1, y = 2 }`) / field access / record update をサポート |
-| Variant | 単相 `type Status = Ok \| Err of str` → tagged union (`typedef struct { int tag; union { ... } payload; } Status;`)、Constr emit に compound literal、match を ternary chain + statement expression に展開 (`P_constr` / `P_var` / `P_wild` / `P_tuple` sub、guard 不可) |
-| 再帰 variant | 自己参照 payload を持つ variant (例: `type ilist = INil \| ICons of int * ilist`) は heap allocated + ポインタ表現 (`typedef ilist_node* ilist;`)。Constr が malloc して node を返し、match は `__scrut->tag` で dereference。tuple payload も `P_tuple (h, t)` で `.f0` / `.f1` を bind |
-| 多相 variant の monomorphization | `type 'a list = Nil \| Cons of 'a * 'a list` 等の polymorphic variant を、AST + fn signatures から concrete instantiation を集めて instance ごとに specialized struct を emit (`list_int`, `opt_str` 等)。再帰性の判定も substitute 後の payload で行う。これで `[1, 2, 3]` リテラル + `'a list` の `sum` 等が native 実行可能 |
-| 多相 record の monomorphization | `type 'a Box = { v: 'a }` 等を variant と同じパターンで specialize (`Box_int`, `Box_str` 等)。Record_lit emit が `.ty` から mono 名を引いて `((Box_int){.v = 42})` のように出力 |
-| show 汎用 builtin | `show : 'a -> str` を AST から呼出ごとの引数型を集めて型ごとに specialized `show_T` C 関数を自動生成。int/bool/str/unit/tuple/record/variant (mono + 多相 instantiation) すべて対応。**`'a list` だけ特別 case 化 (`[1, 2, 3]` 形式で出力)**、その他の再帰 variant は `Cons (1, Cons (2, Nil))` 形式。`asprintf` ベースで heap allocation |
-| Closure (defunct) | 関数本体内の `let n = fn x -> body` を defunctionalization で top-level に lift。free vars を C function param に prepend、call site を rewrite。captures は int/bool/str/unit のみ (tuple/record/関数値 capture は未対応)。多段ネスト OK |
-| First-class fn (Phase A + B) | `T1 -> T2` 型を closure struct (`{ void* env; T2 (*fn)(void*, T1); }`) で表現。各 top-level fn に `_closure_fn` adapter + `_as_value` const、anonymous Fun in expression position は env struct (heap-alloc) + adapter (`__anon_N_fn`) + closure construction として lift され、capture は `__env_self->name` に rewrite される。closure dispatch は `({ __auto_type __c = e; __c.fn(__c.env, x); })`。Direct call (known top-level の Var head) は引き続き直接呼出の高速パス |
+| Primitives | int / bool / str / unit |
+| Arithmetic | `+ - * / %` (int), `-` (Neg) |
+| Comparison | `== != < <= > >=` (int → int 0/1) |
+| Logic | `&& \|\|` (lower directly to C short-circuit) |
+| Strings | literals / `++` concatenation / `print` / `str_len` |
+| Control | `if-then-else` (C ternary); `let` (GCC/Clang `__auto_type` absorbs the type) |
+| Functions | Top-level fn lifting (`let f = ...` / `let rec f = ... and g = ...`), forward decls for self/mutual recursion, functions taking/returning str |
+| Region | `region R { body }` implemented as a bump allocator (`__lang_region`); `&R v` (and the `R.alloc(v)` sugar) allocates in the region; bulk-released on scope exit. Combined with the typer's escape check + a real runtime, region's full power shows |
+| with Drop | `with c = v in body` codegens with auto-invocation of `c.close ()`-equivalent at scope end (when the Drop type has a `close: unit -> unit` field). Multiple `with`s are nested in AST and naturally close LIFO |
+| View | `view V[R] of T { ... }` becomes a bump-alloc + pointer (`V*`) representation over the region. Record_lit becomes `__lang_region_alloc(&__region_R, sizeof(V))` + copy + ptr return; field access uses `->`. The view value's lifetime matches the region scope |
+| Tuple | C structs (auto-generated per shape, e.g. `tuple_int_str`) + C99 compound literals; `fst` / `snd` builtins |
+| Record | Monomorphic `type Point = { x: int, y: int }` → `typedef struct {...} Point;`; supports construction (`Point { x = 1, y = 2 }`) / field access / record update |
+| Variant | Monomorphic `type Status = Ok \| Err of str` → tagged union (`typedef struct { int tag; union { ... } payload; } Status;`); Constr → compound literal; match expanded into ternary chain + statement expression (`P_constr` / `P_var` / `P_wild` / `P_tuple` sub; no guards) |
+| Recursive variants | Self-referential payloads (e.g. `type ilist = INil \| ICons of int * ilist`) get heap allocation + ptr representation (`typedef ilist_node* ilist;`); Constr mallocs the node and returns it; match dereferences via `__scrut->tag`; tuple payloads bind via `P_tuple (h, t)` against `.f0` / `.f1` |
+| Polymorphic variant monomorphization | `type 'a list = Nil \| Cons of 'a * 'a list` and friends — concrete instantiations are collected from AST + fn signatures and a specialized struct is emitted per instance (`list_int`, `opt_str`, ...). Recursivity is judged on the substituted payload. So `[1, 2, 3]` literals and `'a list`-typed `sum` etc. run natively |
+| Polymorphic record monomorphization | `type 'a Box = { v: 'a }` etc. specialize like variants (`Box_int`, `Box_str`, ...); Record_lit emit reads the mono name from `.ty` and emits e.g. `((Box_int){.v = 42})` |
+| Polymorphic `show` builtin | For each `show` call, the argument type is collected and a specialized `show_T` C fn is auto-generated. Covers int/bool/str/unit/tuple/record/variant (monomorphic + polymorphic instantiations). **`'a list` is special-cased (`[1, 2, 3]` style)**; other recursive variants use `Cons (1, Cons (2, Nil))` style. asprintf-based; heap-allocates |
+| Closure (defunctionalized) | Inner `let n = fn x -> body` is defunctionalized to top level. Free vars are prepended to the C fn's params; call sites are rewritten. Captures are restricted to int/bool/str/unit (tuple/record/function-value captures not yet supported). Multi-level nesting is fine |
+| First-class fns (Phase A + B) | `T1 -> T2` types become closure structs (`{ void* env; T2 (*fn)(void*, T1); }`). Each top-level fn gets a `_closure_fn` adapter + `_as_value` const; anonymous Fun in expression position is lifted into env struct (heap-alloc) + adapter (`__anon_N_fn`) + closure construction, with captures rewritten to `__env_self->name`. Closure dispatch: `({ __auto_type __c = e; __c.fn(__c.env, x); })`. Direct call (Var head on a known top-level) still takes the fast direct-call path |
 
-### 動かないこと (今のところ Codegen_error で reject)
+### What doesn't work (currently Codegen_error)
 
-- **Phase 35 で nullary factory builtin (vec_new / map_new / strbuf_new
-  等) の first-class value 化は 4 backend で解消** (eta-wrap)。但し
-  **multi-arg curried builtin の partial application**
-  (`let push_to_v = vec_push v in ...`) は依然 future work
-- **OwnedVec の自動 scope-bound Drop** — `with v = ...` 明示なら scope 末
-  で free、明示しなければ main 末で一括 free (Phase 15.8 / 15.13、
-  DEFERRED §1.3)
-- inner-lifted fn (`let h = fn ...`) を VALUE として使う (現状は直接呼出のみ。anonymous Fun として書き直せば動く)
-- closure capture の非プリミティブ型 (tuple/record の capture。closure 値 capture は OK)
-- nested or-pattern (or 内に constructor / tuple / record)
-- **top-level main 直下に `while cond do body` を直接置く** — top-level Let_rec
-  制約のため fn body 内なら OK
-- **文字列補間でネストした文字列リテラル** (`"x = {show \"abc\"}"`) — let 経由で回避
-- 一部の stdlib builtin (`read_lines` / `args` / `env_var` / `file_exists` 等)
-  は **interpreter のみ**。Phase 34 で float / libm (sqrt / sin / cos /
-  tan / f_pow / atan2) は 3 backend に揃った
-- 文字列・closure env・variant node の GC (現状 region arena 一括解放、
-  短時間実行向け)
-- LLVM / Wasm の Map K の payload-mixed variant (uniform payload のみ)
-  — C は mixed OK
+- **Phase 35 made nullary factory builtins (vec_new / map_new / strbuf_new etc.) usable as first-class values in all 4 backends** (eta-wrap). But **partial application of multi-arg curried builtins** (`let push_to_v = vec_push v in ...`) is still future work.
+- **Auto scope-bound Drop for OwnedVec** — explicit `with v = ...` already frees at scope end; without it, bulk-freed at main exit (Phase 15.8 / 15.13; DEFERRED §1.3).
+- Inner-lifted fns (`let h = fn ...`) used as VALUES (currently only direct calls; rewriting as an anonymous Fun works).
+- Closure captures of non-primitive types (tuple/record captures; closure-value captures are fine).
+- Nested or-patterns (or inside constructor / tuple / record).
+- **Placing `while cond do body` directly under top-level main** — top-level Let_rec constraint; inside an fn body is fine.
+- **String interpolation with nested string literals** (`"x = {show \"abc\"}"`) — workaround via a let binding.
+- Some stdlib builtins (`read_lines` / `args` / `env_var` / `file_exists` etc.) are **interpreter-only**. Phase 34 brought float / libm (sqrt / sin / cos / tan / f_pow / atan2) to the 3 backends.
+- GC for strings / closure envs / variant nodes (currently a region arena bulk-freed at main exit — suitable for short-lived runs).
+- LLVM / Wasm with payload-mixed variants as Map K (uniform payload only) — C accepts mixed.
 
 ### CLI
 
 ```sh
-# inline expression を C source に
+# inline expression to C source
 dune exec ./bin/mere.exe -- -ce '1 + 2 * 3'
 
-# ファイルを C source に
+# file to C source
 dune exec ./bin/mere.exe -- -c examples/sample.mere > sample.c
 
-# clang で native binary に
+# clang to native binary
 clang sample.c -o sample
 ./sample
 ```
 
 ---
 
-## 5. Phase 4 で進めてきた slice
+## 5. Phase 4 slices
 
-| slice | 内容 | 動くもの |
+| Slice | Content | What works |
 |---|---|---|
-| 4.1 | C codegen MVP | int + 算術 + if + let |
-| 4.2 | 関数 lifting + recursion | factorial / fibonacci / 相互再帰 |
-| 4.3 | 文字列 + print + ++ | hello world |
-| 4.4 | str を取る / 返す関数 + `str_len` | `let exclaim = fn s -> s ++ "!"` |
-| 4.5 | tuple + AST 型注釈基盤 | tuple-returning fn まで |
-| 4.6 | record (単相) | `type Point = { x: int, y: int }` の construction / field / update |
-| 4.7 | variant + match (単相、簡易 pattern) | `type Status = Ok \| Err of str`、`match` を ternary chain に展開 |
-| 4.8 | closure conversion (defunctionalization) | 関数本体内の `let h = fn ... in ...` を top-level に lift、free vars を param に prepend、call site rewrite |
-| 4.9-a | first-class fns (Phase A、top-level fn as value) | `T1 -> T2` を `closure_T1_T2` struct に、top-level fn に adapter + `_as_value` const、HOF が closure 引数を受け取って `.fn(.env, x)` で dispatch |
-| 4.9-b | first-class fns (Phase B、anonymous Fun + captures) | anonymous Fun in expression position を heap-allocated env struct + adapter + closure 構築に lift、capture を `__env_self->name` に rewrite、curried HOF (`apply f x = f x`)・`make_adder` クロージャまで動作 |
-| 4.10 | 再帰 variant + P_tuple pattern | 自己参照 variant (`type ilist = INil \| ICons of int * ilist`) を heap-allocated node + ptr typedef に、Constr が malloc、match が `->` dereference、tuple sub-pattern を `.f0 / .f1` bind。連結リストの `sum` が clang 経由 native 実行可能 |
-| 4.11 | 多相 variant の monomorphization | `type 'a opt = None \| Some of 'a` / `type 'a list = Nil \| Cons of 'a * 'a list` 等の polymorphic variant を、AST + fn signature から concrete instantiation を収集して instance ごとに specialized struct (`opt_int`, `list_int` 等) を emit。`[1, 2, 3]` リテラル + `'a list` の sum が動く |
-| 4.12 | show 汎用 builtin | `show : 'a -> str` を呼出ごとに引数型から `show_T` を specialize。int/bool/str/unit/tuple/record/variant (mono + 多相 instantiation + 再帰) 対応。生成は `asprintf` ベース、循環ガード付き |
-| 4.13 | 多相 record の monomorphization | `type 'a Box = { v: 'a }` 等を type ごとに specialize (`Box_int`, `Box_str`)。Record_lit emit が `.ty` から mono 名を引く |
-| 4.14 | 複雑な pattern (P_int / P_str / P_bool / P_record / nested / P_as) | Match の pattern compilation を `compile_pattern` で fully recursive に書き直し。各 pattern を (test, bindings) に分解、constructor 内に constructor/tuple/record を nest 可能、record pattern も destructure 可能 |
-| 4.15 | or-pattern + match guard | `\| pat1 \| pat2 -> body` を pre-pass で複数 arm に flatten (両 branch が同じ name set を bind する制約は typer が保証)、guard は arm の bindings スコープ内で評価して false ならフォールスルー |
-| 4.16 | `'a list` show を `[1, 2, 3]` 形式に + 変種 payload の tuple shape 収集 | `type 'a list` を special-case して `show` が `[1, 2, 3]` を出力。変種 payload 内のタプル形 (`tuple_int_list_int` 等) を tuple shape 収集に含めて、空リスト等で payload に Cons が出てこなくても struct がちゃんと emit されるように |
-| 4.17 | **region runtime** (bump allocator) | `region R { body }` を C で実装: `__lang_region` 構造体 (`{ char* base; char* top; size_t cap; }`) + `__lang_region_init/alloc/free` ヘルパを emit、`region R { ... }` は init + body 評価 + free のシーケンス、`&R v` は region 内に bump alloc して T* を返す。`c_type_of (TyRef _ inner)` を `inner*` (ポインタ型) に。escape check (typer) と組合せて region scope を抜けるとメモリが解放される — **メモリモデルが「型レベルラベル」から「実体ある bump allocator」になった** |
-| 4.18 | `with` Drop 実行 + typedef 順序整理 | `with c = v in body` を codegen 化、scope 末で `c.close.fn(c.close.env, 0)` を自動呼出 (close field がある Drop 型のみ)。typedef 構造を「forward decl 全部 → closure typedef → struct body 全部」に再編成して、record / variant に `closure_T1_T2` 型の field (例: Drop type の `close: unit -> unit`) があっても closures が record 定義を function-pointer return として参照できるように |
-| 4.19 | view 構築の region 化 (bump alloc + ポインタ表現) | view 値を `V*` (region 内のポインタ) として codegen。`is_view_type` ヘルパ、`c_type_of` で view 名を `V*` に、Record_lit が view の場合は `__lang_region_alloc(&__region_R, sizeof(V))` + 中身 copy + ポインタ return、Field_get が view 値に対して `->` を使う。view 値の lifetime は region scope に縛られる (Phase 2.1 escape check + region runtime と組合せ) |
-| 4.20 | **closure env の default region 化** | program-lifetime arena (`__lang_default_region`) を file-scope に追加、`main` の先頭で 4MB 初期化 / 末尾で free。anonymous closure の env struct alloc を `malloc` から `__lang_region_alloc(&__lang_default_region, ...)` に切替。closure はユーザの `region R { ... }` を越えて生きうるため別系統の arena が必要 — bump alloc 化により closure 1 個あたりの alloc コストが下がり、`main` 抜けるときに一括解放 (valgrind clean) |
-| 4.21 | **文字列 / 再帰 variant node も default region 化** | 残っていた 2 つの malloc サイトを default region に統合。`__lang_str_concat` の `malloc(la + lb + 1)` → `__lang_region_alloc(&__lang_default_region, la + lb + 1)`、再帰 variant の Constr emit (`Cons (h, t)` 等) の `malloc(sizeof(T_node))` → `__lang_region_alloc(&__lang_default_region, sizeof(T_node))`。emit 順を `region_runtime_helpers → str_concat_helper` に並べ替えて、str_concat helper が default region を参照できるように。これで C 側の malloc は **region の base buffer 確保** (`__lang_region_init` 内) のみになり、ユーザ可視な alloc サイトはすべて bump arena 上。`main` 終了で `__lang_region_free(&__lang_default_region)` が一括解放、valgrind clean |
+| 4.1 | C codegen MVP | int + arithmetic + if + let |
+| 4.2 | Function lifting + recursion | factorial / fibonacci / mutual recursion |
+| 4.3 | Strings + print + ++ | hello world |
+| 4.4 | Functions taking/returning str + `str_len` | `let exclaim = fn s -> s ++ "!"` |
+| 4.5 | Tuples + per-AST type annotations | tuple-returning fns |
+| 4.6 | Records (monomorphic) | `type Point = { x: int, y: int }` construction / field / update |
+| 4.7 | Variants + match (monomorphic; simple patterns) | `type Status = Ok \| Err of str`; match expands into a ternary chain |
+| 4.8 | Closure conversion (defunctionalization) | Inner `let h = fn ... in ...` lifted to top level; free vars prepended to params; call sites rewritten |
+| 4.9-a | First-class fns (Phase A; top-level fn as value) | `T1 -> T2` becomes a `closure_T1_T2` struct; top-level fns get an adapter + `_as_value` const; HOFs take a closure arg and dispatch via `.fn(.env, x)` |
+| 4.9-b | First-class fns (Phase B; anonymous Fun + captures) | Anonymous Fun in expr position is lifted to heap-allocated env struct + adapter + closure construction; captures rewritten to `__env_self->name`; curried HOF (`apply f x = f x`) / `make_adder` closures work |
+| 4.10 | Recursive variants + P_tuple patterns | Self-referential variants (`type ilist = INil \| ICons of int * ilist`) get heap-allocated nodes + ptr typedef; Constr mallocs; match uses `->`; tuple sub-pattern binds `.f0 / .f1`. Linked-list `sum` runs natively via clang |
+| 4.11 | Polymorphic variant monomorphization | `type 'a opt = None \| Some of 'a` / `type 'a list = Nil \| Cons of 'a * 'a list` etc. — concrete instantiations are collected from AST + fn signatures and per-instance specialized structs (`opt_int`, `list_int` etc.) are emitted. `[1, 2, 3]` literals + `'a list` sum work |
+| 4.12 | Polymorphic `show` builtin | `show : 'a -> str` is specialized per call site into `show_T`. Covers int/bool/str/unit/tuple/record/variant (monomorphic + polymorphic instantiation + recursive). asprintf-based with cycle guard |
+| 4.13 | Polymorphic record monomorphization | `type 'a Box = { v: 'a }` etc. specialize per type (`Box_int`, `Box_str`); Record_lit emit reads the mono name from `.ty` |
+| 4.14 | Complex patterns (P_int / P_str / P_bool / P_record / nested / P_as) | Match pattern compilation rewritten with fully-recursive `compile_pattern`; each pattern reduced to (test, bindings); constructor can nest constructor/tuple/record; record patterns destructurable |
+| 4.15 | Or-patterns + match guards | `\| pat1 \| pat2 -> body` pre-flattened into multiple arms (typer ensures both branches bind the same name set); guards evaluated in the arm's binding scope; falls through on false |
+| 4.16 | `'a list` show as `[1, 2, 3]` + variant payload tuple-shape collection | `type 'a list` is special-cased so `show` prints `[1, 2, 3]`. Tuple shapes inside variant payloads (`tuple_int_list_int` etc.) are included in tuple shape collection, so structs are emitted even if no Cons appears in the AST (empty-list case) |
+| 4.17 | **Region runtime** (bump allocator) | `region R { body }` implemented in C: `__lang_region` struct (`{ char* base; char* top; size_t cap; }`) + `__lang_region_init/alloc/free` helpers; `region R { ... }` emits init + body eval + free; `&R v` bump-allocates in the region and returns T*. `c_type_of (TyRef _ inner)` becomes `inner*`. Combined with the typer's escape check, leaving a region scope frees memory — **the memory model graduates from "type-level label" to "real bump allocator"** |
+| 4.18 | `with` Drop execution + typedef reordering | `with c = v in body` codegens: at scope end, `c.close.fn(c.close.env, 0)` is auto-invoked (only when the Drop type has a close field). Typedef layout reorganized into "all forward decls → closure typedefs → all struct bodies" so a record / variant with a `closure_T1_T2` field (e.g. a Drop type's `close: unit -> unit`) can still let closures reference the record definition as a function-pointer return |
+| 4.19 | View construction over region (bump alloc + ptr) | View values codegen as `V*` (a region-internal pointer). New `is_view_type` helper; `c_type_of` maps view name to `V*`; Record_lit for a view becomes `__lang_region_alloc(&__region_R, sizeof(V))` + body copy + ptr return; Field_get on a view uses `->`. View value lifetime is bound to region scope (combined with Phase 2.1 escape check + region runtime) |
+| 4.20 | **Closure env in default region** | A program-lifetime arena (`__lang_default_region`) is added at file scope; `main`'s prologue initializes 4 MB; the epilogue frees. Anonymous closure env struct alloc switches from `malloc` to `__lang_region_alloc(&__lang_default_region, ...)`. Closures live beyond a user's `region R { ... }`, so a separate arena is needed. Bump-alloc-ization lowers per-closure alloc cost; bulk-freed at `main` exit (valgrind clean) |
+| 4.21 | **Strings / recursive variant nodes also use the default region** | The remaining 2 malloc sites consolidate into the default region: `__lang_str_concat`'s `malloc(la + lb + 1)` → `__lang_region_alloc(&__lang_default_region, la + lb + 1)`; recursive Constr emit (`Cons (h, t)` etc.) `malloc(sizeof(T_node))` → `__lang_region_alloc(&__lang_default_region, sizeof(T_node))`. Emit order rearranged to `region_runtime_helpers → str_concat_helper` so str_concat can reference the default region. The only remaining C malloc is the **region's base-buffer alloc** inside `__lang_region_init` — all user-visible allocations now live on a bump arena. `main` exit invokes `__lang_region_free(&__lang_default_region)` for bulk free; valgrind clean |
 
-slice ごとに **clang 経由で native binary 化して実行確認** している (例: factorial 10 → 3628800、`print (greet 5)` → "positive"、`fst ("hello", 42)` → "hello")。
+Each slice is **verified by clang-compiling to a native binary and running it** (e.g. factorial 10 → 3628800; `print (greet 5)` → "positive"; `fst ("hello", 42)` → "hello").
 
-詳細な変更履歴は [changelog.md](changelog.md) を参照。
+Detailed change history is in [changelog.md](changelog.md).
 
 ---
 
-## 6. ロードマップ
+## 6. Roadmap
 
-### 残課題 (DEFERRED §1.2 / §1.3 参照)
+### Remaining work (see DEFERRED §1.2 / §1.3)
 
-| 機能 | 必要なもの |
+| Feature | What's needed |
 |---|---|
-| builtin の first-class value 用法 | `let f = vec_new in ...` を per-T closure wrapper として emit (DEFERRED §1.2)。複数 slice 級 |
-| OwnedVec の自動 scope-bound Drop | NLL + move semantics (DEFERRED §1.3)、設計から |
-| nested or-pattern | constructor 内の or を展開 |
-| inner-lifted fn as value | `let h = fn ...` の `h` を値として使うときに closure-form を同時に生成 (現状は anonymous Fun として書き直す必要あり) |
-| closure の複雑 capture | tuple / record の capture (現状は int / bool / str / unit / 関数値 のみ) |
-| float | `Float_lit` / `f_add` 等の float builtin を C `double` + `%g` 系に |
-| long-running program 対応 | 現状は arena 一括解放方式 (`main` 終了まで持つ)。長時間動くプロセス用には、show output 等の一時文字列を捨てられる sub-arena か、proper GC が要る |
-| 残りの stdlib builtin | 約 70 個の builtin (sqrt, str_replace, ...) を 3 backend 対応 |
-| LLVM / Wasm の Map K に payload-mixed variant | variant の uniform-payload MVP 制約を緩和 (大きな変更) |
+| First-class value use of builtins | Emit per-T closure wrappers for `let f = vec_new in ...` (DEFERRED §1.2). Multi-slice effort |
+| Auto scope-bound Drop for OwnedVec | NLL + move semantics (DEFERRED §1.3); design first |
+| Nested or-patterns | Expand or inside constructors |
+| Inner-lifted fn as value | Generate a closure form alongside `let h = fn ...` when `h` is used as a value (currently rewrite as anonymous Fun) |
+| Complex closure captures | Tuple / record captures (currently int / bool / str / unit / function value only) |
+| float | `Float_lit` / `f_add` etc. → C `double` + `%g` family |
+| Long-running program support | Currently the arena is bulk-freed only at `main` exit. A sub-arena that can drop transient strings (e.g. `show` output) or a proper GC is needed for long-running processes |
+| Remaining stdlib builtins | About 70 builtins (sqrt, str_replace, ...) ported to 3 backends |
+| Payload-mixed variants as Map K on LLVM / Wasm | Loosen the uniform-payload MVP constraint (a larger change) |
 
-### Phase 5 (LLVM/Wasm 移行)
+### Phase 5 (LLVM/Wasm migration)
 
-| slice | 内容 | 動くもの |
+| Slice | Content | What works |
 |---|---|---|
-| 5.1 | **LLVM IR MVP** (自前 textual IR 生成) | int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var) / Var / Annot を LLVM IR に変換、`-ll` / `-lle` CLI flag、`@printf` 経由で結果出力、`clang out.ll` で native binary。phi node 経由の If、icmp 経由の比較、zext で bool → i32 拡張 |
-| 5.2 | **関数 lifting + recursion** | top-level `let f = fn x -> ...` および `let rec f = fn x -> ... and g = fn y -> ...` を `define iXX @f(iYY %x) { ... }` として lift。`App (Var name, arg)` を `call iZZ @name(iYY %arg)` に compile (known top-level fn のみ direct call、第一級関数は別 slice)。各 fn ごとに register/label counter をリセットして SSA 名衝突を回避。LLVM IR は同モジュール内で前方参照可なので C のような forward decl は不要。factorial 10 = 3628800、fibonacci 15 = 610、is_even 7 = 0 (相互再帰) が clang 経由で native 実行 |
-| 5.3 | **文字列対応 + ++ + print + str_len + str-取る/返す関数** | `TyStr` → LLVM `ptr` (opaque pointer)。`Str_lit s` を private constant global (`@.str_N = private constant [N x i8] c"...\00"`) に lift、値として global シンボルを直接使う。`Bin (Concat, a, b)` を `call ptr @__lang_str_concat(ptr %a, ptr %b)` に。`__lang_str_concat` を LLVM IR 内に inline 定義 (malloc + strlen + memcpy + GEP + store 0 で組み立て)。`print s` を `call i32 @puts(ptr %s)` + 値は 0、`str_len s` を `call i64 @strlen(ptr %s)` + `trunc i64 ... to i32` に。`main_format_of` に `TyStr → ("ptr", "%s")` 対応、`@.fmt_s` global を生成。str を取る/返す関数も自然に動く (`define ptr @f(ptr %s)` 形式)。動作確認 (clang 経由 native): `print "Hello, LLVM!"` → "Hello, LLVM!"、`"hello, " ++ "world!"` → "hello, world!"、`str_len "Hello, world!"` → 13、`let greet = fn name -> "Hello, " ++ name ++ "!" in print (greet "world")` → "Hello, world!" |
-| 5.4 | **tuple + AST 型注釈基盤の LLVM 版** | tuple を LLVM named struct `%tuple_int_str = type { i32, ptr }` に lower。shape ごとに `collect_tuple_shapes` が AST + fn signature を walk して使われた tuple 型を集めて typedef を emit。`Tuple [e1; e2; ...]` を `insertvalue` chain (`undef` から始めて各要素を `insertvalue %T %prev, Tn vn, idx`) に。`fst` / `snd` を `extractvalue %tuple_X %p, 0/1` に。nested tuple (`((1,2), 3)` → `%tuple_tuple_int_int_int`) も自動生成。tuple-arg / tuple-return 関数も自然に lower (`define %tuple_int_int @split(ptr %s)`、`define i32 @sum_pair(%tuple_int_int %p)`)。動作確認 (clang 経由 native): `let p = (1, 2) in fst p + snd p` → 3、`let p = ("hello", 42) in print (fst p)` → "hello"、`let split = fn s -> (s, str_len s) in print (fst (split "hello"))` → "hello"、`((1,2), 3)` の nested 和 → 6 |
-| 5.5 | **record (単相)** | monomorphic record (`type Pt = { x: int, y: int }`) を LLVM named struct (`%Pt = type { i32, i32 }`) に lower。`collect_record_names` で AST + fn signature を walk して使われた record 型を全部集める (`r_params = []` なものだけ、多相は別 slice)。`record_fields` / `field_index` で `Typer.records` から field 順序を引いてくる。`Record_lit` は宣言順に `insertvalue` chain (source field 順は宣言順と違っても OK)、`Field_get` は `extractvalue %R %p, idx`、`Record_update` は base に対する `insertvalue` chain。record を取る / 返す関数も自然に lower (`define %Pt @mk(i32 %n)`)。compile_to_c と同じ infer_program ヘルパ経由で Typer.records を populate。動作確認 (clang 経由 native): `let p = Point { x = 3, y = 4 } in p.x + p.y` → 7、`Pt { x = 3, y = 4 } | x = 100` で x * y → 400、`let mk = fn x -> Pair { a = x, b = str_len x } in print ((mk "hello").a)` → "hello"。多相 record は引き続き Codegen_error |
-| 5.6 | **variant + match (単相、payload 型 1 つ)** | 単相 variant を LLVM named struct に lower: 全コンストラクタが nullary なら `%V = type { i32 }`、payload がある場合は `%V = type { i32, T }` で T は全 payload-bearing コンストラクタが共有する単一の payload 型 (異なる型なら Codegen_error)。`variant_tags` ハッシュテーブルで constructor → 整数 tag を保持。`Constr cname (arg)` を `insertvalue %V undef, i32 tag, 0` → optional `insertvalue %V %t0, T arg, 1` の chain で構築。`Match` は scrutinee から `extractvalue %V %s, 0` で tag を取り出し、各 arm を `icmp eq i32 %tag, N` + `br i1` で順次テスト (P_constr / P_var / P_wild のみ)、fallthrough は `@abort()` + `unreachable`、最後に全 arm の結果を `phi` で merge。pattern 内で payload bind があれば `extractvalue %V %s, 1` で payload register を作って bindings に入れる。動作確認 (clang 経由 native): `match LG with | LR -> 0 | LG -> 1 | LB -> 2` → 1、`match LErr "x" with | LOk -> 0 | LErr m -> str_len m` → 1、`let v = ISome 42 in match v with | INone -> 0 | ISome n -> n` → 42。guard / 多相 variant / 再帰 variant / nested pattern / or-pattern は引き続き Codegen_error |
-| 5.7-a | **first-class top-level fn** | `T1 -> T2` 型を `%closure_T1_T2 = type { ptr, ptr }` (env, fn ptr) として lower。`collect_arrow_types` で AST + fn signature を walk して使われた arrow 型を全部収集、`emit_closure_typedef` で typedef を生成。各 top-level fn に env-ignoring adapter `define T2 @<name>_closure_fn(ptr %env_unused, T1 %x) { ret T2 @<name>(T1 %x); }` を自動生成。`Var name` を値位置で評価する際、env に shadowing がなく `toplevel_fn_names` に登録済なら、`insertvalue %closure_T1_T2 undef, ptr null, 0` + `insertvalue ..., ptr @<name>_closure_fn, 1` の chain で inline に closure value を構築。indirect App (App の head が known top-level でないケース) は `extractvalue %closure %c, 0/1` で env/fn を取り出し、`call T2 %fn_ptr(ptr %env, T1 %arg)` で dispatch (LLVM の opaque pointer 経由なので fn pointer 型はそのまま渡せる)。Direct call は引き続き Phase 5.2 の `call T2 @name(T1 %arg)` 高速パス。`current_var_types` で fn body 内の polymorphic Var 型を resolve_fn_types 由来の concrete 型から recover (let-poly 後の param が `'a` のまま残るケース対策)。動作確認 (clang 経由 native): `let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc` → 6、`let apply2 = fn f -> f (f 5) in apply2 inc` → 7。anonymous Fun (inner `fn x -> ...`) と closure-with-captures は別 slice |
-| 5.7-b | **anonymous Fun + closure-with-captures** | 内部 `fn x -> ...` を expression position で扱う: AST から free vars を計算 (`free_vars` ヘルパ、bound 名を除外)、`current_var_types` に登録済な名前にフィルタ (globals / builtins / top-level を除外)。capture ごとに型を `current_var_types` から取得、`%anon_N_env = type { T1, T2, ... }` の env struct typedef を生成、`anon_N_fn` adapter を `pending_closures` キューに積む。構築 site では `malloc(sizeof(%anon_N_env))` (`getelementptr null` + `ptrtoint` で sizeof) で env を確保、各 capture を `getelementptr` + `store` で env field に書き込み、`insertvalue %closure undef, ptr %env, 0` + `insertvalue ..., ptr @anon_N_fn, 1` で closure value を作る。`emit_anon_adapter` (emit_program で `pending_closures` を drain して呼出) の adapter body では、entry で各 capture を `getelementptr` + `load` で env_self から取り出して fresh register に入れ、それを使って Fun の元 body を emit。`current_expected_ty` を追加して、AST の Fun.ty が polymorphic な場合に parent context の型を fallback として使う (let-poly 後の `fn f -> fn x -> f (f x)` で内側 Fun の型が `'a -> 'a` のまま残るケースが解決)。Let case で current_var_types に value 型を加える。動作確認 (clang 経由 native): `let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10` → 15 (capture)、`let twice = fn f -> fn x -> f (f x) in twice inc 5` → 7 (curried HOF)、`let apply = fn f -> fn x -> f x in apply (fn n -> n * 3) 7` → 21 (anon Fun as arg)、`let compose = fn f -> fn g -> fn x -> f (g x) in ((compose inc) dbl) 5` → 11 (3 段ネスト)。env は今 `malloc` で leak — default region 化は将来の slice |
-| 5.8 | **default region runtime + closure/文字列 alloc を region 経由に** | LLVM 版で C codegen の Phase 4.17 + 4.20 + 4.21 に相当する作業を一括: `%__lang_region = type { ptr, ptr, i64 }` 構造体定義 + `@__lang_default_region` を file-scope global として宣言 + `__lang_region_init/alloc/free` の 3 つのヘルパ関数を LLVM IR 内に inline 定義。`__lang_region_alloc` は 8 byte aligned bump pointer 方式 (`(n + 7) & -8`)。`@main` の冒頭で `__lang_region_init(@__lang_default_region, 4194304)` (4 MB)、末尾で `__lang_region_free`。`__lang_str_concat` の `malloc` を `__lang_region_alloc(@__lang_default_region, ...)` に置換。closure env (anonymous Fun) の `malloc(sizeof)` も同様に region 経由に。残る `malloc` は region init 内部の base buffer 確保のみで、`main` 終了時に `__lang_region_free` が一括で `@free` する。動作確認 (clang 経由 native): `make_adder`/`twice`/`compose` などの closure や `"hello, " ++ "world"` などの concat が全部動き、生成 IR 内の `malloc` 呼出は region init 内の 1 箇所のみ。テスト 8 件追加 (855 passing)。LLVM backend のメモリモデル整備が C backend に追いついた |
-| 5.9 | **多相 variant / record の monomorphization** | `type 'a opt = None \| Some of 'a` 等の polymorphic variant や `type 'a Box = { v: 'a }` 等の polymorphic record を、AST + fn signature から concrete instantiation を収集して instance ごとに specialized struct (`%opt_int`, `%Box_str` 等) を emit。`polymorphic_variants` / `polymorphic_records` ハッシュテーブルで宣言を保留、`collect_mono_instances` で AST walk して使われた `(name, args)` ペアを発見、`mono_variant_instances` / `mono_record_instances` に蓄積。`subst_params` / `subst_variants` で param→arg 置換、`mono_variant_name n args` / `mono_record_name n args` で specialized 名 (`opt_int`, `Box_str` 等)。`emit_mono_variant_typedef` / `emit_mono_record_typedef` で substituted な field/payload を `llvm_ty_of` で具体化して typedef 生成。`llvm_ty_of (TyCon (n, args))` を `polymorphic_variants` / `polymorphic_records` の登録名に対しては mono name にマップ。`Constr` / `Record_lit` / `Field_get` / `Record_update` / `Match` emit が、scrutinee/literal の `.ty` から mono name を引いてくる (substituted な fields/payload で型を解決)。`Exhaustive.type_variants` + `Typer.constructors[*].params` から poly variant の params を復元、`Typer.records.r_params` から poly record の params を取得。動作確認 (clang 経由 native): `type 'a opt = LNone \| LSome of 'a; match LSome 42 with | LNone -> 0 | LSome n -> n` → 42、`type 'a Box = { v: 'a }; let b = Box { v = 42 } in b.v` → 42、両方 type で specialize: `let bi = Box { v = 42 } in let bs = Box { v = "hi" } in str_len bs.v + bi.v` → 44 (`%Box_int` と `%Box_str` の両方が emit)。再帰 polymorphic variant (`'a list`) は recursive variant 対応が要るので Phase 5.10 で |
-| 5.10 | **再帰 variant + P_tuple sub-pattern** | 自己参照 payload を持つ variant (`type ilist = INil \| ICons of int * ilist`、`'a list = Nil \| Cons of 'a * 'a list` 等) を heap-allocated node + ptr 表現に切替。`recursive_variants` set で名前を track、`variant_is_recursive` (source-level) と `mono_variant_is_recursive` (substituted instance) で判定、emit_program 内で declaration 登録時 + mono instance 収集時の 2 段で populate。`emit_variant_typedef` / `emit_mono_variant_typedef` は recursive なら `%V_node = type { i32, T }` (on-heap node) を emit、value 型は `ptr` (`llvm_ty_of` が recursive_variants 登録名なら `ptr` を返す)。`Constr` 再帰の場合は `__lang_region_alloc` で node を allocate、`getelementptr` + `store` で tag + payload を書き込み、ptr を return。`Match` 再帰の場合は scrutinee の ptr に対して `getelementptr` + `load` で tag を取得、各 arm の payload も同様に load。pattern compile で `P_tuple` sub-pattern (`Cons (h, t)`) を payload tuple struct の `extractvalue` 連鎖に展開。`pattern_var_types` で pattern bind 名の concrete 型を current_var_types に追加 (polymorphic 再帰呼出で `'a list` のままにならないように)、Match scrutinee 型を Var なら current_var_types から fallback、App 直接呼出 arg 型も同様。typedef 順序を 1) collect mono instances + 2) mark recursive + 3) tuple/record/variant typedef emit (recursive_variants が tuple emit に効く) に並び替え。動作確認 (clang 経由 native): `type ilist = INil \| ICons of int * ilist; sum (ICons (1, ICons (2, ICons (3, INil))))` → 6、`type 'a list = Nil \| Cons of 'a * 'a list; sum [1,2,3,4,5]` → 15、`length ["a","b","c","d"]` → 4。テスト 5 件追加 (867 passing) |
-| 5.11 | **複雑な pattern (P_int / P_str / P_bool / P_unit / P_record / P_as / or / guard) + nested ctor** | Phase 4.14 + 4.15 相当を LLVM 版で実装。`compile_pat` を fully recursive な `(test_cond, bindings, var_types)` 関数として書き直し、各パターンを LLVM IR の icmp / strcmp / extractvalue / load + bind に分解。P_int は `icmp eq i32`、P_bool は `icmp eq i1`、P_str は `@strcmp` + `icmp eq i32 result, 0`、P_unit は constant true。P_record は declared field 順に `extractvalue` + sub-pattern を recursive call。P_as は `inner` を compile した上で whole value を name に bind。P_tuple は各要素を `extractvalue` で取り出して sub-pattern recurse。P_constr の sub-pattern は payload extract 後に compile_pat に再帰、nested constructor (例 `Cons (SS 5, _)`) も `Some (P_constr (...))` 経由で自然に展開。複数の sub-test は `and_cond` ヘルパで `and i1` 連鎖。or-pattern は `expand_or` で arms を pre-flatten (typer が両 branch の bound 名一致を保証)。guard は arm の bindings スコープ内で評価し、true なら body へ、false なら同 arm の next_label へフォールスルー (= 次の arm を試す)。`@strcmp` を runtime_decls に追加。動作確認 (clang 経由 native): `match 3 with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300、`match "hello" with | "hi" -> 1 | "hello" -> 2 | _ -> 9` → 2、`match Cons (SS 5, Nil) with | Nil -> 0 | Cons (NN, _) -> 1 | Cons (SS n, _) -> n` → 5、`match Pt { x = 3, y = 4 } with | Pt { x = a, y = b } -> a + b` → 7、`match (1, 2) with | (a, b) as p -> fst p + snd p + a + b` → 6、`match LCgB with | LCgA | LCgB -> 1 | LCgC -> 2` → 1 (or-pattern)、`match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300` → 200 (guard)。テスト 8 件追加 (875 passing) |
-| 5.12 | **show 汎用 builtin** | `show : 'a -> str` を呼出ごとに引数型から `show_<ty_tag>` を specialize、`@asprintf` 経由で型ごとに dedicated 関数を生成。`collect_show_types` で AST + fn signature を walk して `App (Var "show", arg)` を発見、`add_show_type` が引数型 + 依存型 (tuple elem / record field / variant payload) を再帰登録 (循環ガード: 既登録なら skip → 再帰 variant の `'a list` で無限ループしない)。`emit_show_fn` が `show_types` の各 entry に specialized fn を emit: int → `@asprintf("%d", x)`、bool → `select i1` で `@.s_true` / `@.s_false`、str → `@asprintf("\"%s\"", x)`、unit → const `@.s_unit`、tuple → 各要素の `show_T` を call して `@asprintf("(%s, ..., %s)", ...)` で合成、record → 各 field の `show_T` を call して `@asprintf("Type { f = %s, ... }", ...)` で合成、variant → tag dispatch (icmp eq + br i1 + phi) → 各 ctor で nullary なら `@.s_ctor_<name>`、payload あれば payload を再帰 show して `@asprintf("Ctor %s", ...)` で合成、再帰 variant も `getelementptr` + `load` で tag/payload 取得して同じ structure で。Format string と ctor 名 string は emit_program 冒頭で必要な分だけ pre-register。`App (Var "show", arg)` を `call ptr @show_<ty_tag arg.ty>(arg)` に dispatch。動作確認 (clang 経由 native): `show 42` → "42"、`show "hi"` → "\"hi\""、`show true` → "true"、`show (1, "hi")` → "(1, \"hi\")"、`show (SS 42)` → "SS 42"、`show (Pt { x = 3, y = 4 })` → "Pt { x = 3, y = 4 }"、`show (Cons (1, Cons (2, Cons (3, Nil))))` → "Cons (1, Cons (2, Cons (3, Nil)))"。テスト 9 件追加 (884 passing)。`'a list` の special-case `[1, 2, 3]` 形式は今後の slice |
-| 5.13 | **Region_block + Ref + with Drop + view 構築 + Unit_lit** | Mere のメモリモデル機能を LLVM backend で一括実装 (Phase 4.17 region runtime の user-side + 4.18 + 4.19 相当)。`Region_block (R, body)` を `alloca %__lang_region` + `__lang_region_init(ptr, 1MB)` + body + `__lang_region_free` に compile、`current_regions : (name, ptr_reg)` で region 名 → SSA レジスタの対応を track。`Ref (R, v)` (`&R v`) を inner 評価 + sizeof (`getelementptr null` + `ptrtoint`) + `__lang_region_alloc` + `store` で region buffer に書き込み、`ptr` を返す。`With (c, v, body)` (`with c = v in body`) を `let c = v` + body 評価 + body 後に v の record に `close: unit -> unit` field があれば `c.close.fn(c.close.env, 0)` で auto-invoke (`extractvalue` 3 段)、body の値を返す。`Record_lit` で name が `Typer.views` 登録名なら view 構築: `e.Ast.ty` の `TyCon (V, [TyRef (R, ...)])` から region R を取得、宣言順に `insertvalue` で record value を組み立て、`__lang_region_alloc` + `store` で region buffer に書き込み、`ptr` を返す。`Field_get` で inner type が view (`is_view_type`) なら `getelementptr %V, ptr %x, i32 0, i32 idx` + `load` で field 取得。`llvm_ty_of` に `TyRef _ → ptr` と `TyCon (n, _) when Typer.views n → ptr` を追加。`Unit_lit` を `i32 0` に対応。動作確認 (clang 経由 native): `region R { let x = &R 5 in 42 }` → 42、`region R { let pair = &R (1, 2) in 99 }` → 99、`type Pt = { x: int }; region R { let p = &R Pt { x = 42 } in 100 }` → 100、`drop type Conn = { id, close }; with c = mk 7 in c.id * 10` → "close 7\n70"、`view Cell[R] of int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7。テスト 7 件追加 (891 passing) — **LLVM backend がメモリモデル全機能をカバー、C backend (Phase 4.21) と完全並列に到達** |
-| 5.14 | **`'a list` の show を `[a, b, c]` 形式に special-case** | C codegen の Phase 4.16 相当。`emit_show_fn` の variant branch の前に `Ast.TyCon ("list", [elem_ty])` for recursive list を special-case。Nil 単独なら `"[]"`、Cons は alloca/load/store + ループ (`loop_test` / `loop_body` / `loop_iter` / `loop_end` ラベル) で先頭から走査、各要素を `show_<elem_tag>` で文字列化して間に `", "` を挟みつつ `__lang_str_concat` で連結、最後に `"]"` を追加。`@.s_lbracket` / `@.s_rbracket` / `@.s_comma_space` を pre-register。副次として `add_show_type` で polymorphic TyCon に出会ったとき mono_variant_instances / mono_record_instances にも登録 (show が変な型を使うだけのケースで mono instance が漏れる問題に対処)、`collect_tuple_shapes` に「mono variant 払い (substituted payload) を walk する」処理を追加 (`int list` の payload `(int, int list)` の tuple shape が AST 上に Cons なしでも emit されるように)。動作確認 (clang 経由 native): `show [1, 2, 3]` → `[1, 2, 3]`、`show (Nil : int list)` → `[]`、`show ["hello", "world"]` → `["hello", "world"]`。テスト 4 件追加 (895 passing) |
+| 5.1 | **LLVM IR MVP** (own textual-IR emission) | int / bool / arithmetic / comparison / logic / Neg / If / Let (P_var) / Var / Annot converted to LLVM IR; `-ll` / `-lle` CLI flags; output via `@printf`; `clang out.ll` produces a native binary. If via phi nodes, compares via icmp, bool widened to i32 via zext |
+| 5.2 | **Function lifting + recursion** | top-level `let f = fn x -> ...` and `let rec f = fn x -> ... and g = fn y -> ...` lift to `define iXX @f(iYY %x) { ... }`. `App (Var name, arg)` compiles to `call iZZ @name(iYY %arg)` (direct call only for known top-level fns; first-class fns are a later slice). Each fn's register/label counter is reset to avoid SSA name collisions. LLVM IR permits in-module forward references, so no C-style forward decls. factorial 10 = 3628800; fibonacci 15 = 610; is_even 7 = 0 (mutual recursion) all run natively via clang |
+| 5.3 | **Strings + ++ + print + str_len + str-arg/return fns** | `TyStr` → LLVM `ptr` (opaque pointer). `Str_lit s` lifted to a private constant global (`@.str_N = private constant [N x i8] c"...\00"`); the global symbol is used directly as the value. `Bin (Concat, a, b)` becomes `call ptr @__lang_str_concat(ptr %a, ptr %b)`. `__lang_str_concat` defined inline in LLVM IR (malloc + strlen + memcpy + GEP + store 0). `print s` becomes `call i32 @puts(ptr %s)` with value 0. `str_len s` becomes `call i64 @strlen(ptr %s)` + `trunc i64 ... to i32`. `main_format_of` handles `TyStr → ("ptr", "%s")` and generates `@.fmt_s`. str-arg/return fns lower naturally. Verified clang-natively: `print "Hello, LLVM!"` → "Hello, LLVM!"; concat / str_len / greet examples all work |
+| 5.4 | **Tuples + AST type-annotation foundation (LLVM)** | Tuples lower to LLVM named structs `%tuple_int_str = type { i32, ptr }`. `collect_tuple_shapes` walks AST + fn signatures to collect used tuple types and emit typedefs. `Tuple [e1; e2; ...]` becomes an `insertvalue` chain (starting from `undef`, inserting each element by index). `fst` / `snd` lower to `extractvalue %tuple_X %p, 0/1`. Nested tuples (`((1,2), 3)` → `%tuple_tuple_int_int_int`) auto-generate. Tuple-arg / tuple-return fns lower naturally. Verified clang-natively |
+| 5.5 | **Records (monomorphic)** | Monomorphic records (`type Pt = { x: int, y: int }`) lower to LLVM named structs (`%Pt = type { i32, i32 }`). `collect_record_names` walks AST + fn signatures to collect used records (only `r_params = []`; polymorphic is later). `record_fields` / `field_index` read the field order from `Typer.records`. `Record_lit` emits an `insertvalue` chain in declared order (source order can differ). `Field_get` is `extractvalue %R %p, idx`; `Record_update` does an `insertvalue` chain over the base. Record-arg / return fns lower naturally. compile_to_c-shared infer_program populates Typer.records. Verified clang-natively. Polymorphic records still Codegen_error |
+| 5.6 | **Variants + match (monomorphic; one payload type)** | Monomorphic variants lower to LLVM named structs: when all ctors are nullary, `%V = type { i32 }`; when there's a payload, `%V = type { i32, T }` where T is a single shared payload type (different types → Codegen_error). `variant_tags` Hashtbl holds constructor → int tag. `Constr cname (arg)` builds via `insertvalue %V undef, i32 tag, 0` → optional `insertvalue %V %t0, T arg, 1`. `Match` does `extractvalue %V %s, 0` for the tag, then each arm via `icmp eq i32 %tag, N` + `br i1` (P_constr / P_var / P_wild only); fallthrough → `@abort()` + `unreachable`; all arm results merged via `phi`. Payload binds use `extractvalue %V %s, 1`. Verified clang-natively. Guards / polymorphic variants / recursive variants / nested patterns / or-patterns still Codegen_error |
+| 5.7-a | **First-class top-level fns** | `T1 -> T2` types lower to `%closure_T1_T2 = type { ptr, ptr }` (env, fn ptr). `collect_arrow_types` walks AST + fn signatures to collect used arrow types; `emit_closure_typedef` emits the typedef. Each top-level fn gets an env-ignoring adapter `define T2 @<name>_closure_fn(ptr %env_unused, T1 %x) { ret T2 @<name>(T1 %x); }`. `Var name` in value position, with no env shadow and on the toplevel_fn_names list, inline-builds a closure via `insertvalue %closure_T1_T2 undef, ptr null, 0` + `insertvalue ..., ptr @<name>_closure_fn, 1`. Indirect App (non-known top-level head) does `extractvalue %closure %c, 0/1` for env/fn and `call T2 %fn_ptr(ptr %env, T1 %arg)`. Direct call still uses Phase 5.2's fast path. `current_var_types` recovers polymorphic Var types in fn body from resolve_fn_types' concrete types. Verified clang-natively. Anonymous Fun + closure-with-captures is the next slice |
+| 5.7-b | **Anonymous Fun + closure-with-captures** | Inner `fn x -> ...` in expression position: compute free vars (`free_vars` helper, excluding bound names); filter against current_var_types (excluding globals / builtins / top-level). For each capture, fetch type from current_var_types; generate env struct typedef `%anon_N_env = type { T1, T2, ... }`; queue an `anon_N_fn` adapter into `pending_closures`. At the construction site, `malloc(sizeof(%anon_N_env))` (sizeof via the LLVM null-trick GEP + `ptrtoint`) for env; each capture is `getelementptr` + `store` into env fields; the closure value is built via `insertvalue %closure undef, ptr %env, 0` + `insertvalue ..., ptr @anon_N_fn, 1`. `emit_anon_adapter` (called by `emit_program` draining `pending_closures`): in entry, captures are GEP-loaded from env_self into fresh registers, used to emit the Fun's original body. `current_expected_ty` added so that when AST's Fun.ty is polymorphic, the parent context's type serves as fallback. Let case adds value's type to current_var_types. Verified clang-natively. Env still mallocs and leaks — default-region migration is later |
+| 5.8 | **Default-region runtime + closure/string allocations via region** | C codegen's Phases 4.17 + 4.20 + 4.21 done at once for LLVM: `%__lang_region = type { ptr, ptr, i64 }` + `@__lang_default_region` as a file-scope global + `__lang_region_init/alloc/free` helpers inline in LLVM IR. `__lang_region_alloc` is 8-byte aligned bump pointer (`(n + 7) & -8`). `@main` prologue does `__lang_region_init(@__lang_default_region, 4194304)` (4 MB); epilogue does `__lang_region_free`. `__lang_str_concat`'s `malloc` → `__lang_region_alloc(@__lang_default_region, ...)`. Closure env (anonymous Fun) malloc likewise. Only remaining malloc is inside region init's base-buffer alloc; on `main` exit, `__lang_region_free` calls `@free` in bulk. Verified clang-natively. 8 tests; total 855. LLVM backend's memory-model story catches up to C |
+| 5.9 | **Polymorphic variant / record monomorphization** | `type 'a opt = None \| Some of 'a` etc. (polymorphic variants) and `type 'a Box = { v: 'a }` etc. (polymorphic records): collect concrete instantiations from AST + fn signatures and emit per-instance specialized structs (`%opt_int`, `%Box_str`, ...). `polymorphic_variants` / `polymorphic_records` Hashtbls defer declarations; `collect_mono_instances` walks AST to find `(name, args)` pairs, accumulating into `mono_variant_instances` / `mono_record_instances`. `subst_params` / `subst_variants` do param → arg substitution; `mono_variant_name n args` / `mono_record_name n args` produce specialized names. `emit_mono_variant_typedef` / `emit_mono_record_typedef` resolve substituted fields/payloads via `llvm_ty_of` to emit typedefs. `llvm_ty_of (TyCon (n, args))` maps polymorphic-variant / record names to their mono name. Constr / Record_lit / Field_get / Record_update / Match emit pull mono names from `.ty`. `Exhaustive.type_variants` + `Typer.constructors[*].params` recover poly-variant params; `Typer.records.r_params` provides poly-record params. Verified clang-natively. Recursive polymorphic variants (`'a list`) need recursive-variant support — Phase 5.10 |
+| 5.10 | **Recursive variants + P_tuple sub-patterns** | Self-referential payload variants (`type ilist = INil \| ICons of int * ilist`, `'a list = Nil \| Cons of 'a * 'a list`) switch to heap-allocated node + ptr representation. `recursive_variants` set tracks names; `variant_is_recursive` (source-level) and `mono_variant_is_recursive` (substituted instance) judge; populated in 2 passes at declaration-registration time + mono-instance-collection time. `emit_variant_typedef` / `emit_mono_variant_typedef`: when recursive, emit `%V_node = type { i32, T }` (heap node); value type is `ptr` (`llvm_ty_of` returns `ptr` for recursive_variants). Recursive Constr: `__lang_region_alloc` for node + `getelementptr` + `store` for tag/payload + return ptr. Recursive Match: `getelementptr` + `load` for tag/payload via the scrutinee ptr. Pattern-compile adds P_tuple sub-pattern → `extractvalue` chain on payload tuple struct. `pattern_var_types` adds bound names' concrete types to current_var_types (so polymorphic recursive calls don't stay `'a list`); Match scrutinee type falls back from current_var_types if it's a Var; App direct-call arg type likewise. Typedef order: 1) collect mono instances + 2) mark recursive + 3) tuple/record/variant typedef emit (so recursive_variants affects tuple emit). Verified clang-natively. 5 tests; total 867 |
+| 5.11 | **Complex patterns (P_int / P_str / P_bool / P_unit / P_record / P_as / or / guard) + nested ctor** | LLVM port of Phase 4.14 + 4.15. `compile_pat` rewritten as a fully recursive `(test_cond, bindings, var_types)` function; each pattern is reduced to LLVM IR via icmp / strcmp / extractvalue / load + bind. P_int → `icmp eq i32`; P_bool → `icmp eq i1`; P_str → `@strcmp` + `icmp eq i32 result, 0`; P_unit → true; P_record extracts each declared field via `extractvalue` and recurses into sub-pattern; P_as compiles `inner` then binds whole value; P_tuple extracts each element via `extractvalue` and recurses; nested constructor (e.g. `Cons (SS 5, _)`) extracts the payload then routes through `Some (P_constr (...))`. Multiple sub-tests combined via `and_cond` helper using `and i1`. Or-patterns pre-flattened by `expand_or` (typer guarantees matching bind name sets). Guards run in the arm's binding scope; on true → body; on false → next_label (try next arm). `@strcmp` added to runtime_decls. Verified clang-natively. 8 tests; total 875 |
+| 5.12 | **Polymorphic `show` builtin** | Per-call argument-type-driven `show_<ty_tag>` specialization; per-type dedicated fns generated via `@asprintf`. `collect_show_types` walks AST + fn signatures to find `App (Var "show", arg)`; `add_show_type` recursively registers the arg type + dependent types (tuple elems / record fields / variant payloads), guarded against cycles (already-registered → skip → no infinite loop on recursive variants like `'a list`). `emit_show_fn` emits per-entry: int → `@asprintf("%d", x)`; bool → `select i1` between `@.s_true` / `@.s_false`; str → `@asprintf("\"%s\"", x)`; unit → const `@.s_unit`; tuple → call each `show_T` and compose with `@asprintf("(%s, ..., %s)", ...)`; record → call each field's `show_T` and compose `@asprintf("Type { f = %s, ... }", ...)`; variant → tag dispatch (icmp eq + br i1 + phi); per ctor: nullary → `@.s_ctor_<name>`; payload → recursively show payload and compose `@asprintf("Ctor %s", ...)`; recursive variant → `getelementptr` + `load` for tag/payload, same shape. Format strings and ctor name strings are pre-registered as needed at `emit_program` head. `App (Var "show", arg)` dispatches to `call ptr @show_<ty_tag arg.ty>(arg)`. Verified clang-natively. 9 tests; total 884. `'a list` `[1, 2, 3]` special-case in a later slice |
+| 5.13 | **Region_block + Ref + with Drop + view construction + Unit_lit** | All of Mere's memory-model features implemented in LLVM backend at once (Phase 4.17 region runtime user side + 4.18 + 4.19). `Region_block (R, body)` compiles to `alloca %__lang_region` + `__lang_region_init(ptr, 1MB)` + body + `__lang_region_free`; `current_regions : (name, ptr_reg)` tracks region name → SSA register. `Ref (R, v)` (`&R v`) is inner eval + sizeof (`getelementptr null` + `ptrtoint`) + `__lang_region_alloc` + `store` to region buffer + return `ptr`. `With (c, v, body)` (`with c = v in body`) becomes `let c = v` + body eval + if v's record has `close: unit -> unit`, post-body `c.close.fn(c.close.env, 0)` auto-invocation (3-stage `extractvalue`); body's value is returned. `Record_lit` for `Typer.views`-registered name → view construction: from `e.Ast.ty`'s `TyCon (V, [TyRef (R, ...)])` get region R, build record via `insertvalue` in declared order, `__lang_region_alloc` + `store` to region buffer, return `ptr`. `Field_get` on view (`is_view_type`) → `getelementptr %V, ptr %x, i32 0, i32 idx` + `load`. `llvm_ty_of` adds `TyRef _ → ptr` and `TyCon (n, _) when Typer.views n → ptr`. `Unit_lit` → `i32 0`. Verified clang-natively. 7 tests; total 891 — **the LLVM backend covers the full memory model, fully parallel to the C backend (Phase 4.21)** |
+| 5.14 | **`'a list` show special-case `[a, b, c]`** | LLVM port of C codegen Phase 4.16. Before `emit_show_fn`'s variant branch, special-case `Ast.TyCon ("list", [elem_ty])` for recursive list. Nil alone → `"[]"`. Cons → alloca/load/store + loop blocks (`loop_test` / `loop_body` / `loop_iter` / `loop_end`) walking from head, calling `show_<elem_tag>` on each element with `", "` between, concatenating via `__lang_str_concat`, then trailing `"]"`. `@.s_lbracket` / `@.s_rbracket` / `@.s_comma_space` pre-registered. Side effects: when `add_show_type` encounters a polymorphic TyCon, also register into mono_variant_instances / mono_record_instances (handles the case where `show` uses a "weird" type that wouldn't otherwise surface as a mono instance); `collect_tuple_shapes` extended to walk substituted mono-variant payloads (so `int list`'s payload `(int, int list)` tuple shape is emitted even with no Cons in the AST). Verified clang-natively. 4 tests; total 895 |
 
 ### Phase 6 (Wasm backend)
 
-C / LLVM 両 backend が完成形 (Phase 4 / 5 並列カバー) になり、design 目標の三本目 (Wasm) に着手。Phase 5 と同様 textual format (WAT) を emit、`wat2wasm` (wabt) で `.wasm` binary に、Node.js の `WebAssembly.instantiate` で実行確認するパイプライン。
+With C / LLVM backends complete (Phase 4 / 5 parallel coverage), it's time for the third design target — Wasm. Like Phase 5, emit textual format (WAT), convert to `.wasm` binary via `wat2wasm` (wabt), and verify via Node.js's `WebAssembly.instantiate`.
 
-| slice | 内容 | 動くもの |
+| Slice | Content | What works |
 |---|---|---|
-| 6.1 | **Wasm (WAT) MVP** (スタックベース emit) | int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var) / Var / Annot を WAT に変換。`-w` / `-we` CLI flag、stack-based emission (LLVM の SSA とは違い operand を順に push して opcode 1 つでスタック消費 + 結果 push)。`If` を WAT の `if (result i32) ... else ... end` ブロックに、`Let (P_var)` を `(local i32)` 宣言 + `local.set N` / `local.get N` に。比較は `i32.lt_s` / `i32.eq` 等、bool は i32 ワイド化。動作確認 (wat2wasm + Node.js WebAssembly): `let a = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200、`if 3 > 2 then 100 else 200` → 100、`let x = 5 in x * x + 1` → 26、`true && (false || true)` → 1。テスト 14 件追加 (909 passing) |
-| 6.2 | **関数 lifting + recursion** | top-level `let f = fn x -> ...` および `let rec` を `(func $f (param i32) (result i32) ...)` として lift。Phase 5.2 と同形の `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` / `resolve_fn_types` を codegen_wasm に並列実装。`emit_fn_def` で各 fn を独立した locals / instrs scope として emit (param は slot 0、let bindings は slot 1, 2, ...)。`App (Var name, arg)` を `<arg push>; call $name` の連続に compile (`toplevel_fn_names` 登録済の名前のみ direct call)。Wasm は同モジュール内で前方参照可なので C のような forward decl は不要 — 相互再帰もそのまま動く。動作確認 (wat2wasm + Node.js): `factorial 10` → 3628800、`fibonacci 15` → 610、`is_even 7` (相互再帰) → 0。テスト 5 件追加 (914 passing)。クロージャ / 第一級関数 / 文字列 / record / variant 等は後続 slice |
-| 6.3 | **文字列対応 + str_len + ++ + print + str-取る/返す関数** | 文字列を Wasm の linear memory に置くアーキテクチャ。`(memory (export "memory") 1)` で 1 page (64 KB) メモリを宣言 + export、`(global $__lang_bump (mut i32) (i32.const N))` で bump pointer (mutable global)。`Str_lit` を `(data (i32.const offset) "...\00")` の data セグメントに lift、`wasm_string_escape` で `\HH` エスケープ、値としては i32 offset を `i32.const N` で push。`$__lang_strlen` (block/loop で null byte 探索) と `$__lang_str_concat` (strlen 2 回 + 2 つの copy loop + null 終端 + bump 更新) を WAT 内に inline 定義。`print s` を host import `(import "env" "puts" (func $puts (param i32)))` 経由で host (Node.js) に委譲、値は i32 0。`str_len s` を `call $__lang_strlen`、`++` を `call $__lang_str_concat` に。str を取る / 返す関数も自然に動く (Wasm 上では str も i32 として扱うので signature 変更不要)。動作確認 (wat2wasm + Node.js with `puts: (off) => decode memory at off`): `str_len "Hello, world!"` → 13、`str_len ("hello, " ++ "world!")` → 13、`print "Hello, Wasm!"` → "Hello, Wasm!"、`let greet = fn name -> "Hello, " ++ name ++ "!" in print (greet "world")` → "Hello, world!"。テスト 9 件追加 (923 passing) |
-| 6.4 | **tuple** | tuple を linear memory にレイアウト: 各要素 4 bytes (Mere 上の int / bool / str はすべて i32 / offset)、base offset を fresh local に保存して **bump pointer を即座に advance** (reserved 領域として確保) → 各要素を `i32.store offset=N*4` で base からの相対位置に書き込み → 最後に base を push。bump を先に進めるのが重要 — nested tuple や `++` の内側 emit がさらに bump を advance するので、後で reserve すると領域がオーバーラップする (Phase 6.4 開発中に nested で 22 (offsets 衝突) を返したのを fix)。`fst` / `snd` を `i32.load offset=0` / `offset=4` に dispatch、tuple-arg / tuple-return 関数も自然に動く (tuple は i32 offset なので signature 変更不要)。動作確認 (wat2wasm + Node.js): `let p = (1, 2) in fst p + snd p` → 3、`let p = ("hello", 42) in print (fst p)` → "hello"、`((1, 2), 3)` の nested 和 → 6、tuple-arg fn `sum_pair (10, 20)` → 30。テスト 5 件追加 (928 passing) |
-| 6.5 | **record (単相)** | tuple と同じ linear memory レイアウト。`Record_lit (name, fields)` を `Typer.records.r_fields` の **宣言順** に store (source の field 順が違っても再構成) — bump を 4*N 即時 advance、各 field を `i32.store offset=i*4` で書き込み、最後に base を push。`Field_get` は field 名から index を引いて `i32.load offset=idx*4`。`Record_update` は新しい buffer を bump で確保、各 field について update に含まれていれば新値を、なければ source から `i32.load offset=...` でコピー、新 buffer の base を返す。record を取る/返す関数も自然に動く (record も i32 offset)。動作確認 (wat2wasm + Node.js): `type Pt = { x: int, y: int }; let p = Pt { x = 3, y = 4 } in p.x + p.y` → 7、`{ p | x = 100 }.x * .y` → 400、record-returning fn `let mk = fn x -> Pair { a = x, b = str_len x } in print ((mk "hello").a)` → "hello"。多相 record / view は引き続き Codegen_error。テスト 4 件追加 (932 passing) |
-| 6.6 | **variant + match (単相、payload 型 1 つ)** | Variant も linear memory にレイアウト: nullary-only なら `{ i32 tag }` (4 bytes)、payload があれば `{ i32 tag, i32 payload }` (8 bytes、payload は i32 / offset)。`variant_tags : (cname, int)` ハッシュテーブルを `Exhaustive.type_variants` から populate (emit_program 冒頭で iter)、`variant_payload_ty` で全 payload-bearing コンストラクタが共有する単一型を検出。`Constr` を `i32.store offset=0` (tag) + 必要なら `i32.store offset=4` (payload) + base push に compile。`Match` は scrut を local に保存して tag/payload を `i32.load offset=0/4` で取り出し、各 arm を `local.get tag; i32.const N; i32.eq; if (result i32) ... else ... end` の入れ子チェーンに compile、fallthrough は `unreachable` で trap (typer exhaustiveness 想定)。Pattern: P_constr / P_var / P_wild、payload bind は payload local slot を使う。動作確認 (wat2wasm + Node.js): `type Color = R | G | B; match G with | R -> 0 | G -> 1 | B -> 2` → 1、`type Stat = Ok | Err of str; match Err "boom" with | Ok -> 0 | Err msg -> str_len msg` → 4、`let v = ISome 42 in match v with | INone -> 0 | ISome n -> n` → 42。テスト 6 件追加 (938 passing)。guard / 多相 / 再帰 / nested pattern / or-pattern は引き続き Codegen_error |
-| 6.7 | **first-class fn + closure (top-level + anonymous Fun + captures)** | Wasm 特有の制約 — 関数ポインタはメモリ ptr ではなく **function table の index**、間接呼出は `call_indirect (type $sig)` 経由でテーブル経由。`(type $cl (func (param i32) (param i32) (result i32)))` を module 冒頭で宣言、`(table N funcref)` + `(elem (i32.const 0) $f1_closure ...)` で adapter 群を index 0 から登録。`closure value` は memory に置く 8 bytes `{ env_offset, fn_table_idx }`。各 top-level fn `f` に env-ignoring adapter `(func $f_closure (param i32) (param i32) ... local.get 1; call $f)` を自動生成して table に追加、`fn_closure_table_idx : (name, int) Hashtbl` に index を記録。`Var name` を value position で評価する際、`fn_closure_table_idx` 登録済なら closure value (`env=0, fn_idx=N`) を memory に alloc して push。indirect App は closure を local に save → load env / arg / load fn_idx → `call_indirect (type $cl)`。anonymous Fun は `free_vars` で自由変数計算 → `locals` 登録済 (= 親 fn の local slot) のみ capture → fresh adapter `anon_N_fn` を table 登録 → `pending_closures` キューに積む → 構築 site で env を memory に alloc (`{ c1, c2, ... }`)、closure value を alloc → push。adapter body の entry で env から各 capture を `i32.load offset=N*4` で local slot に load してから body を emit。emit_program で pending を drain loop で処理 (nested adapter で追加 pending が出る場合に対応)。`pattern_vars` + `free_vars` ヘルパを追加。動作確認 (wat2wasm + Node.js): `apply inc` → 6 (first-class top-level fn)、`(make_adder 5) 10` → 15 (capture)、`compose inc dbl 5` → 11 (3 段ネスト + 2 capture)、`twice inc 5` → 7 (curried HOF + 多相)。テスト 7 件追加 (945 passing) |
-| 6.8 | **Region_block + Ref + with Drop + view 構築 + Unit_lit** | LLVM Phase 5.13 相当を Wasm 版で。Wasm の linear memory + `__lang_bump` global は既に 1 つの region 的に動いているので、ユーザの `region R { body }` は LIFO 方式で実装: 入口で `__lang_bump` の現在値を local に save → body 評価 → result を別 local に stash → bump を saved 値に restore → result を push back。これで region scope 内の allocation は scope 末で一括「解放」(= bump pointer が戻ることで以降の alloc が上書き可能になる)。`Ref (R, v)` (`&R v`) は inner 評価 + bump 4 bytes alloc + `i32.store offset=0` + base push。`With (c, v, body)` は v を local 保存 + body 評価 + body 後に v の record に `close: unit -> unit` field があれば closure value (`{env_offset, fn_idx}`) から `i32.load` で 2 値を取り出して `i32.const 0` (unit arg) + `call_indirect (type $cl)` で auto-invoke、結果を drop して body の値を push。`view V[R] of T { ... }` の Record_lit を view-name で別途処理: record と同じく i32 field を順に store して base を push (view 値は record と同じ memory ptr)。`Field_get` で inner が view 名なら `Typer.views.v_fields` の field index で `i32.load offset=idx*4`。`Unit_lit` を `i32.const 0` に。動作確認 (wat2wasm + Node.js): `region R { let x = &R 5 in 42 }` → 42、`with c = mk 7 in c.id * 10` で "closing" 出力後 → 70 (close が scope 末で auto-invoke)、`view Cell[R] of int { v: int }; region R { let c = Cell { v = 7 } in c.v }` → 7。テスト 6 件追加 (951 passing) — **Wasm backend がメモリモデル全機能をカバー、C / LLVM と並列**。|
-| 6.9 | **多相 variant/record + 再帰 variant + P_tuple sub-pattern** | Wasm の memory layout は uniform (どの値も i32 = 4 bytes) なので、LLVM (Phase 5.9 / 5.10) のような monomorphization は不要。`'a opt`、`'a Box`、`'a list = Nil \| Cons of 'a * 'a list` すべて mono variant/record と同じ code path で動く。`Constr` の `params <> []` check と `Record_lit` の `r_params <> []` check を撤廃。`'a list` の Cons (tuple payload) を Match で展開するため、`Match` で `P_tuple` sub-pattern を payload offset から各要素を `i32.load offset=i*4` で取り出して fresh local に bind するロジックを追加 (`Cons (h, t)` → h, t それぞれ local に load)。動作確認 (wat2wasm + Node.js): `type 'a opt; match LSome 42 with | LSome n -> n` → 42、`type 'a Box; let bi = Box { v = 42 } in let bs = Box { v = "hi" } in str_len bs.v + bi.v` → 44 (Box int / Box str 両方が同じ code で動く)、`type 'a list; sum [1,2,3,4,5]` → 15、`length ["a","b","c","d"]` → 4。テスト 4 件追加 (955 passing)。memory layout uniformity が monomorphization 不要にしているのが Wasm backend ならではの利点 |
-| 6.10 | **複雑な pattern (P_int / P_str / P_bool / P_unit / P_record / P_as / nested ctor / or / guard)** | LLVM Phase 5.11 相当を Wasm 版で。`compile_pat` を fully recursive な `(cond_local_slot, bindings)` 関数として書き直し: P_int → `i32.eq`、P_bool → `i32.eq`、P_str → `call $__lang_streq` (新規 runtime helper、byte-by-byte 比較で `i32` 真偽値を返す)、P_unit → constant true、P_record → declared field 順に `i32.load offset` + sub-pattern recurse (record / view 両対応)、P_as → inner + whole bind、P_tuple → 各要素 `i32.load offset=i*4` + recurse、P_constr → tag test (`i32.load offset=0 + i32.eq`) + sub-pattern recurse (nested OK)。複数 sub-test は `combine_and` ヘルパ (`local.get a; local.get b; i32.and; local.set slot`) で `i32.and` chain。or-pattern は `expand_or` で arms を pre-flatten (LLVM Phase 5.11 と同じ approach)。guard は arm の bindings scope 内で評価し `cond AND guard` を最終 cond に (cond が false なら guard 評価せず短絡)、`if (result i32) ... else ... end` ブロックで guard short-circuit。動作確認 (wat2wasm + Node.js): `match 3 with | 0 -> 100 | 1 -> 200 | _ -> 300` → 300、`match "hello" with | "hi" -> 1 | "hello" -> 2 | _ -> 9` → 2、`match Cons (SS 5, Nil) with | Cons (SS n, _) -> n` → 5、`match Pt { x = 3, y = 4 } with | Pt { x = a, y = b } -> a + b` → 7、`(a, b) as p` → 6、`LCgA | LCgB -> 1` → 1 (or-pattern)、`when n < 10 -> 200` → 200 (guard)。テスト 8 件追加 (963 passing) |
-| 6.12 | **`'a list` の show を `[a, b, c]` 形式に special-case** | LLVM Phase 5.14 相当を Wasm 版で。`emit_show_fn` の variant branch の前に `TyCon ("list", [elem_ty])` を special-case として処理: locals (cur / acc / first / tag / pl / h) を使ってループで走査。`block $end` + `loop $lp` で先頭から: tag = `i32.load offset=0`、Nil なら break (`br_if $end`)、Cons なら payload (= tuple offset) を load → head = `i32.load offset=0 payload` → 必要なら `, ` を concat (first フラグ) → `show_<elem_tag>(h)` を concat → cur = tail = `i32.load offset=4 payload` → loop。終了後 `]` を concat。`@.s_lbracket` / `@.s_rbracket` / `@.s_comma_space` 相当を `intern_show_str` で確保。動作確認 (wat2wasm + Node.js): `show [1, 2, 3]` → `[1, 2, 3]`、`show (Nil : int list)` → `[]`、`show ["hello", "world"]` → `["hello", "world"]`。テスト 3 件追加 (974 passing) — **3 backend (C / LLVM / Wasm) が完全並列に到達** |
-| 6.11 | **show 汎用 builtin** | LLVM Phase 5.12 相当を Wasm 版で。Wasm には `asprintf` 相当がないので **全部自前実装**: `show_int` は Wasm 上で int→decimal string conversion (16 byte buffer を bump pointer から確保 → 右から左に digit を書く → 必要なら `-` を prepend → first digit へのポインタを返す)、`show_bool` は `true` / `false` を data segment に登録して `select` で分岐、`show_str` は `"` でラップする 2 段 concat、`show_unit` は `()` の const offset、`show_tuple_X_Y` は `(`、各要素 show、`, `、`)` を `__lang_str_concat` で連結、`show_<R>` は `R { f1 = `、各 field show、`, f2 = `、` }` を concat、`show_<V>` は tag dispatch (`i32.load + i32.eq` の nested if/else) → 各 ctor で nullary なら data ptr 直接、payload あれば `ctor_name + " "` + payload 再帰 show を concat。`show_types` Hashtbl + `collect_show_types` + `add_show_type` で型を発見 + 依存型を再帰登録 (循環ガード)。`subst_params` で polymorphic record/variant の args 適用 (Wasm でも mono instance ごとに別関数を emit、layout は共通)。`intern_show_str` で literal を de-dupe して data segment を節約。`App (Var "show", arg)` を `call $show_<ty_tag arg.ty>` に dispatch。動作確認 (wat2wasm + Node.js): `show 42` → "42"、`show true` → "true"、`show "hi"` → "\"hi\""、`show (1, "hi")` → "(1, \"hi\")"、`show (SS 42)` → "SS 42"、`show (Pt { x = 3, y = 4 })` → "Pt { x = 3, y = 4 }"、`show (Cons (1, Cons (2, Cons (3, Nil))))` → "Cons (1, Cons (2, Cons (3, Nil)))" (recursive)。テスト 8 件追加 (971 passing)。`'a list` の special-case `[a, b, c]` 形式は今後の slice |
+| 6.1 | **Wasm (WAT) MVP** (stack-based emission) | int / bool / arithmetic / comparison / logic / Neg / If / Let (P_var) / Var / Annot converted to WAT; `-w` / `-we` CLI flags; stack-based emission (unlike LLVM's SSA — push operands in sequence; one opcode consumes from the stack and pushes a result). `If` → WAT's `if (result i32) ... else ... end` block; `Let (P_var)` → `(local i32)` decl + `local.set N` / `local.get N`. Comparisons via `i32.lt_s` / `i32.eq` etc.; bools widened to i32. Verified via wat2wasm + Node.js WebAssembly. 14 tests; total 909 |
+| 6.2 | **Function lifting + recursion** | top-level `let f = fn x -> ...` and `let rec` lift to `(func $f (param i32) (result i32) ...)`. Phase 5.2's `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` / `resolve_fn_types` ported in parallel to codegen_wasm. `emit_fn_def` gives each fn an independent locals / instrs scope (param at slot 0; let bindings at slot 1, 2, ...). `App (Var name, arg)` → `<arg push>; call $name` sequence (direct-call only for toplevel_fn_names entries). Wasm permits in-module forward refs, so no C-style forward decls — mutual recursion just works. Verified via wat2wasm + Node.js. 5 tests; total 914. Closures / first-class fns / strings / records / variants / etc. are subsequent slices |
+| 6.3 | **Strings + str_len + ++ + print + str-arg/return fns** | Architecture: strings live in Wasm's linear memory. `(memory (export "memory") 1)` declares + exports 1 page (64 KB); `(global $__lang_bump (mut i32) (i32.const N))` is a mutable bump pointer. `Str_lit` lifted to `(data (i32.const offset) "...\00")` data segments; `wasm_string_escape` handles `\HH` escapes; the value pushed is the i32 offset via `i32.const N`. `$__lang_strlen` (block/loop for null-byte search) and `$__lang_str_concat` (2× strlen + 2× copy loop + null terminator + bump update) defined inline in WAT. `print s` delegated to host import `(import "env" "puts" (func $puts (param i32)))`; value is i32 0. `str_len s` → `call $__lang_strlen`; `++` → `call $__lang_str_concat`. str-arg / return fns work naturally (Wasm treats strs as i32, so no signature change). Verified via wat2wasm + Node.js (with `puts: (off) => decode memory at off`). 9 tests; total 923 |
+| 6.4 | **Tuples** | Tuples lay out in linear memory: 4 bytes per element (all of Mere's int / bool / str are i32 / offset). Base offset saved to a fresh local; **bump pointer is advanced immediately** (reserving the region) → each element stored via `i32.store offset=N*4` relative to base → finally push base. Pre-bump is important: nested tuples or `++` inner emit further advance bump; reserving later causes overlap (a 22 / offsets-collision bug was fixed during Phase 6.4 development). `fst` / `snd` → `i32.load offset=0` / `offset=4`; tuple-arg / tuple-return fns work naturally (tuple is i32 offset → no signature change). Verified via wat2wasm + Node.js. 5 tests; total 928 |
+| 6.5 | **Records (monomorphic)** | Same linear-memory layout as tuples. `Record_lit (name, fields)` stores in `Typer.records.r_fields` **declared order** (source order may differ; reordered) — advance bump by 4*N immediately, write each field via `i32.store offset=i*4`, then push base. `Field_get` looks up field index by name and uses `i32.load offset=idx*4`. `Record_update` allocates a new buffer; for each field, if in updates use the new value, else `i32.load offset=...` from source to copy; return the new base. Record-arg/return fns work naturally (records are i32 offsets too). Verified via wat2wasm + Node.js. Polymorphic records / views still Codegen_error. 4 tests; total 932 |
+| 6.6 | **Variants + match (monomorphic; one payload type)** | Variants also lay out in linear memory: nullary-only → `{ i32 tag }` (4 bytes); with payload → `{ i32 tag, i32 payload }` (8 bytes; payload is i32 / offset). `variant_tags : (cname, int)` Hashtbl populated from `Exhaustive.type_variants` at `emit_program` head; `variant_payload_ty` detects the single shared type across payload-bearing ctors. `Constr` → `i32.store offset=0` (tag) + optionally `i32.store offset=4` (payload) + push base. `Match` saves scrut to a local, loads tag/payload via `i32.load offset=0/4`, then each arm: `local.get tag; i32.const N; i32.eq; if (result i32) ... else ... end` nested chain; fallthrough → `unreachable` (assumes typer exhaustiveness). Patterns: P_constr / P_var / P_wild; payload binds use a payload local slot. Verified via wat2wasm + Node.js. 6 tests; total 938. Guard / polymorphic / recursive / nested patterns / or-patterns still Codegen_error |
+| 6.7 | **First-class fn + closure (top-level + anonymous Fun + captures)** | Wasm specifics: function pointers aren't memory pointers but **function-table indices**; indirect calls go through `call_indirect (type $sig)`. `(type $cl (func (param i32) (param i32) (result i32)))` declared at module head; `(table N funcref)` + `(elem (i32.const 0) $f1_closure ...)` registers adapters starting at index 0. `closure value` is 8 bytes in memory: `{ env_offset, fn_table_idx }`. Each top-level fn `f` gets an env-ignoring adapter `(func $f_closure (param i32) (param i32) ... local.get 1; call $f)` auto-generated and added to the table; `fn_closure_table_idx : (name, int) Hashtbl` records the index. `Var name` in value position, when registered in fn_closure_table_idx, allocates closure value (`env=0, fn_idx=N`) in memory and pushes. Indirect App: save closure to local → load env / arg / load fn_idx → `call_indirect (type $cl)`. Anonymous Fun: `free_vars` for captures → keep only those registered in `locals` (= parent fn's local slots) → fresh adapter `anon_N_fn` registered in table → queued in `pending_closures` → at construction site, env allocated in memory (`{ c1, c2, ... }`), closure value allocated → push. Adapter body's entry loads each capture from env via `i32.load offset=N*4` into a local slot before emitting the body. `emit_program` drains pending in a loop (handles new pending from nested adapters). `pattern_vars` + `free_vars` helpers added. Verified via wat2wasm + Node.js. 7 tests; total 945 |
+| 6.8 | **Region_block + Ref + with Drop + view construction + Unit_lit** | Wasm port of LLVM Phase 5.13. Wasm's linear memory + `__lang_bump` global already act like a single region, so a user's `region R { body }` is implemented LIFO: on entry save current `__lang_bump` to a local → eval body → stash result in another local → restore bump to the saved value → push result back. This way, allocations inside the region's scope are "freed" in bulk at scope end (= bump pointer rolling back makes subsequent allocs overwritable). `Ref (R, v)` (`&R v`) → inner eval + bump 4-byte alloc + `i32.store offset=0` + push base. `With (c, v, body)` saves v to a local + evaluates body + if v's record has `close: unit -> unit`, post-body fetches its closure value (`{env_offset, fn_idx}`) via `i32.load`, then `i32.const 0` (unit arg) + `call_indirect (type $cl)` for auto-invoke, drops the result, and pushes body's value. `view V[R] of T { ... }`'s Record_lit handled separately by view name: stores each i32 field in order then pushes base (the view value is the same memory ptr as a record). `Field_get` for view-name inner uses `Typer.views.v_fields` field index for `i32.load offset=idx*4`. `Unit_lit` → `i32.const 0`. Verified via wat2wasm + Node.js: `region R { let x = &R 5 in 42 }` → 42; `with c = mk 7 in c.id * 10` produces "closing" then → 70 (close auto-invoked at scope end); view example → 7. 6 tests; total 951 — **the Wasm backend covers the full memory model, parallel to C / LLVM.** |
+| 6.9 | **Polymorphic variant/record + recursive variant + P_tuple sub-pattern** | Wasm's memory layout is uniform (every value is i32 = 4 bytes), so monomorphization like LLVM (Phase 5.9 / 5.10) is unnecessary. `'a opt`, `'a Box`, `'a list = Nil \| Cons of 'a * 'a list` etc. all work with the same code path as mono variants/records. The `params <> []` check in `Constr` and `r_params <> []` check in `Record_lit` are dropped. To unfold `'a list` Cons (tuple payload) in Match, P_tuple sub-pattern in Match is added: extract each element from payload offset via `i32.load offset=i*4` and bind to fresh locals (so `Cons (h, t)` loads h, t into separate locals). Verified via wat2wasm + Node.js. 4 tests; total 955. Memory-layout uniformity is why Wasm doesn't need monomorphization — a Wasm-specific advantage |
+| 6.10 | **Complex patterns (P_int / P_str / P_bool / P_unit / P_record / P_as / nested ctor / or / guard)** | Wasm port of LLVM Phase 5.11. `compile_pat` rewritten as a fully recursive `(cond_local_slot, bindings)` function. P_int → `i32.eq`; P_bool → `i32.eq`; P_str → `call $__lang_streq` (new runtime helper; byte-by-byte compare returning i32 boolean); P_unit → true; P_record → declared-field-order `i32.load offset` + sub-pattern recurse (records / views supported); P_as → inner + whole bind; P_tuple → each element `i32.load offset=i*4` + recurse; P_constr → tag test (`i32.load offset=0 + i32.eq`) + sub-pattern recurse (nesting OK). Multiple sub-tests combined via `combine_and` helper (`local.get a; local.get b; i32.and; local.set slot`) — `i32.and` chain. Or-patterns pre-flattened by `expand_or` (same approach as LLVM Phase 5.11). Guards run in the arm's binding scope; final cond is `cond AND guard` (false cond → guard not evaluated, short-circuited); `if (result i32) ... else ... end` block for guard short-circuit. Verified via wat2wasm + Node.js. 8 tests; total 963 |
+| 6.12 | **`'a list` show special-case `[a, b, c]`** | Wasm port of LLVM Phase 5.14. Before `emit_show_fn`'s variant branch, special-case `TyCon ("list", [elem_ty])`: locals (cur / acc / first / tag / pl / h) drive a loop walking the chain. `block $end` + `loop $lp` walks from head: tag = `i32.load offset=0`; Nil → break (`br_if $end`); Cons → load payload (= tuple offset) → head = `i32.load offset=0 payload` → optionally concat `, ` (first flag) → concat `show_<elem_tag>(h)` → cur = tail = `i32.load offset=4 payload` → loop. After exit, concat `]`. `@.s_lbracket` / `@.s_rbracket` / `@.s_comma_space` equivalents prepared via `intern_show_str`. Verified via wat2wasm + Node.js. 3 tests; total 974 — **all 3 backends (C / LLVM / Wasm) reach complete parity** |
+| 6.11 | **Polymorphic `show` builtin** | Wasm port of LLVM Phase 5.12. Wasm has no `asprintf` equivalent, so **everything is hand-rolled**: `show_int` is Wasm int → decimal string (16-byte buffer from bump pointer → write digits right-to-left → prepend `-` if needed → return pointer to first digit); `show_bool` registers `true` / `false` in a data segment and uses `select`; `show_str` wraps in `"` via 2-stage concat; `show_unit` is the `()` const offset; `show_tuple_X_Y` concats `(`, each element's show, `, `, `)` via `__lang_str_concat`; `show_<R>` concats `R { f1 = `, each field's show, `, f2 = `, ` }`; `show_<V>` does tag dispatch (nested `i32.load + i32.eq` if/else) — per ctor: nullary → direct data ptr; payload → `ctor_name + " "` + recursive show of payload, concatenated. `show_types` Hashtbl + `collect_show_types` + `add_show_type` discover types and recursively register deps (cycle-guarded). `subst_params` applies polymorphic record/variant args (Wasm also emits per-mono-instance functions; layouts share). `intern_show_str` de-dupes literals to save data segment. `App (Var "show", arg)` dispatches to `call $show_<ty_tag arg.ty>`. Verified via wat2wasm + Node.js. 8 tests; total 971. `'a list` `[a, b, c]` special-case in the next slice |
 
-### Phase 15 (Q-010 collection の 3 backend codegen — 2026-06-20、16 slice)
+### Phase 15 (Q-010 collection codegen for all 3 backends — 2026-06-20, 16 slices)
 
-Phase 12 で interpreter に乗った Q-010 collection (Vec / OwnedVec /
-StrBuf / Map + 高階 API + 変換) を、3 backend すべてで動かす作業。
-詳細は internal design notes
-(private) 参照。
+Brings Phase 12's interpreter-level Q-010 collections (Vec / OwnedVec / StrBuf / Map + higher-order API + conversions) to all 3 backends. Details in the private design notes.
 
-| slice | 内容 | 動くもの (3 backend) | tests |
+| Slice | Content | Works in 3 backends | Tests |
 |---|---|---|---|
-| 15.1 | C codegen で `Vec[R, int]` 最小ハーネス | C: int 限定 | 1177 |
-| 15.2 | C codegen で `Vec[R, T]` 要素型一般化 (`vec_instances` テーブル + per-T monomorphize) | C: int / bool / str / tuple / record / variant | 1178 |
-| 15.3 | LLVM IR に Phase 15.2 を移植 | + LLVM | 1182 |
-| 15.4 | Wasm に Phase 15.2 を移植 (全 i32 共通なので per-T monomorphize 不要) | + Wasm (3 backend parity) | 1185 |
-| 15.5 | 3 backend に `vec_set` / `vec_iter` / `vec_fold` | 高階 API 3 つ | 1197 |
-| 15.6 | 3 backend に `vec_map` / `vec_filter` (region-preserving) | Vec 高階 API 主要 5 つ | 1206 |
-| 15.7 | 3 backend に `OwnedVec[T]` + `vec_to_owned` / `owned_vec_to_vec` | heap-allocated owned vec + Vec ⇄ OwnedVec 変換 | 1218 |
-| 15.8 | OwnedVec の main 末一括 free (process-wide registry + `__mere_owned_vec_free_all`、leak sanitizer クリーン化) | C / LLVM の memory leak 解消 | 1222 |
-| 15.9 | 3 backend に `StrBuf[R]` (region 内 mutable 文字列バッファ) | + StrBuf | 1225 |
-| 15.10 | 3 backend に `Map[R, K, V]` (K = int / str + V 任意、線形スキャン) | + Map (K = int / str) | 1232 |
-| 15.11 | 3 backend に `len` ad-hoc polymorphic builtin (arg.ty 静的 dispatch) | len で Vec / OwnedVec / StrBuf / Map / str / tuple | 1237 |
-| 15.12 | 3 backend に `vec_to_list` + `len`-on-list (recursive variant Nil/Cons chain) | list 変換と len | 1244 |
-| 15.13 | `with v = owned_vec_new () in body` で OwnedVec の scope-bound Drop (明示) | scope 末 free | 1247 |
-| 15.14 | Map K を bool / tuple に拡張 (per-K eq 再帰展開) | Map K = int / bool / str / tuple | 1255 |
-| 15.15 | Map K を record / nullary variant に拡張 | + record / nullary variant | 1263 |
-| 15.16 | Map K を payload 付き variant に拡張 (Mere の全 concrete 型を Map key に) | Map K = 全 concrete 型 | 1268 |
+| 15.1 | C codegen `Vec[R, int]` minimal harness | C: int only | 1177 |
+| 15.2 | C codegen generalize Vec[R, T] element types (`vec_instances` table + per-T monomorphize) | C: int / bool / str / tuple / record / variant | 1178 |
+| 15.3 | LLVM IR port of Phase 15.2 | + LLVM | 1182 |
+| 15.4 | Wasm port of Phase 15.2 (all-i32 uniform → per-T monomorphize unneeded) | + Wasm (3 backends parity) | 1185 |
+| 15.5 | 3-backend `vec_set` / `vec_iter` / `vec_fold` | 3 higher-order APIs | 1197 |
+| 15.6 | 3-backend `vec_map` / `vec_filter` (region-preserving) | 5 main Vec higher-order APIs | 1206 |
+| 15.7 | 3-backend `OwnedVec[T]` + `vec_to_owned` / `owned_vec_to_vec` | Heap-allocated owned vec + Vec ⇄ OwnedVec conversion | 1218 |
+| 15.8 | OwnedVec bulk-free at main exit (process-wide registry + `__mere_owned_vec_free_all`; leak-sanitizer-clean) | C / LLVM memory leak fixed | 1222 |
+| 15.9 | 3-backend `StrBuf[R]` (in-region mutable string buffer) | + StrBuf | 1225 |
+| 15.10 | 3-backend `Map[R, K, V]` (K = int / str + arbitrary V; linear scan) | + Map (K = int / str) | 1232 |
+| 15.11 | 3-backend `len` ad-hoc polymorphic builtin (arg.ty static dispatch) | len for Vec / OwnedVec / StrBuf / Map / str / tuple | 1237 |
+| 15.12 | 3-backend `vec_to_list` + `len`-on-list (recursive variant Nil/Cons chain) | list conversion and len | 1244 |
+| 15.13 | `with v = owned_vec_new () in body` for explicit OwnedVec scope-bound Drop | Frees at scope end | 1247 |
+| 15.14 | Map K extended to bool / tuple (recursive per-K eq expansion) | Map K = int / bool / str / tuple | 1255 |
+| 15.15 | Map K extended to record / nullary variant | + record / nullary variant | 1263 |
+| 15.16 | Map K extended to payload variants (all Mere concrete types as Map keys) | Map K = all concrete types | 1268 |
 
-#### Phase 15 の設計パターン
+#### Phase 15 design patterns
 
-- **per-T monomorphize** (C / LLVM): `vec_instances` 等の table で出会った
-  T を収集、`emit_vec_runtime_for elem_ty` 等で要素型ごとに専用 struct +
-  helpers を emit
-- **Wasm の i32 共通**: 値が全部 4-byte i32 なので、per-T monomorphize は
-  ほぼ不要。Vec も OwnedVec も StrBuf も単一 runtime helper セットで済む
-  (例外: Map は key equality が型依存なので per-K)
-- **`resolve_vec_let_types` pre-pass**: Mere の let-poly が `let v =
-  vec_new () in body` を `forall T. Vec[R, T]` に generalize するため、
-  binding 側の `.ty` には未解決の TyVar が残る → codegen の前に walk して
-  binding ty を body 内の use site の ty と `Typer.unify` で繋ぐ
-- **registry + free_all** (Phase 15.8): 全 `mere_owned_vec_<T>` は同じ
-  先頭 layout `{ void* data; int len; int cap; }` なので generic に
-  `free(v->data); free(v);` できる
-- **per-K key equality** (Phase 15.14〜15.16): tuple / record / variant
-  キーの構造的比較を再帰的に展開、C はインライン式、LLVM / Wasm は
-  per-K helper (`@mere_map_key_eq_<K>` / `$mere_map_key_eq_<K>`)
+- **Per-T monomorphize** (C / LLVM): tables like `vec_instances` collect encountered Ts; `emit_vec_runtime_for elem_ty` emits a per-element-type struct + helpers.
+- **Wasm i32 uniformity**: all values are 4-byte i32, so per-T monomorphize is mostly unnecessary — Vec, OwnedVec, StrBuf all fit a single runtime helper set (exception: Map's key equality is type-dependent, so per-K).
+- **`resolve_vec_let_types` pre-pass**: Mere's let-poly generalizes `let v = vec_new () in body` to `forall T. Vec[R, T]`, leaving the binding's `.ty` with unresolved TyVars → before codegen, walk and unify binding ty with body use sites via `Typer.unify`.
+- **Registry + free_all** (Phase 15.8): all `mere_owned_vec_<T>` share the head layout `{ void* data; int len; int cap; }`, so generic `free(v->data); free(v);` works.
+- **Per-K key equality** (Phase 15.14-15.16): tuple / record / variant keys are recursively expanded for structural compare. C is inline expression; LLVM / Wasm get per-K helpers (`@mere_map_key_eq_<K>` / `$mere_map_key_eq_<K>`).
 
-C codegen と LLVM codegen と Wasm codegen は parallel 実装。AST + 型注釈は共通基盤、emit 戦略のみ別 backend。
+C codegen, LLVM codegen, and Wasm codegen are parallel implementations. AST + type annotations are the shared foundation; only the emission strategy differs per backend.
 
 ---
 
-## 7. 参考
+## 7. References
 
-| doc | 内容 |
+| Doc | Content |
 |---|---|
-| [changelog.md](changelog.md) | slice ごとの変更履歴 |
-| [memory-model.md](memory-model.md) | region/view/Trivial の概念。Phase 4 で実装が乗る予定の設計 |
-| `lib/codegen_c.ml` | C codegen の実装本体 |
-| `internal design notes` (private) | ネイティブ + Wasm 両対応の目標 |
+| [changelog.md](changelog.md) | Per-slice change history |
+| [memory-model.md](memory-model.md) | Region/view/Trivial concepts. The design that Phase 4 implements |
+| `lib/codegen_c.ml` | The C codegen implementation |
+| `internal design notes` (private) | The goal of supporting both native and Wasm |
 
 ---
 
-要点: codegen は Mere を「設計通りの言語」にするための実装段階。設計 doc で「ネイティブ codegen が乗ったら...」と書いてた話を、ここから実際に作っていく工程。
+Bottom line: codegen is the implementation stage that makes Mere "the language it's designed to be." It's the phase where the "once native codegen is in place..." prose in the design docs becomes actual code.

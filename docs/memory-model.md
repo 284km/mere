@@ -1,152 +1,136 @@
-# メモリ管理モデル (mere)
+# Memory management model (mere)
 
-Mere のメモリ管理戦略と、現状の `mere` 実装での扱い、将来の予定をまとめる。設計の深堀りは別リポ `internal design notes` 〜 `14_view_types.md` を参照。
+A summary of Mere's memory-management strategies, how `mere` currently handles them, and what's planned. Deeper design notes live in a private design-notes repo.
 
 ---
 
-## 1. メモリ管理の比較
+## 1. Comparison of memory-management strategies
 
-| 戦略 | 解放のタイミング | 代表例 | 強み | 弱み |
+| Strategy | When is memory freed? | Examples | Strengths | Weaknesses |
 |---|---|---|---|---|
-| **手動 (malloc/free)** | プログラマが毎回 `free` を呼ぶ | C | 最大のコントロール | use-after-free / leak が頻発 |
-| **GC** | 実行時にゴミ収集器が判断 | OCaml、Java、Go、Python | 安全、楽 | 停止時間、メモリ overhead、リアルタイム性× |
-| **所有権 (move + borrow)** | スコープを抜けたら自動 | Rust | コンパイル時保証、ゼロコスト | 循環参照・自己参照が辛い、学習コスト |
-| **region (領域単位一括)** | 領域スコープ全体を一括破棄 | Cone、Vale、Cyclone、ML/Talpin 研究 | 高速 alloc / 一括解放、循環参照 OK | 領域寿命の設計が必要 |
-| **stack 限定** | スタックフレーム末で | C の auto、Rust の `let` | ゼロコスト | サイズ・寿命の制約大 |
+| **Manual (malloc/free)** | The programmer calls `free` each time | C | Maximum control | Frequent use-after-free / leaks |
+| **GC** | A runtime garbage collector decides | OCaml, Java, Go, Python | Safe, easy | Pause times, memory overhead, poor for real-time |
+| **Ownership (move + borrow)** | Automatically at scope exit | Rust | Compile-time guarantees, zero cost | Cyclic / self-references are painful; learning curve |
+| **Region (bulk per-region)** | The whole region scope is freed at once | Cone, Vale, Cyclone, ML/Talpin research | Fast alloc / bulk free; cyclic refs OK | Requires designing region lifetimes |
+| **Stack-only** | At stack-frame exit | C autos, Rust `let` | Zero cost | Strict size/lifetime constraints |
 
-Mere は **これらを使い分け可能にする** 設計で、プログラマが明示的に戦略を選び、コンパイラが安全を検証する。
+Mere is designed to let you **mix and match**: the programmer chooses a strategy explicitly, and the compiler verifies safety.
 
 ---
 
-## 2. Mere のメモリ戦略 (5 つ)
+## 2. Mere's memory strategies (5)
 
-設計 doc `01_memory_model.md` に基づく:
+Based on the design note `01_memory_model.md`:
 
-### ① `owned T` — 単独所有
-値は一つの所有者を持ち、所有者がスコープを抜けると解放。Rust の `T` と同等。
+### ① `owned T` — sole ownership
+
+A value has one owner; freed when the owner leaves scope. Equivalent to Rust's `T`.
 ```
 let x: owned String = String.from("hello")
-let y: owned String = x    // ムーブ。x は使えなくなる
+let y: owned String = x    // move; x is no longer usable
 ```
 
-### ② `&borrowed T` — 借用
-所有権を移さず参照だけを渡す。Rust の `&T` / `&mut T` と同等だが、Mere は**借用注釈を細分化**する予定 (`&shared write` 等、設計 Q-004)。
+### ② `&borrowed T` — borrow
 
-### ③ `region R { ... }` — 領域単位
-領域 R 内に置いた値は領域破棄時に一括解放。bump allocator。Trivial 型 (Drop 持たない) のみ置ける。**Q-008 で `arena` と統合済み**。
+Pass a reference without transferring ownership. Equivalent to Rust's `&T` / `&mut T`, except Mere plans to **refine the borrow annotations** (`&shared write` etc.; design Q-004).
 
-### ④ `view V[R] of T` — 自己参照ビュー (Q-009)
-領域内で構築・immutable・ムーブ不可な「束ね型」。自己参照を `unsafe` なしで表現できる。
+### ③ `region R { ... }` — bulk per-region
+
+Values placed in region R are freed all together when R is destroyed. Bump-allocator backed. Only Trivial types (no Drop) can live in a region. **Unified with `arena` under Q-008.**
+
+### ④ `view V[R] of T` — self-referential views (Q-009)
+
+A "bundle type" built inside a region: immutable, non-moving. Lets you express self-references without `unsafe`.
 ```
 view DocumentView[R] of Document {
   own:    &R Document,
-  tokens: &R [&R str],    // own.text の中を指す
+  tokens: &R [&R str],    // points into own.text
 }
 ```
 
-### ⑤ `stack { ... }` — スタック限定
-スタック上にのみ存在することを保証。ヒープ alloc なし。
+### ⑤ `stack { ... }` — stack-only
+
+Guarantees the value lives only on the stack. No heap allocation.
 
 ---
 
-## 3. なぜ region か (詳細)
+## 3. Why region (in detail)
 
-### 解決する問題
+### Problems it solves
 
-Rust の所有権モデルが苦手とする領域:
-- **自己参照構造体** (`Pin<T>` + `unsafe`)
-- **グラフ・循環構造** (Rc/RefCell に逃げる)
-- **一時的な大量 alloc** (個別 free のオーバーヘッド)
-- **async + lifetime** (関数間で lifetime を引き回す)
+Areas where Rust's ownership struggles:
+- **Self-referential structs** (`Pin<T>` + `unsafe`)
+- **Graphs / cycles** (escape into Rc/RefCell)
+- **Bulk short-lived allocations** (overhead of individual frees)
+- **async + lifetimes** (lifetimes threaded across function calls)
 
-region はこれらを「**領域単位の一括解放**」で解決する。
+Region resolves these via **bulk-free per region**.
 
-### 動作原理
+### How it works
 
 ```
 region R {
-  // R は bump allocator (ポインタ + サイズだけ持つ)
-  let a = R.alloc(Node {...})    // ポインタ加算 1 回
-  let b = R.alloc(Node {...})    // 同上
-  a.next = b                      // 領域内なら参照自由
-  b.next = a                      // 循環 OK
-  // 計算...
-}  // R のメモリ全体を一気に破棄、個別 destruct なし
+  // R is a bump allocator (just a pointer + size)
+  let a = R.alloc(Node {...})    // one pointer bump
+  let b = R.alloc(Node {...})    // ditto
+  a.next = b                      // references freely valid inside the region
+  b.next = a                      // cycle is fine
+  // ... computation ...
+}  // The whole region's memory is freed at once — no individual destructors
 ```
 
-### 典型用途
+### Typical uses
 
-- **パーサ・コンパイラ**: 入力 1 つ = 1 region、AST 構築後に一括破棄
-- **ゲームの 1 フレーム**: フレーム単位 region、フレーム終わりで全部捨てる
-- **リクエスト処理**: 1 リクエスト = 1 region、レスポンス後に解放
-- **トランザクション**: トランザクション境界で領域を持つ
+- **Parsers / compilers**: one input = one region; AST is built, then freed in bulk.
+- **One frame of a game**: per-frame region; everything dropped at frame end.
+- **Request handlers**: one request = one region; freed after response.
+- **Transactions**: a region per transaction boundary.
 
-### Trivial 制約
+### The Trivial constraint
 
-region に置けるのは「Drop を持たない型」(Trivial)。理由: 個別 destruct を呼ばずに一括解放するため。Drop を持つ型 (DB connection、ファイルハンドル等) は `with` 式で別管理する (Q-011 resolved):
+Only "types without Drop" (Trivial) can be placed in a region. Why: bulk free without invoking individual destructors. Types that have Drop (DB connections, file handles, etc.) are managed separately via `with` (Q-011 resolved):
 
 ```
 with db = Database.connect(...) in
   region R {
-    let nodes = ...   // R に大量 alloc
+    let nodes = ...   // many allocations into R
     process(db, nodes)
   }
-  // R 破棄 (Trivial のみ、destruct なし)
-// db.drop() (Drop を持つので個別解放)
+  // R is destroyed (Trivial only; no destructors)
+// db.drop() runs (it has Drop, so it's released individually)
 ```
 
 ---
 
-## 4. mere での現状 (2026-06-22、Phase 36 時点)
+## 4. Current state in mere (as of 2026-06-22, Phase 36)
 
-下の "Phase 2" 節は最初の実装スライス (region/view 構文層) の記録。
-**Phase 11 〜 31 で借用注釈 4 mode (`&R T` / `&mut R T` / `&shared write R T` /
-`&exclusive R T`) + borrow checker + `with` Drop 統合 + Q-010 collection
-4 種 (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4 backend codegen (interp +
-C / LLVM / Wasm) parity** まで進行済。詳細は
-[language-reference.md §3 region/view/with](language-reference.md) /
-[codegen.md §4](codegen.md) を参照。
+The "Phase 2" section below is a record of the first implementation slices (the region/view syntax layer). **Phase 11 → 31 implemented the 4 borrow modes (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) + borrow checker + `with` Drop integration + the 4 Q-010 collections (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4-backend codegen (interp + C / LLVM / Wasm) parity.** Details: [language-reference.md §3 region/view/with](language-reference.md) / [codegen.md §4](codegen.md).
 
-**Phase 36 (2026-06-22) で追加**: narrow value restriction を typer に導入。
-`let v = map_get m k in ...` のような **mutable container を介した値の
-let-bind** は generalize しない (`'a` のまま leak しない)。詳細:
-- `is_value e` で expr が value form (リテラル / fn / Var / Tuple of values 等) かを判定
-- `ty_mentions_mutable_container t` で `OwnedVec[T]` / `Map[R, K, V]` /
-  `StrBuf[R]` を含む型かを判定
-- どちらでもないとき (= 非 value で mutable container を含む型) のみ
-  generalize を抑制
+**Added in Phase 36 (2026-06-22)**: a narrow value restriction in the typer. `let v = map_get m k in ...`-style **let-binds through mutable containers** are no longer generalized (so `'a` doesn't leak). Details:
+- `is_value e` decides whether an expression is in value form (literal / fn / Var / Tuple of values / etc.).
+- `ty_mentions_mutable_container t` decides whether a type contains `OwnedVec[T]` / `Map[R, K, V]` / `StrBuf[R]`.
+- Generalization is suppressed only when both fail (non-value AND contains a mutable container).
 
-これは ML の標準的な value restriction を狭めた版 (mutable container を
-含む型に限定) — 通常の `let inc = fn x -> x + 1` のような関数 let は
-依然多相化される。
+This is a narrowed variant of ML's standard value restriction (limited to types involving mutable containers) — ordinary fn lets like `let inc = fn x -> x + 1` remain polymorphic.
 
-**Phase 38.G-1 (2026-06-22) で追加**: `let v = owned_vec_new () in body` の
-**自動 scope-bound Drop** (Level 1)。 設計 doc `39_nll_linear_design.md` の
-N1/N2/N3 分解の N1 を実装:
+**Added in Phase 38.G-1 (2026-06-22)**: **automatic scope-bound Drop** for `let v = owned_vec_new () in body` (Level 1). Implements N1 of the N1/N2/N3 decomposition from the `39_nll_linear_design.md` design notes:
 
-- body が v を lexical に escape させない場合、 scope 末で `free(v->data)`
-  を auto-emit (Phase 15.13 `with` と同じ shape)
-- 静的解析: `no_value_leak v body` (Tuple / Constr / Record_lit / Fun
-  に v が出現しないか) + `tail_does_not_return_v v body` (body の tail
-  expression の型に OwnedVec が含まれないか)
-- 両方 pass で auto-Drop、 一方でも fail なら既存の registry +
-  main-end sweep にフォールバック (safe-by-default)
-- C + LLVM で実装、 Wasm は bump-arena 方式で per-allocation free 不要
-- Level 2 (NLL Light: last-use での drop)、 Level 3 (Full Linear:
-  use-after-move 静的検出) は依然 defer (DEFERRED §1.3 参照)
+- If body doesn't let v escape lexically, `free(v->data)` is auto-emitted at scope end (same shape as the Phase 15.13 `with`).
+- Static analysis: `no_value_leak v body` (v doesn't appear inside Tuple / Constr / Record_lit / Fun) + `tail_does_not_return_v v body` (body's tail expression's type doesn't include OwnedVec).
+- If both pass → auto-Drop; if either fails → fall back to the existing registry + main-end sweep (safe-by-default).
+- Implemented in C + LLVM; Wasm uses a bump-arena scheme that doesn't need per-allocation free.
+- Level 2 (NLL Light: drop at last use) and Level 3 (Full Linear: static use-after-move detection) remain deferred (see DEFERRED §1.3).
 
-これは「明示性 > 簡潔性」の哲学からの妥協点で、 `with` の明示記述は
-依然 supported かつ推奨される (custom Drop 型のため)、 OwnedVec の典型
-パターン (build → query → return scalar) では auto-Drop が効く。
+This is a compromise from Mere's "explicitness > brevity" philosophy: explicit `with` is still supported and recommended (for custom Drop types), and the typical OwnedVec pattern (build → query → return scalar) gets auto-Drop.
 
-### 動くこと (Phase 2: 構文 + 値式 + escape check + view 宣言 + 構築の region 強制 + field access の region 伝播)
-- `region R { body }` 式 — R を region 名としてスコープに導入
-- `&R T` 参照型 — region-tagged reference
-- `&R v` 値式 — 値を region tag 付きで表現
-- **escape check** — `region R { body }` の body の型に R が漏れたらコンパイルエラー
-- `view V[R] of T { fields }` 宣言
-- **view の region 強制** (Phase 2.3) — view 構築は region block 内のみ
-- **view 値の type-level region tag + field access の region 伝播** (Phase 2.4) — view 値の型に構築時 region が `Name[R]` として埋め込まれ、field access / record update で実際の region に置換される。view 値そのものは escape check 対象 (region 外に出せない)
+### What works (Phase 2: syntax + value expressions + escape check + view declarations + region-enforced construction + field-access region propagation)
+- `region R { body }` — introduces R as a region name in scope.
+- `&R T` — region-tagged reference type.
+- `&R v` — region-tagged value expression.
+- **Escape check** — if R leaks into the type of `region R { body }`'s body, it's a compile error.
+- `view V[R] of T { fields }` declarations.
+- **View region enforcement** (Phase 2.3) — view construction allowed only inside a region block.
+- **Type-level region tag on view values + field-access region propagation** (Phase 2.4) — a view value's type carries the construction-time region as `Name[R]`; field accesses / record updates substitute it with the actual region. The view value itself is subject to escape checking (cannot leave the region).
 
 ```
 > region R { 42 }
@@ -156,80 +140,80 @@ N1/N2/N3 分解の N1 を実装:
 - : (&R int -> &R int)
 
 > region R { let x = &R 5 in 42 }
-- : int = 42                              // 内部で &R 使うが結果は int → OK
+- : int = 42                              // &R used inside, but result is int → OK
 
 > region R { &R 5 }
 ERROR: region escape: `&R int` cannot leave region `R`
 
-> region R { region S { 100 } }            // ネスト OK
+> region R { region S { 100 } }            // nesting OK
 - : int = 100
 
 > view Node[R] of int { value: int, next: int };
   region R { let n = Node { value = 1, next = 0 } in n.value }
-- : int = 1                                // view 構築は region 内のみ
+- : int = 1                                // view construction is only inside a region
 
 > view Slot[R] { item: &R int };
   region S { let s = Slot { item = &S 42 } in 100 }
-- : int = 100                              // R は S に substitute される
+- : int = 100                              // R is substituted to S
 
 > view Node[R] of int { value: int };
-  let n = Node { value = 1 } in n.value    // region 外
+  let n = Node { value = 1 } in n.value    // outside any region
 ERROR: view Node must be constructed inside a region block
 ```
 
-### まだ動かないこと
+### What doesn't work yet
 
-- **子 region (`region S of R { ... }`)** — 入れ子 region 間で promote
-- **`with` + Drop の統合** — Drop あり cap のライフサイクル
+- **Child regions (`region S of R { ... }`)** — promotion across nested regions.
+- **Integration of `with` + Drop** — lifecycle of Drop-bearing caps.
 
-### なぜ「構文のみ」なのか
+### Why "syntax only"
 
-`mere` は OCaml で書いた**ツリーウォーキング interpreter**で、interpreter モードでは実際のメモリ管理は OCaml の GC が担っている。
+`mere` is a **tree-walking interpreter** written in OCaml, and in interpreter mode the actual memory management is done by OCaml's GC.
 
-**Phase 4 codegen (C出力) では region が実体ある bump allocator として動く** (2026-06-18 達成、Phase 4.17)。`region R { body }` が C runtime の `__lang_region` を init し、`&R v` (`R.alloc(v)` sugar) は region 内に bump-alloc して T* を返す、scope を抜けると一括 free。escape check (typer) と組合せて、region scope を超えるとメモリが解放されるが、その時点で `&R T` 値も型シグネチャ上漏れていないことが保証されている。詳細は [codegen.md](codegen.md) の Phase 4.17 を参照。
+**In Phase 4 codegen (C output), region becomes a real bump allocator** (achieved 2026-06-18, Phase 4.17). `region R { body }` initializes the C runtime's `__lang_region`; `&R v` (sugar for `R.alloc(v)`) bump-allocates inside the region and returns T*; leaving the scope releases it all at once. Combined with the typer's escape check, leaving a region scope frees memory while the type signature guarantees no `&R T` value has leaked. Details in [codegen.md](codegen.md)'s Phase 4.17.
 
 ---
 
-## 5. view 型 — 領域内の自己参照・循環構造
+## 5. View types — self-referential / cyclic structures inside a region
 
-region は「同じ寿命を共有する箱」だが、その中で **データ同士が指し合う構造** (グラフ、リンクリスト、AST、JSON 木等) を安全に扱う機構が必要。これが **view 型**。
+A region is "a box that shares the same lifetime"; we also need a way to safely express **structures that point at each other inside** (graphs, linked lists, ASTs, JSON trees, etc.). That's what **view types** are for.
 
-### 動機: 所有権モデルの苦手領域
+### Motivation: weak spots of ownership
 
 ```
-// Rust だとほぼ書けない: 相互参照する 2 ノード
-let a = Node { value = 1, next = ??? }  // ??? を b にしたい
-let b = Node { value = 2, next = a }    // でも a も b を指したい
+// In Rust this is nearly unwritable: two mutually-referencing nodes
+let a = Node { value = 1, next = ??? }  // want ??? to be b
+let b = Node { value = 2, next = a }    // but a should also point to b
 ```
 
-所有権言語では循環参照が原理的に困難 (`Rc<RefCell<T>>` への退避、`unsafe`、自前 arena 等)。region 内なら **全員が同じ寿命** なので循環 OK。view はこの「region 内の関係構造」を型として表現する。
+In ownership-based languages, cyclic references are fundamentally hard (`Rc<RefCell<T>>`, `unsafe`, custom arenas, etc.). Inside a region, **everyone shares the same lifetime**, so cycles are fine. View types capture this "in-region relational structure" as a type.
 
-### 3 公理 (Q-009 paper-validated)
+### Three axioms (Q-009 paper-validated)
 
-| 公理 | 意味 |
+| Axiom | Meaning |
 |---|---|
-| **immutable** | view 値は構築後変更不可。再代入も不可 |
-| **region-scoped** | 必ずどこかの region R に属し、R の外に出せない (型に `[R]` が焼き付く) |
-| **structural identity by region** | 同じ region 内の同型 view は同一視 — 循環参照が安全に成立する根拠 |
+| **immutable** | View values cannot be modified after construction; cannot be reassigned. |
+| **region-scoped** | Always tied to some region R; cannot leave R (the type bakes in `[R]`). |
+| **structural identity by region** | Same-typed views inside the same region are identified — this is the basis on which cyclic references work safely. |
 
-### record との違い
+### Difference from records
 
 ```
-type Point = { x: int, y: int };       // 普通の record: 寿命は GC 任せ、領域非依存
-view Node[R] of int { value: int };    // view: region R に縛られた束ね型
+type Point = { x: int, y: int };       // ordinary record: lifetime via GC; region-independent
+view Node[R] of int { value: int };    // view: bundle type tied to region R
 ```
 
-- record は単なるデータ。view は **region tag が型に焼き付いた** 構造 (`Node[R]` の `[R]`)
-- フィールド型に `&R T` を持てる: `view Node[R] of int { next: &R Node[R] }` で自己参照
-- view 値は `&R Node` 経由でしか触れない (構造の同一性は region 単位)
+- A record is just data. A view is a structure **with the region tag baked into the type** (the `[R]` in `Node[R]`).
+- Field types can include `&R T`: `view Node[R] of int { next: &R Node[R] }` for self-reference.
+- View values can only be accessed through `&R Node` (structural identity is per region).
 
-### なぜ「view」と呼ぶか
+### Why "view"?
 
-物理レイアウト (内部型 `of T`) とプログラマが触る型 (`Node`) を **別物として "見立てる"**。「内部は連番 int だが、view としては Node 構造体」のような表現を可能にする (将来的な機能)。
+The physical layout (the inner type `of T`) and what the programmer manipulates (the `Node` type) are **viewed as different things**. Enables expressions like "internally a sequential int, but viewed as a Node struct" (a planned future feature).
 
-### 現状 (Phase 2.4、2026-06-17)
+### Current state (Phase 2.4, 2026-06-17)
 
-view 構築は **region block 内に限定**、宣言時の region パラメータ `R` は構築時に最内側の active region 名に置換、そして **view 値の型自体が `Name[R]` として region tag を持つ** 状態。field access / record update でも region が伝播し、view 値は escape check の対象になる。
+View construction is **restricted to inside a region block**; the region parameter `R` at the declaration site is substituted with the innermost active region's name at construction time; and **the view value's type itself carries the region tag as `Name[R]`**. Field accesses / record updates propagate the region, and the view value is subject to escape checking.
 
 ```
 view Node[R] of int { value: int, next: int };
@@ -238,110 +222,108 @@ region R { let n = Node { value = 1, next = 0 } in n.value }    // 1
 view Slot[R] { item: &R int };
 region S { 
   let s = Slot { item = &S 7 } in
-  s.item                                                         // : &S int (R → S 伝播)
-}                                                                // ERROR: &S int escape
+  s.item                                                         // : &S int (R → S propagation)
+}                                                                // ERROR: &S int would escape
 
 region S { 
   let s = Slot { item = &S 7 } in
   let take_s = fn (x: &S int) -> 99 in
-  take_s s.item                                                  // 99 (s.item は &S int)
+  take_s s.item                                                  // 99 (s.item is &S int)
 }
 
 region S { Cell { v = 1 } }    // ERROR: Cell[S] cannot leave region S
 let n = Node { ... }            // ERROR: must be inside a region block
 ```
 
-### 将来 Phase で厳格化される予定
+### Tightening planned for later phases
 
-- 同一 region 内の循環構築 (mutable な構築 phase + immutable な使用 phase の二段階)
-- view 自身を `&R V` 経由でしか参照させない設計 (今は view 値が直接型に出る)
-- Q-009 の "structural identity by region" 公理 (同型 view を同一視する厳密な意味論)
+- Cyclic construction within the same region (a two-phase model: mutable construction phase + immutable use phase).
+- Making views reachable only through `&R V` (currently the view value appears in types directly).
+- Q-009's "structural identity by region" axiom (a strict semantics that identifies same-typed views).
 
-詳細設計は `internal design notes` (Q-009 resolved) を参照。
+The detailed design lives in the private notes (Q-009 resolved).
 
 ---
 
-## 6. ロードマップ
+## 6. Roadmap
 
-### Phase 2 (中サイズ、~600-800 LoC、複数 slice) — 進行中
-- [x] `&R v` 値式 (Phase 2.1、2026-06-16)
-- [x] region escape check (`&R T` が R の外に漏れないか、Phase 2.1)
-- [x] `view V[R] of T { ... }` 宣言 (Phase 2.2、2026-06-16、Q-009 paper-validated)
-- [x] view の region 強制 (構築は region 内のみ + 構築時に R を active region に substitute、Phase 2.3、2026-06-16)
-- [x] view 値の type-level region tag + field access / record update の region 伝播 + view の escape check (Phase 2.4、2026-06-17)
-- [x] `R.alloc(v)` syntactic sugar (`&R v` 相当、parser が region_stack を見て desugar、Phase 2.5、2026-06-17)
-- [x] `Trivial[R]` 型制約 (`drop type Name = ...` で Drop 型を宣言、region 配置時に Drop 型を含むと型エラー、Phase 2.6、2026-06-17)
+### Phase 2 (medium-sized, ~600-800 LoC, multiple slices) — in progress
+- [x] `&R v` value expressions (Phase 2.1, 2026-06-16).
+- [x] Region escape check (`&R T` cannot leak outside R, Phase 2.1).
+- [x] `view V[R] of T { ... }` declarations (Phase 2.2, 2026-06-16, Q-009 paper-validated).
+- [x] Region enforcement on view (construction only inside a region + R is substituted to the active region at construction, Phase 2.3, 2026-06-16).
+- [x] Type-level region tag on view values + field-access / record-update region propagation + escape check on views (Phase 2.4, 2026-06-17).
+- [x] `R.alloc(v)` syntactic sugar (equivalent to `&R v`; parser inspects region_stack and desugars; Phase 2.5, 2026-06-17).
+- [x] `Trivial[R]` type constraint (declare Drop types with `drop type Name = ...`; type error when a region holds a value containing such a type; Phase 2.6, 2026-06-17).
 
-### Phase 3 (大型、設計再開も必要)
-- [x] 借用注釈の細分化 `&shared write` / `&exclusive write` (Q-004 resolved Phase 11.1-11.3、 borrow checker は Phase 17.1/17.2 で 4 mode × 4 mode = 10 ペアの conflict matrix 網羅)
-- [ ] 子 region と promote (`region S of R`、`R.promote(...)`)
-- [ ] `Vec[R, T]` / `StrBuf[R]` 等の region 版 std 型 (Q-010 narrowed)
-- [ ] `with` + Drop ordering の統合実装 (Q-011 resolved の機械化)
+### Phase 3 (larger; some design needs to be revisited)
+- [x] Refined borrow annotations: `&shared write` / `&exclusive write` (Q-004 resolved in Phase 11.1-11.3; the borrow checker covers all 4 mode × 4 mode = 10 conflict pairs by Phase 17.1/17.2).
+- [ ] Child regions and promotion (`region S of R`, `R.promote(...)`).
+- [ ] Region std-types like `Vec[R, T]` / `StrBuf[R]` (Q-010 narrowed).
+- [ ] Mechanizing `with` + Drop ordering (per Q-011 resolved).
 
-### 借用 mode の現状と並行安全性 (2026-06-23 update)
+### Current state of borrow modes and concurrency safety (2026-06-23 update)
 
-借用注釈 4 mode の syntax / borrow checker は完了済 (Phase 11-17)。 ただし
-**並行実行 backend が未実装** のため、 `&shared write R T` で T が「内部安全」
-(Rust の Send/Sync 相当) かどうかの型レベル要求は **現状 enforce していない**:
+The syntax and borrow checker for all 4 borrow modes are complete (Phase 11-17). However, **with no concurrent backend yet**, type-level requirements that T be "internally safe" (Rust's Send/Sync) for `&shared write R T` are **not yet enforced**:
 
-| mode | 並行安全性要求 (将来) |
+| Mode | Concurrency-safety requirement (future) |
 |---|---|
-| `&R T` (default = shared read) | 安全 — read-only access は immutable T で OK |
-| `&shared write R T` | **要求: T が internally safe** (atomic / Mutex 等) — 現状未 enforce |
-| `&exclusive R T` (= read 排他) | 安全 — single thread のみ access |
-| `&mut R T` (= write 排他) | 安全 — single thread のみ access |
+| `&R T` (default = shared read) | Safe — read-only access on immutable T |
+| `&shared write R T` | **Requires: T is internally safe** (atomic / Mutex etc.) — not yet enforced |
+| `&exclusive R T` (= exclusive read) | Safe — single-thread access only |
+| `&mut R T` (= exclusive write) | Safe — single-thread access only |
 
-並行 backend (将来) の入り口要件は DEFERRED §2.4 に集約。 現状 Mere は **single-threaded interpreter + 3 backend (C / LLVM / Wasm) はすべて single-threaded 実行**、 `&shared write` は構文区別のみで runtime 上は通常の `&R T` と同じポインタ。 並行実行 backend (例: OCaml domains 経由 / Wasm threads) を入れる Phase で T の Send/Sync 相当 type bound を導入する設計余地。
+Concurrent-backend prerequisites are collected in DEFERRED §2.4. Currently Mere is **single-threaded interpreter + 3 single-threaded backends (C / LLVM / Wasm)**; `&shared write` is only a syntactic distinction and runtime-wise behaves like a plain `&R T` pointer. Introducing a concurrent backend (e.g. via OCaml domains / Wasm threads) is the trigger for adding Send/Sync-equivalent type bounds for T.
 
 ### Phase 4 (codegen)
 
-進行中 — [codegen.md](codegen.md) 参照。
+In progress — see [codegen.md](codegen.md).
 
-- [x] C codegen MVP (int + 算術 + if + let、2026-06-17)
-- [x] 関数 lifting + 再帰 (factorial / fibonacci 動作、2026-06-17)
-- [x] 文字列 + print + concat (hello world、2026-06-18)
-- [x] str を取る / 返す関数 (2026-06-18)
-- [x] tuple + AST 型注釈基盤 (2026-06-18)
-- [x] record / variant / pattern match (2026-06-18、多相 monomorphization 含む)
-- [x] closure conversion + 第一級関数 (2026-06-18)
-- [x] **region runtime (bump allocator)** — メモリモデルの本領発揮、2026-06-18
-- [x] `with` Drop 実行 codegen (2026-06-18、scope 末で `close` field を自動呼出)
-- [x] view 構築の region 化 (2026-06-18、view 値が region 上の bump alloc + ポインタ)
-- [x] closure env の default region 化 (2026-06-18、Phase 4.20。program-lifetime arena `__lang_default_region` を `main` で init/free、closure env alloc を bump 化)
-- [x] 文字列 / 再帰 variant node の default region 化 (2026-06-18、Phase 4.21。`__lang_str_concat` と recursive Constr の malloc も default region 経由に。ユーザ可視な malloc は完全に消えた)
-- [ ] LLVM IR or Wasm への移行
+- [x] C codegen MVP (int + arithmetic + if + let, 2026-06-17).
+- [x] Function lifting + recursion (factorial / fibonacci works, 2026-06-17).
+- [x] Strings + print + concat (hello world, 2026-06-18).
+- [x] Functions taking/returning str (2026-06-18).
+- [x] Tuples + per-AST type annotations (2026-06-18).
+- [x] Records / variants / pattern match (2026-06-18; includes polymorphic monomorphization).
+- [x] Closure conversion + first-class functions (2026-06-18).
+- [x] **Region runtime (bump allocator)** — the memory model in action, 2026-06-18.
+- [x] `with` Drop execution codegen (2026-06-18; auto-invokes `close` at scope end).
+- [x] View construction over region (2026-06-18; view values become bump-alloc + pointer).
+- [x] Default-region closure env (2026-06-18, Phase 4.20; program-lifetime arena `__lang_default_region` is init/freed in `main`; closure env alloc moves to bump).
+- [x] Default-region for strings / recursive variant nodes (2026-06-18, Phase 4.21; `__lang_str_concat` and recursive Constr's malloc go through the default region — user-visible malloc disappears entirely).
+- [ ] Move to LLVM IR or Wasm.
 
 ---
 
-## 7. 設計コンテキスト (詳細)
+## 7. Design context (in detail)
 
-具体的な設計判断は別リポ `internal design notes` (private) を参照:
+Specific design decisions live in the private notes:
 
-| doc | 内容 | 状態 |
+| Doc | Content | Status |
 |---|---|---|
-| `00_design_principles.md` | Mere 哲学・前提 | — |
-| `01_memory_model.md` | 5 戦略の概観 | — |
-| `02_json_parser_example.md` | region の典型ユースケース | — |
-| `03_lifetime_and_mutability.md` | lifetime サブタイピング | — |
-| `04_fundamental_tradeoffs.md` | 型注釈段階化等 | — |
-| `08_effect_granularity.md` | Q-004 借用注釈細分化 | narrowed |
-| `11_region_vs_arena.md` | Q-008 統合 | resolved |
+| `00_design_principles.md` | Mere's philosophy and assumptions | — |
+| `01_memory_model.md` | Overview of the 5 strategies | — |
+| `02_json_parser_example.md` | Region's canonical use case | — |
+| `03_lifetime_and_mutability.md` | Lifetime subtyping | — |
+| `04_fundamental_tradeoffs.md` | Staged annotations, etc. | — |
+| `08_effect_granularity.md` | Q-004 borrow refinement | narrowed |
+| `11_region_vs_arena.md` | Q-008 unification | resolved |
 | `12_drop_and_with.md` | Q-011 Drop ordering | resolved |
-| `13_region_std_types.md` | Q-010 region 版 std | narrowed |
-| `14_view_types.md` | Q-009 view 型 3 公理 | resolved |
+| `13_region_std_types.md` | Q-010 region std types | narrowed |
+| `14_view_types.md` | Q-009 view-type axioms | resolved |
 
 ---
 
-## 8. 学術的ルーツ
+## 8. Academic roots
 
-| 文献 | 内容 |
+| Reference | Content |
 |---|---|
-| Tofte & Talpin (1997) | "Region-Based Memory Management" — region calculus の原典 |
-| Cyclone (2002) | C + lifetime + region の研究言語 |
-| Cone (2018-) | region をプリミティブにしたモダン言語 |
-| Vale (2020-) | region + generational references |
-| Mike Acton et al. | "Data-Oriented Design" — フレーム arena の実践例 |
+| Tofte & Talpin (1997) | "Region-Based Memory Management" — the foundational region calculus |
+| Cyclone (2002) | A research language that extends C with lifetimes and regions |
+| Cone (2018-) | A modern language with region as a primitive |
+| Vale (2020-) | Region + generational references |
+| Mike Acton et al. | "Data-Oriented Design" — practical examples of frame-arena patterns |
 
 ---
 
-要点: Mere は「**メモリの寿命をプログラム構造に対応づける**」設計で、所有権より緩く GC より厳密、循環参照可能で予測可能。`mere` の現状は Phase 1 (構文のみ) で、本来の威力は Phase 2 以降の静的検証 + codegen で出る。
+Bottom line: Mere is designed to **map memory lifetime onto program structure** — looser than ownership but stricter than GC; permits cycles; predictable. Currently `mere` is at Phase 1 (syntax-only); the real power emerges in Phase 2+'s static checks + codegen.
