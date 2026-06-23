@@ -1,9 +1,10 @@
 // contrib/markdown/to_html.mere — Markdown 部分集合を HTML に変換
 //
-// Phase 44 で `module MarkdownHtml { ... }` で wrap。
-// `find_double` / `find_single` は inner-lifted fn 同士の相互参照が必要なので
-// module の **外側** に置いて top-level fn として扱う (DEFERRED §8、 同じ
-// constraint が module wrap 中でも変わらない)。
+// Phase 44 で `module MarkdownHtml { ... }` で wrap、 Phase 44.1 で
+// fenced code block (` ``` `) と link (`[X](Y)`、 `.md` → `.html` 自動 rewrite)
+// を追加。 `find_double` / `find_single` は inner-lifted fn 同士の相互参照が
+// 必要なので module の **外側** に置いて top-level fn として扱う (DEFERRED §8、
+// 同じ constraint が module wrap 中でも変わらない)。
 //
 // 対応 syntax:
 //   # H1
@@ -11,6 +12,10 @@
 //   - bullet point
 //   **bold** / *italic*
 //   `code`
+//   ```
+//   fenced code block
+//   ```
+//   [link text](target.md)   // .md は .html に自動 rewrite
 //   段落区切り (空行)
 //
 // 入力は文字列 list (line-by-line)、 出力は連結された HTML 文字列。
@@ -67,6 +72,29 @@ let render_inline = fn (s: str) ->
         let _ = strbuf_push out (substring s (i + 1) e) in
         let _ = strbuf_push out "</code>" in
         go (e + 1)
+      else if c == "[" then
+        // [text](url) を <a href="url">text</a> に。 url の `.md` は `.html` に rewrite
+        let close_bracket = __md_find_single s n "]" (i + 1) in
+        if close_bracket >= n then
+          let _ = strbuf_push out c in go (i + 1)
+        else if close_bracket + 1 >= n || char_at s (close_bracket + 1) != "(" then
+          let _ = strbuf_push out c in go (i + 1)
+        else
+          let close_paren = __md_find_single s n ")" (close_bracket + 2) in
+          if close_paren >= n then
+            let _ = strbuf_push out c in go (i + 1)
+          else
+            let text = substring s (i + 1) close_bracket in
+            let url = substring s (close_bracket + 2) close_paren in
+            // .md で終わるなら .html に rewrite (SSG での link 解決)
+            let url_len = str_len url in
+            let final_url =
+              if url_len >= 3 && substring url (url_len - 3) url_len == ".md"
+              then substring url 0 (url_len - 3) ++ ".html"
+              else url in
+            let _ = strbuf_push out ("<a href=\"" ++ final_url ++ "\">"
+                                     ++ text ++ "</a>") in
+            go (close_paren + 1)
       else
         let _ = strbuf_push out c in
         go (i + 1) in
@@ -89,15 +117,53 @@ let render_line = fn (line: str) ->
   else
     "<p>" ++ render_inline line ++ "</p>";
 
+// HTML 文字 escape (code block 内で `<` `>` `&` を表示するため)
+let escape_html = fn (s: str) ->
+  let buf = strbuf_new () in
+  let n = str_len s in
+  let rec loop = fn i ->
+    if i >= n then ()
+    else
+      let c = char_at s i in
+      let _ = if c == "<" then strbuf_push buf "&lt;"
+              else if c == ">" then strbuf_push buf "&gt;"
+              else if c == "&" then strbuf_push buf "&amp;"
+              else strbuf_push buf c in
+      loop (i + 1) in
+  let _ = loop 0 in
+  strbuf_to_str buf;
+
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
+  // fenced code block の state を Map で保持 (`in_code` = 1/0)
+  let state = map_new () in
+  let _ = map_set state "in_code" 0 in
   let _ = list_iter lines (fn line ->
-    let html = render_line line in
-    if str_len html > 0 then
-      let _ = strbuf_push out html in
+    let in_code = map_get state "in_code" in
+    if starts_with line "```" then
+      // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
+      if in_code == 0 then
+        let _ = map_set state "in_code" 1 in
+        let _ = strbuf_push out "<pre><code>" in
+        let _ = strbuf_push out "\n" in
+        ()
+      else
+        let _ = map_set state "in_code" 0 in
+        let _ = strbuf_push out "</code></pre>" in
+        let _ = strbuf_push out "\n" in
+        ()
+    else if in_code == 1 then
+      // code block 内: escape + そのまま追加 (markdown 解釈しない)
+      let _ = strbuf_push out (escape_html line) in
       let _ = strbuf_push out "\n" in
       ()
-    else ()) in
+    else
+      let html = render_line line in
+      if str_len html > 0 then
+        let _ = strbuf_push out html in
+        let _ = strbuf_push out "\n" in
+        ()
+      else ()) in
   strbuf_to_str out;
 
 };   // end of `module MarkdownHtml`
@@ -116,10 +182,18 @@ let doc = [
   "- Inline `code` snippets",
   "- **Bold** and *italic*",
   "- Multiple list items",
+  "- See [tutorial](tutorial.md) for details",
+  "",
+  "### Code example",
+  "",
+  "```",
+  "let x = 1 + 2 in",
+  "print (show x)",
+  "```",
   "",
   "### Subsection",
   "",
-  "End of document."
+  "End of document. Also visit [example.com](https://example.com)."
 ];
 
 let _ = print (MarkdownHtml.render doc);

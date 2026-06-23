@@ -50,13 +50,9 @@ let extract_title = fn (lines: str list) -> fn (default: str) ->
     substring line 2 n
   | None -> default;
 
-// `[text](foo.md)` を `<a href="foo.html">text</a>` に rewrite
-// markdown→HTML 後の HTML 文字列に対して適用 (素朴な str_replace で OK な
-// MVP cases だけ; 完全 markdown link は MarkdownHtml に追加する将来課題)
-//
-// Note: 現状 MarkdownHtml.render は link syntax 未対応で `[X](Y)` を literal の
-// ままにする。 本 helper は将来 link parsing 対応後に有効化する pass。 MVP では
-// rewrite を no-op として置く。
+// Phase 44.1 で MarkdownHtml が link parsing + `.md` → `.html` rewrite を内蔵
+// するようになったため、 SSG 側の post-process pass は不要。 no-op として残置
+// (将来の追加 rewrite 用 hook)。
 let rewrite_links = fn (html: str) -> html;
 
 // 共通 page template (header + nav + content + footer)
