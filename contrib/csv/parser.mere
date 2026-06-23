@@ -1,4 +1,4 @@
-// CSV パーサ in Lang
+// contrib/csv/parser.mere — CSV parser
 //
 // 仕様 (RFC 4180 縮小版):
 //   - field 区切りは `,`
@@ -7,8 +7,15 @@
 //   - quote 外の field は trim しない (CRLF も対応せず単純化)
 //
 // 結果は `str list list` (行のリスト、各行は field のリスト)
+//
+// Phase 41 (contrib): examples/csv_parser.mere から移設し `module Csv { ... }`
+// で wrap。 prelude が `type 'a list` を提供するので redundant な再宣言を削除。
+//
+// 使い方:
+//   import "contrib/csv/parser.mere";
+//   let rows = Csv.parse_csv "a,b\n1,2";
 
-type 'a list = Nil | Cons of 'a * 'a list;
+module Csv {
 
 let rec rev_aux = fn (xs, acc) ->
   match xs with
@@ -85,32 +92,34 @@ let parse_csv = fn (s: str) ->
   in
   loop [] 0;
 
-// === Self-tests ===
+};   // end of `module Csv`
 
-let case = fn (name: str, input: str) ->
-  let result = try_or (fn () -> show (parse_csv input)) "<error>" in
+// === Self-tests (module の外側、 demo として残置) ===
+
+let run_case = fn (name: str, input: str) ->
+  let result = try_or (fn () -> show (Csv.parse_csv input)) "<error>" in
   {
     print ("=== " ++ name);
     print ("in : " ++ input);
     print ("out: " ++ result)
   };
 
-let _ = case "simple"
+let _ = run_case "simple"
   "a,b,c\nd,e,f";
 
-let _ = case "quoted"
+let _ = run_case "quoted"
   "name,city\n\"alice\",\"tokyo\"\n\"bob\",\"osaka\"";
 
-let _ = case "escaped-quote"
+let _ = run_case "escaped-quote"
   "msg\n\"he said \"\"hi\"\"\"";
 
-let _ = case "field-with-comma"
+let _ = run_case "field-with-comma"
   "a,\"b,c\",d";
 
-let _ = case "empty-fields"
+let _ = run_case "empty-fields"
   "a,,c\n,b,";
 
-let _ = case "trailing-newline"
+let _ = run_case "trailing-newline"
   "x,y\n1,2\n";
 
 // === Real file round-trip ===
@@ -121,7 +130,7 @@ let _ = write_file path
   "id,name,score\n1,alice,9.5\n2,bob,8.0\n3,charlie,7.2";
 
 let content = read_file path;
-let rows = parse_csv content;
+let rows = Csv.parse_csv content;
 
 let _ = print "";
 let _ = print "=== file round-trip ===";

@@ -54,10 +54,11 @@ inject される。 名前衝突を避けるため、 contrib の lib は **pref
 
 ## 現在の contrib lib
 
-| lib | path | 機能 |
-|---|---|---|
-| **json** | `contrib/json/` | JSON parse + write (compact / pretty) |
-| **markdown** | `contrib/markdown/` | Markdown 部分集合 → HTML / 平文 / TOC |
+| lib | path | 機能 | module 化 |
+|---|---|---|---|
+| **json** | `contrib/json/` | JSON parse (`Json.parse_json`) + write (compact / pretty) | parser のみ |
+| **markdown** | `contrib/markdown/` | Markdown 部分集合 → HTML / 平文 / TOC | (top-level、 module 化は将来) |
+| **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`、 RFC 4180 縮小) + writer (Person bound) | parser のみ |
 
 将来追加候補は `internal design notes` §3 参照。
 

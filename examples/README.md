@@ -72,7 +72,7 @@ backend いずれかへ codegen。
 | [arith_eval.mere](arith_eval.mere) ⭐ | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価 |
 | ~~`json_parser.mere`~~ | **Phase 40 で [contrib/json/json.mere](../contrib/json/json.mere) に格上げ** (再利用前提の lib として `contrib/` 配下へ移設) |
 | [s_expression.mere](s_expression.mere) ⭐ | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`) |
-| [csv_parser.mere](csv_parser.mere) ⭐ | CSV パーサ |
+| ~~`csv_parser.mere`~~ | **Phase 41 で [contrib/csv/parser.mere](../contrib/csv/parser.mere) に格上げ** (module Csv で wrap) |
 | [word_count.mere](word_count.mere) ⭐ | 単語カウント |
 | [template_engine.mere](template_engine.mere) ⭐ | mustache 風 `{{KEY}}` 置換 engine (Map + StrBuf + str_index_of) |
 | ~~`json_writer.mere`~~ | **Phase 40 で [contrib/json/writer.mere](../contrib/json/writer.mere) に格上げ** |
@@ -109,7 +109,7 @@ backend いずれかへ codegen。
 | [html_builder.mere](html_builder.mere) ⭐ | StrBuf + tag 関数 helper で nested HTML 構築。region 内 StrBuf に `<ul><li>...</li></ul>` を畳み込む (B3) |
 | [fallible_lookup.mere](fallible_lookup.mere) ⭐ | Map[str, str] 2 段を `result_and_then` で chain。user→email→role の連鎖 lookup と `result_default` の fallback パターン (D4) |
 | [config_loader.mere](config_loader.mere) ⭐ | `key = value` 形式の text を Map[str, str] に load。コメント / 空行 / 前後 trim 対応。Phase 36 で `str_trim` / `str_starts_with` を 3 backend に追加したので、prelude の builtin を直接使う自然なコードに (A3) |
-| [csv_writer.mere](csv_writer.mere) ⭐ | record list → CSV string via StrBuf。`,` `"` を含む field は `"..."` quote + 内部 `"` を `""` doubling。Phase 36 の `str_replace` 投入で 1 行に短縮 (B2) |
+| ~~`csv_writer.mere`~~ | **Phase 41 で [contrib/csv/writer.mere](../contrib/csv/writer.mere) に格上げ** (top-level、 module 化は将来) |
 | ~~`markdown_to_text.mere`~~ | **Phase 40 で [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere) に格上げ** |
 | [calendar_lite.mere](calendar_lite.mere) ⭐ | 年月から日曜始まりの月カレンダーを ASCII で出力。閏年判定 + Zeller の合同式 + StrBuf で 7 列 grid 組み立て (G3) |
 | [matrix_2d.mere](matrix_2d.mere) ⭐ | 2D matrix を 1D OwnedVec[int] + `r * cols + c` index で表現。matrix add / transpose / pretty print。nested Vec[Vec[int]] は region escape が解けず本例では避けた (H2) |
@@ -217,7 +217,7 @@ interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) と
 | [cache_sim.mere](cache_sim.mere) | LRU cache 簡易シミュレータ |
 | [simple_query.mere](simple_query.mere) | tiny query engine |
 | [config_loader.mere](config_loader.mere) | key=value config の parse |
-| [csv_writer.mere](csv_writer.mere) | record → CSV string |
+| ~~`csv_writer.mere`~~ | → [contrib/csv/writer.mere](../contrib/csv/writer.mere) |
 | [calendar_lite.mere](calendar_lite.mere) | カレンダー出力 |
 | [html_builder.mere](html_builder.mere) | tag combinator で HTML 文字列 |
 | [event_counter.mere](event_counter.mere) | event log の頻度集計 |
