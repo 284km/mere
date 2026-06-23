@@ -36,3 +36,29 @@ Thumbs.db
 # direnv / env
 .envrc
 .env
+
+# AI dev tooling (project-local config / state / logs)
+CLAUDE.md
+.claude/
+AGENTS.md
+GEMINI.md
+.gemini/
+.cursorrules
+.cursor/
+.windsurfrules
+.windsurf/
+.aider*
+.continue/
+.codeium/
+.zed/
+.clinerules
+.specstory/
+.devin/
+.bolt/
+
+# Personal dev notes (uncommitted scratch)
+NOTES.md
+SCRATCH.md
+scratch/
+TODO.md
+*.local.md
