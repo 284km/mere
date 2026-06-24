@@ -26,7 +26,7 @@ Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19; see NAMING.md
 - **Phase 36 syntactic sugar (13 kinds)**: range `a..b`, operator section `(+ 1)`, cons `1 :: xs`, reverse pipe `f <| x`, apply `f @@ x`, lambda shorthand `\x -> ...`, string interpolation `"x = {show n}"`, `?` (Option) / `?!` (Result) early-return, list comprehension `[f x | x <- xs, p x]`, `if let pat = e then ... else ...`, `for x in xs do body`, `while cond do body`.
 - **Phase 36 prelude expansion (16 entries)**: `range` / `list_filter` / `list_take` / `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` / `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` / `list_product` / `list_max` / `list_min` (34 entries total).
 - REPL: multi-line input, `:env` / `:show` / `:load` / `:reset`, Rust-style code frame error display.
-- Design context lives in a private notes repo.
+- Design context is kept in separate internal design notes.
 
 ## Feature highlights
 

@@ -1,6 +1,6 @@
 # Memory management model (mere)
 
-A summary of Mere's memory-management strategies, how `mere` currently handles them, and what's planned. Deeper design notes live in a private design-notes repo.
+A summary of Mere's memory-management strategies, how `mere` currently handles them, and what's planned. Deeper design notes live in separate internal notes.
 
 ---
 
@@ -241,7 +241,7 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - Making views reachable only through `&R V` (currently the view value appears in types directly).
 - Q-009's "structural identity by region" axiom (a strict semantics that identifies same-typed views).
 
-The detailed design lives in the private notes (Q-009 resolved).
+The detailed design lives in the internal design notes (Q-009 resolved).
 
 ---
 
@@ -297,7 +297,7 @@ In progress — see [codegen.md](codegen.md).
 
 ## 7. Design context (in detail)
 
-Specific design decisions live in the private notes:
+Specific design decisions live in the internal design notes:
 
 | Doc | Content | Status |
 |---|---|---|

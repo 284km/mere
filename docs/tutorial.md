@@ -658,7 +658,7 @@ Remaining work (see DEFERRED §1.2 / §1.3):
 - **The borrow checker doesn't track Vec internals at element granularity** — the mode at the point of borrowing the Vec is machine-checked; details like borrowing a `vec_get` result come later.
 - **Payload-mixed variants as Map K on LLVM / Wasm** are restricted to uniform-payload (MVP); C allows mixed.
 
-For the full Q-010 design see the internal design notes (private repo).
+For the full Q-010 design see the internal design notes.
 
 Runnable example: [`examples/vec_basics.mere`](../examples/vec_basics.mere).
 
@@ -866,7 +866,7 @@ let ppid = getppid () in
 print (show pid ++ " " ++ show ppid)             // → "<pid> <ppid>"
 ```
 
-For details and design decisions see the [internal design notes] (private repo).
+For details and design decisions see the internal design notes.
 
 ## 13. Native compilation (C / LLVM / Wasm — together with interp, 4-backend feature parity)
 

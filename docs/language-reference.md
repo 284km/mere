@@ -193,7 +193,7 @@ with c1 = mk_conn 1, c2 = mk_conn 2 in c1.id + c2.id
 with x = 5 in x + 1    // ERROR: int isn't a Drop type. Use `let`.
 ```
 
-Design notes: implements option (i) from the private notes — "region is strict-Trivial; Drop is managed via `with`".
+Design notes: implements option (i) from the internal design notes — "region is strict-Trivial; Drop is managed via `with`".
 
 ### region (Phase 2: syntax + value expression `&R v` + escape check)
 
@@ -249,7 +249,7 @@ region R {
 }
 ```
 
-**`Trivial[R]` is implicitly the default**: ordinary types (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure etc.) are **automatically `Trivial[R]`**. Users do **not** need to declare `impl Trivial[R] for X { }` (a future trait system may revisit this; see the private internal design notes §3). The sole exception is types declared with `drop type` — they break Trivial[R] at every position they structurally appear (`contains_drop_type` walker in `lib/typer.ml`). So the judgment scheme is the simple "default-Trivial + drop-blacklist". Full trait-system rollout (DEFERRED §3.1) and explicit `impl Trivial[R]` syntax (§6.1) are linked in the design but don't affect the current implementation.
+**`Trivial[R]` is implicitly the default**: ordinary types (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure etc.) are **automatically `Trivial[R]`**. Users do **not** need to declare `impl Trivial[R] for X { }` (a future trait system may revisit this; see the internal design notes §3). The sole exception is types declared with `drop type` — they break Trivial[R] at every position they structurally appear (`contains_drop_type` walker in `lib/typer.ml`). So the judgment scheme is the simple "default-Trivial + drop-blacklist". Full trait-system rollout (DEFERRED §3.1) and explicit `impl Trivial[R]` syntax (§6.1) are linked in the design but don't affect the current implementation.
 
 ### view (Phase 2.4: declaration + region enforcement + type-tag propagation)
 
@@ -286,7 +286,7 @@ region S { Cell { v = 1 } }            // ERROR: Cell[S] cannot leave region S
 - Cyclic construction within the same region (two-phase: mutable construction + immutable use).
 - Q-009's "structural identity by region" axiom (identifying same-typed views inside a region).
 
-See [memory-model.md](memory-model.md) and the private internal design notes.
+See [memory-model.md](memory-model.md) and the internal design notes.
 
 ### Functions + `using [cap]` syntactic sugar
 

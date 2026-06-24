@@ -272,7 +272,7 @@ With C / LLVM backends complete (Phase 4 / 5 parallel coverage), it's time for t
 
 ### Phase 15 (Q-010 collection codegen for all 3 backends — 2026-06-20, 16 slices)
 
-Brings Phase 12's interpreter-level Q-010 collections (Vec / OwnedVec / StrBuf / Map + higher-order API + conversions) to all 3 backends. Details in the private design notes.
+Brings Phase 12's interpreter-level Q-010 collections (Vec / OwnedVec / StrBuf / Map + higher-order API + conversions) to all 3 backends. Details in the internal design notes.
 
 | Slice | Content | Works in 3 backends | Tests |
 |---|---|---|---|
@@ -312,7 +312,7 @@ C codegen, LLVM codegen, and Wasm codegen are parallel implementations. AST + ty
 | [changelog.md](changelog.md) | Per-slice change history |
 | [memory-model.md](memory-model.md) | Region/view/Trivial concepts. The design that Phase 4 implements |
 | `lib/codegen_c.ml` | The C codegen implementation |
-| `internal design notes` (private) | The goal of supporting both native and Wasm |
+| `internal design notes` | The goal of supporting both native and Wasm |
 
 ---
 
