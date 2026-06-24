@@ -1,10 +1,10 @@
 #!/bin/sh
 # contrib/site/build_full.sh — full docs site build wrapper
 #
-# Mere の read_file / write_file は UTF-8 string ベースで binary .wasm を
-# copy できないため、 binary file は shell 側で wat2wasm + cp。
-# それ以外 (HTML / WAT / markdown 変換 / index / search.json / sitemap /
-# .nojekyll) は build.mere が担当。
+# Mere's read_file / write_file are UTF-8 string-based and can't copy
+# binary .wasm, so binary files are produced via wat2wasm + cp at the
+# shell layer. Everything else (HTML / WAT / markdown conversion / index /
+# search.json / sitemap / .nojekyll) is handled by build.mere.
 #
 # Usage:
 #   sh contrib/site/build_full.sh [input_dir=docs] [output_dir=_site] [--dev|--watch]
@@ -15,11 +15,11 @@ MODE_FLAG="${3:-}"
 
 set -e
 
-# 1. Mere SSG: markdown → HTML + style.css + index + search + sitemap + nojekyll
-#    + playground/*.html + *.wat を copy
+# 1. Mere SSG: markdown -> HTML + style.css + index + search + sitemap + nojekyll
+#    + copies playground/*.html + *.wat
 dune exec mere -- contrib/site/build.mere "$INPUT_DIR" "$OUTPUT_DIR" $MODE_FLAG
 
-# 2. playground asset 生成 — .wat を wat2wasm で .wasm に compile
+# 2. Playground asset generation: compile .wat to .wasm via wat2wasm
 PLAYGROUND_OUT="$OUTPUT_DIR/playground"
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

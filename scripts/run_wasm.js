@@ -57,8 +57,8 @@ const wasmPath = process.argv[2];
       }
     },
     // Phase 34.3 (Wasm float): str_of_float / float_of_str host imports.
-    // OCaml string_of_float の format (%.12g + 整数値なら trailing ".")
-    // にできるだけ近づける。
+    // Approximates OCaml's string_of_float format (%.12g, with a trailing
+    // "." for integer-valued floats).
     __lang_str_of_float: (f) => {
       let s;
       if (Number.isNaN(f)) s = "nan";
@@ -69,7 +69,7 @@ const wasmPath = process.argv[2];
         s = f.toPrecision(12);
         // Strip trailing zeros in fractional part (mimics %g)
         if (s.includes('e') || s.includes('E')) {
-          // 1.23000000000e+10 → 1.23e+10
+          // 1.23000000000e+10 -> 1.23e+10
           s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, '$1$2').replace(/\.(e[+-]?\d+)/i, '$1');
         } else if (s.includes('.')) {
           s = s.replace(/\.?0+$/, '');
@@ -87,7 +87,7 @@ const wasmPath = process.argv[2];
       const s = readCStr(ptr);
       return parseFloat(s);
     },
-    // Phase 34.4: libm 関数 (Wasm intrinsic に無いものを host から提供)
+    // Phase 34.4: libm functions (anything not in Wasm intrinsics is provided by the host)
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,
     __lang_tan: Math.tan,

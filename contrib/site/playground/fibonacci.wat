@@ -326,7 +326,7 @@
         (local.set $a (local.get $t))
         (br $lp)))
     (local.get $a))
-  ;; Phase 36: bool_of_str — "true" → 1, それ以外 → 0
+  ;; Phase 36: bool_of_str — "true" -> 1, anything else -> 0
   (func $__lang_bool_of_str (param $s i32) (result i32)
     (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i32.const 0))))
     (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i32.const 0))))

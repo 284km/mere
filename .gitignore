@@ -5,7 +5,7 @@ _build/
 .merlin
 _opam/
 
-# Compiled native artifacts (生成 source を実機で試した時の出力)
+# Compiled native artifacts (output from running generated source locally)
 a.out
 *.exe
 *.byte
@@ -15,7 +15,7 @@ a.out
 *.so
 *.dylib
 
-# Codegen 出力 (examples を手元でビルドした際の中間ファイル)
+# Codegen output (intermediate files from building examples locally)
 *.c.out
 *.ll.out
 *.wat.out
