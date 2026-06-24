@@ -7403,5 +7403,81 @@ let () =
      else "duplicate-or-missing")
     "ok";
 
+  (* Phase 47: mere-fmt formatter.
+
+     `format_program` re-emits the parsed AST as a Mere source string.
+     We check that the re-emitted source (a) parses again and (b) is
+     idempotent under a second pass through the formatter. *)
+  let fmt_src s =
+    let prog = Pipeline.parse_program ~prelude:false s in
+    Formatter.format_program prog
+  in
+  let check_fmt name src expected =
+    check ("fmt: " ^ name) (fmt_src src) expected
+  in
+  let check_fmt_idempotent name src =
+    let once = fmt_src src in
+    let twice = fmt_src once in
+    check ("fmt-idem: " ^ name) twice once
+  in
+  let check_fmt_parses name src =
+    let formatted = fmt_src src in
+    let _ = Pipeline.parse_program ~prelude:false formatted in
+    check ("fmt-parses: " ^ name) "ok" "ok"
+  in
+  check_fmt "int literal" "42" "42\n";
+  check_fmt "binop precedence preserved"
+    "1 + 2 * 3"
+    "1 + 2 * 3\n";
+  check_fmt "paren insertion when needed"
+    "(1 + 2) * 3"
+    "(1 + 2) * 3\n";
+  check_fmt "string with brace gets \\{ escape"
+    {|"hi \{ world"|}
+    "\"hi \\{ world\"\n";
+  check_fmt "float literal grows fractional zero"
+    "3.0"
+    "3.0\n";
+  check_fmt "let inline"
+    "let x = 1 in x + 2"
+    "let x = 1 in\nx + 2\n";
+  check_fmt "if inline when short"
+    "if true then 1 else 2"
+    "if true then 1 else 2\n";
+  check_fmt "list literal from Cons/Nil chain"
+    "[1, 2, 3]"
+    "[1, 2, 3]\n";
+  check_fmt "range sugar from App range a b"
+    "range 1 10"
+    "1..10\n";
+  check_fmt "lambda shorthand for multi-arg unannotated fn chain"
+    "fn x -> fn y -> x + y"
+    "\\x y -> x + y\n";
+  check_fmt "drop type record fuses adjacent decls"
+    "drop type Conn = { id: int }; 0"
+    "drop type Conn = { id: int };\n\n0\n";
+  check_fmt "view emits without ="
+    "view Cell[R] { v: int }; 0"
+    "view Cell[R] { v: int };\n\n0\n";
+  check_fmt "match arm body with nested match gets parens"
+    "match 1 with | 0 -> 0 | n -> match n with | 1 -> 1 | _ -> 2"
+    "match 1 with\n| 0 -> 0\n| n -> (match n with\n  | 1 -> 1\n  | _ -> 2)\n";
+  (* The parser binds `:` to the immediately preceding base expression,
+     so `fn n -> n + 1 : int -> int` desugars to `fn n -> ((n + 1) : ...)`
+     rather than annotating the whole `fn`. The formatter re-emits the
+     same AST shape — with parens around `n + 1` because it's a binop. *)
+  check_fmt "Annot wraps inner in parens to bind correctly"
+    "fn n -> n + 1 : int -> int"
+    "fn n -> ((n + 1) : int -> int)\n";
+  check_fmt_idempotent "factorial-style let rec"
+    "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10";
+  check_fmt_idempotent "deeply nested if-else chain"
+    "if a then 1 else if b then 2 else if c then 3 else 4";
+  check_fmt_idempotent "record with annotation"
+    "type Pt = { x: int, y: int }; let p = Pt { x = 1, y = 2 } in p.x";
+  check_fmt_parses "operator section round-trip" "(+ 1) 2";
+  check_fmt_parses "shared write borrow"
+    "let r = &shared write R 1 in 0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

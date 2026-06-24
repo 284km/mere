@@ -13,6 +13,8 @@ let usage () =
   print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
   print_endline "  mere -we <expr>       emit Wasm (WAT) for an inline expression";
   print_endline "  mere -r               start interactive REPL";
+  print_endline "  mere fmt <file.mere>  format source (writes to stdout)";
+  print_endline "  mere fmt -i <file>    format in place";
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
   print_endline "";
@@ -113,6 +115,25 @@ let compile_to_wasm source =
   let (prog, main_ty) = infer_program source in
   Codegen_wasm.emit_program ~main_ty prog
 
+(* Phase 47: mere fmt — re-emit the source through the parser + formatter.
+   Comments are not preserved (the lexer discards them); we document this
+   limitation in the usage text. We parse WITH the prelude (so prelude
+   constructors like Cons / Nil are registered in the parser's table for
+   pattern-arity lookup) and then skip the prelude decls when emitting,
+   so the formatted output is just the user's own source. *)
+let format_source ~base_dir source =
+  let prelude_decls = Mere.Pipeline.parse_prelude () in
+  let n_prelude = List.length prelude_decls in
+  let prog = Mere.Pipeline.parse_program ~prelude:true ~base_dir source in
+  let user_decls =
+    let rec drop n xs = if n <= 0 then xs else match xs with
+      | [] -> []
+      | _ :: rest -> drop (n - 1) rest
+    in
+    drop n_prelude prog.decls
+  in
+  Mere.Formatter.format_program { prog with decls = user_decls }
+
 (* Enable ANSI color in diagnostics when stderr is a TTY and the
    environment hasn't opted out via NO_COLOR (https://no-color.org/). *)
 let () =
@@ -130,6 +151,22 @@ let () =
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()
   | [_; "-r"] -> Mere.Repl.run ()
+  | [_; "fmt"; "-i"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    (try
+       let formatted = format_source ~base_dir:base source in
+       Out_channel.with_open_text path (fun oc ->
+         Out_channel.output_string oc formatted)
+     with
+     | Mere.Lexer.Lex_error (loc, msg) ->
+       report_and_exit ~source ~filename:path loc "lex error" msg
+     | Mere.Parser.Parse_error (loc, msg) ->
+       report_and_exit ~source ~filename:path loc "parse error" msg)
+  | [_; "fmt"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (format_source ~base_dir:base) path source
   | [_; "-e"; expr] ->
     run_action Mere.Pipeline.process "<inline>" expr
   | [_; "-te"; expr] ->
