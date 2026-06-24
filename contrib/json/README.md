@@ -1,20 +1,20 @@
 # contrib/json — JSON parser / writer
 
-Mere で書かれた JSON parse / serialize ライブラリ。 stdlib (`str_*` /
-`is_digit` / `try_or` / `fail` / `StrBuf`) + 再帰 variant + pattern matching の
-組み合わせで実装、 外部依存ゼロ。
+JSON parse / serialize library written in Mere. Built on stdlib (`str_*` /
+`is_digit` / `try_or` / `fail` / `StrBuf`) + recursive variant + pattern
+matching with zero external dependencies.
 
-## ファイル
+## Files
 
-| file | export | 行数 |
+| file | export | lines |
 |---|---|---|
-| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj; parse_json: str -> json }` | 約 180 行 |
-| `writer.mere` | `type json` (top-level) + `module JsonWriter { to_json_str, to_pretty_str }` | 約 135 行 |
+| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj; parse_json: str -> json }` | ~180 |
+| `writer.mere` | `type json` (top-level) + `module JsonWriter { to_json_str, to_pretty_str }` | ~135 |
 
-## 使い方 (pkg manager 完成前)
+## Usage (before pkg manager lands)
 
 ```mere
-// import で取り込み (Phase 9.5 から動く)
+// Bring in via import (works since Phase 9.5)
 import "contrib/json/json.mere";
 
 let v = Json.parse_json "[1, 2, 3]" in
@@ -24,41 +24,41 @@ match v with
 | _ -> ...
 ```
 
-または **copy-paste** で project に取り込み:
+Or **copy-paste** into a project:
 
 ```sh
 cp contrib/json/json.mere    my_project/
 cp contrib/json/writer.mere  my_project/
 ```
 
-各ファイル末尾の self-test ブロック (`run_case` で始まる demo / `let doc = …` 等)
-は実 use 時に削除して良い。
+The self-test block at the end of each file (`run_case` demo, `let doc = …`,
+etc.) may be removed in real use.
 
-`writer.mere` は Phase 43 で `module JsonWriter { ... }` で wrap 完了。 ただし
-`type json` は **module の外側** に置いている (parser の `module Json
-{ type json = ... }` と単一 file 内で共存はできないが、 別 file としては独立に
-使える)。 parser + writer を 1 program で round-trip させる場合は user 側で
-`type json` 衝突を回避する必要あり (parser だけ or writer だけ either-or の運用
-が当面 expected)。
+`writer.mere` was wrapped in `module JsonWriter { ... }` in Phase 43. However,
+`type json` is kept **outside the module** (it can't coexist with the parser's
+`module Json { type json = ... }` inside a single file, but each file works
+independently). To round-trip parser + writer in one program, the user must
+avoid `type json` collision (using either parser or writer only is the expected
+mode for now).
 
-## サポート範囲
+## Coverage
 
 - atoms: `null` / `true` / `false` / int (negative OK) / string
 - composite: array / object
-- escape: `\"` `\\` `\n` `\t` `\r` `\/` を `str_unescape` 経由で復元
-- **非対応** (issue 駆動で拡張): float / unicode `\uXXXX` / exponential notation
+- escape: `\"` `\\` `\n` `\t` `\r` `\/` decoded via `str_unescape`
+- **Unsupported** (extension driven by issues): float / unicode `\uXXXX` / exponential notation
 
-## 既知の制約
+## Known gotchas
 
-- **`{` を含む文字列リテラル**: Phase 36 string interpolation の仕様で
-  `"{"` が補間開始と解釈されるため、 `"\{"` で escape する必要あり
-  (json.mere / writer.mere の demo は workaround 済)
-- **C codegen で `case` という名前は予約語と衝突** (libc/C keyword) — 本 lib では
-  自前 test helper を `run_case` に rename。 reserved name の全 list は
-  [docs/reserved-names.md](../../docs/reserved-names.md) 参照
+- **String literal containing `{`**: Phase 36 string interpolation treats `"{"`
+  as an interpolation start, so escape it with `"\{"` (the json.mere /
+  writer.mere demos already apply this workaround)
+- **The name `case` collides with a C reserved word** in C codegen
+  (libc/C keyword) — this lib renames its own test helper to `run_case`. See
+  [docs/reserved-names.md](../../docs/reserved-names.md) for the full reserved-name list.
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 [contrib/README.md](../README.md) の lifecycle 参照。
-公開 + pkg manager 完成後、 graduation 候補として別 repo `mere-json` に切り出す
-計画 (internal design notes §3.1)。
+Stage 2 contrib (incubation). See lifecycle in [contrib/README.md](../README.md).
+After public release + pkg manager lands, graduation target is the separate
+repo `mere-json` (internal design notes §3.1).

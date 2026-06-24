@@ -1,37 +1,37 @@
-# contrib/option — Option type の追加 helpers
+# contrib/option — additional helpers for Option type
 
-Mere prelude には `option_map` / `option_default` / `option_is_some` /
-`option_and_then` が既にあるが、 contrib/option は **prelude を補完する**
-追加 helpers を `module Option { ... }` でまとめる。
+Mere prelude already provides `option_map` / `option_default` /
+`option_is_some` / `option_and_then`. contrib/option bundles **helpers that
+complement the prelude** into `module Option { ... }`.
 
-## ファイル
+## Files
 
-| file | export | 行数 |
+| file | export | lines |
 |---|---|---|
-| `option.mere` | `module Option { zip, filter, or_else, is_none, unwrap_or_fail }` | 約 130 行 |
+| `option.mere` | `module Option { zip, filter, or_else, is_none, unwrap_or_fail }` | ~130 |
 
-## API (prelude にない補完 helpers)
+## API (helpers not in prelude)
 
-| fn | signature | 用途 |
+| fn | signature | use |
 |---|---|---|
-| `Option.zip` | `'a opt -> 'b opt -> ('a * 'b) opt` | 両方 Some なら tuple、 どちらか None なら None |
-| `Option.filter` | `'a opt -> ('a -> bool) -> 'a opt` | 述語不一致なら None に倒す |
-| `Option.or_else` | `'a opt -> 'a opt -> 'a opt` | 左が None なら右を返す |
+| `Option.zip` | `'a opt -> 'b opt -> ('a * 'b) opt` | both Some → tuple; either None → None |
+| `Option.filter` | `'a opt -> ('a -> bool) -> 'a opt` | drop to None if predicate doesn't hold |
+| `Option.or_else` | `'a opt -> 'a opt -> 'a opt` | if left is None, return right |
 | `Option.is_none` | `'a opt -> bool` | inverse of `option_is_some` |
-| `Option.unwrap_or_fail` | `'a opt -> str -> 'a` | None なら `fail msg`、 Some なら取り出す |
+| `Option.unwrap_or_fail` | `'a opt -> str -> 'a` | None → `fail msg`; Some → unwrap |
 
-## 使い方
+## Usage
 
 ```mere
 import "contrib/option/option.mere";
 
-// 両方 Some なら tuple
+// both Some → tuple
 let result = Option.zip (Some 1) (Some "a") in
 match result with
 | Some (n, s) -> ...
 | None -> ...
 
-// 述語で絞り込み
+// predicate filter
 let big = Option.filter (Some 5) (fn n -> n > 3);   // Some 5
 let no = Option.filter (Some 2) (fn n -> n > 3);    // None
 
@@ -42,28 +42,29 @@ let val = Option.or_else (try1 ()) (try2 ());
 let value = Option.unwrap_or_fail maybe_value "invariant violated";
 ```
 
-## 既知の注意点
+## Known gotchas
 
-- **annotation が必要な None**: `None` 単独で型がない場合、 codegen 環境で
-  多 instantiation が解決できず `'a leak` になることがある。 demo では
-  `(None : int option)` のように明示 annotation を付けて回避。
-  例:
+- **None requires annotation**: when standalone `None` has no type, codegen
+  environments can't resolve multi-instantiation and you may get a `'a leak`.
+  The demo works around this with explicit annotation like `(None : int option)`.
+  Example:
   ```mere
-  Option.is_none None              // C codegen で fail (型不定)
+  Option.is_none None              // fails in C codegen (type not pinned)
   Option.is_none (None: int option)  // OK
   ```
 
-## backend サポート
+## Backend support
 
-| backend | 状態 |
+| backend | status |
 |---|---|
 | interp | ✓ |
 | C | ✓ |
 | LLVM | ✓ |
 | Wasm | ✓ |
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 [contrib/README.md](../README.md) 参照。
-graduation 先は `mere-option` (別 repo) — または prelude に取り込んで lib 化
-不要にする選択肢もある (`zip` / `filter` / `or_else` は他の関数型言語で標準)。
+Stage 2 contrib (incubation). See [contrib/README.md](../README.md).
+Graduation target is `mere-option` (separate repo) — or alternatively, fold
+into prelude and drop the library (`zip` / `filter` / `or_else` are standard
+in other functional languages).

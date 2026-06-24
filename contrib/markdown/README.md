@@ -1,46 +1,46 @@
-# contrib/markdown — Markdown 部分集合 converter
+# contrib/markdown — Markdown subset converter
 
-Markdown を HTML / 平文 / TOC に変換する 3 ファイル。 CommonMark の subset で、
-個人 README / ブログ生成 / doc 自動化を想定。
+Three files for converting Markdown to HTML / plain text / TOC. A CommonMark
+subset aimed at personal README generation / blogging / docs automation.
 
-## ファイル
+## Files
 
-| file | export | 用途 |
+| file | export | use |
 |---|---|---|
-| `to_html.mere` | `module MarkdownHtml { render, render_line, render_inline, starts_with }` (`__md_find_double` / `__md_find_single` は inner-fn 相互参照のため module 外) | Markdown 行 list を HTML に |
-| `to_text.mere` | `strip_markdown: str -> str` | Markdown 装飾を剥がして plain text に |
-| `toc.mere` | `extract_toc: str list -> str` | heading だけ抜き出して nested list TOC を生成 |
+| `to_html.mere` | `module MarkdownHtml { render, render_line, render_inline, starts_with }` (`__md_find_double` / `__md_find_single` are kept outside the module due to inner-fn mutual reference) | Markdown line list → HTML |
+| `to_text.mere` | `strip_markdown: str -> str` | strip Markdown decorations to plain text |
+| `toc.mere` | `extract_toc: str list -> str` | extract headings only and build a nested-list TOC |
 
-## 使い方
+## Usage
 
 ```sh
 cp contrib/markdown/to_html.mere  my_project/
 ```
 
-各ファイル末尾の demo は実 use 時に削除して良い。
+The demo at the end of each file may be removed for real use.
 
-## サポート Markdown subset
+## Supported Markdown subset
 
-| 機能 | to_html | to_text | toc |
+| feature | to_html | to_text | toc |
 |---|---|---|---|
-| heading `# ## ###` 〜 `######` | ✓ | ✓ | ✓ |
+| heading `# ## ###` through `######` | ✓ | ✓ | ✓ |
 | unordered list `- foo` (`<ul>`/`<li>` wrapping) | ✓ | ✓ | ✗ |
 | ordered list `1. foo` / `2. foo` (`<ol>`/`<li>` wrapping) | ✓ | ✗ | ✗ |
-| nested list (2-space indent、 **任意深さ**) | ✓ | ✗ | ✗ |
+| nested list (2-space indent, **arbitrary depth**) | ✓ | ✗ | ✗ |
 | **bold** (`**…**`) | ✓ | ✓ | ✗ |
 | *italic* (`*…*` / `_…_`) | ✓ | ✓ | ✗ |
 | inline code `` `…` `` | ✓ | ✓ | ✗ |
 | blockquote `> …` | ✓ | ✓ | ✗ |
 | fenced code block `` ``` `` | ✓ | ✗ | ✗ |
-| link `[X](Y)` (`.md` → `.html` 自動 rewrite) | ✓ | ✗ | ✗ |
+| link `[X](Y)` (`.md` → `.html` auto-rewrite) | ✓ | ✗ | ✗ |
 | image `![alt](url)` | ✓ | ✗ | ✗ |
 | horizontal rule `---` / `***` / `___` | ✓ | ✗ | ✗ |
 | table `\| col \| col \|` + separator row | ✓ | ✗ | ✗ |
-| paragraph (空行区切り) | ✓ | ✓ | ✗ |
-| **非対応** (将来拡張): footnote / definition list / autolink / strikethrough | | | |
+| paragraph (blank-line separated) | ✓ | ✓ | ✗ |
+| **Unsupported** (future extensions): footnote / definition list / autolink / strikethrough | | | |
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 公開 + pkg manager 完成後、 graduation 候補として
-別 repo `mere-markdown` に切り出す計画
-(internal design notes §3.2)。
+Stage 2 contrib (incubation). Planned to be split out to separate repo
+`mere-markdown` as a graduation candidate after public release + pkg manager
+lands (internal design notes §3.2).

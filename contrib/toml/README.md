@@ -1,8 +1,8 @@
-# contrib/toml — TOML 1.0 縮小 parser
+# contrib/toml — TOML 1.0 reduced parser
 
-Mere で書かれた TOML パーサ。 config file の読み取りに使う想定。
+A TOML parser written in Mere. Intended use is reading config files.
 
-## 使い方
+## Usage
 
 ```mere
 import "contrib/toml/toml.mere";
@@ -21,11 +21,11 @@ match Toml.get doc "server.host" with
 
 ## API
 
-| fn | 型 | 内容 |
+| fn | type | content |
 |---|---|---|
-| `Toml.parse_toml` | `str -> (str * toml_value) list` | input → fully-qualified key の key/value pair list (出現順) |
-| `Toml.get` | `(str * toml_value) list -> str -> toml_value` | key で lookup、 未発見は `fail` |
-| `Toml.has` | `(str * toml_value) list -> str -> bool` | key 存在確認 |
+| `Toml.parse_toml` | `str -> (str * toml_value) list` | input → list of fully-qualified key/value pairs (in source order) |
+| `Toml.get` | `(str * toml_value) list -> str -> toml_value` | lookup by key; `fail` if not found |
+| `Toml.has` | `(str * toml_value) list -> str -> bool` | check key presence |
 
 `toml_value`:
 
@@ -37,35 +37,35 @@ type toml_value =
   | TArr  of toml_value list;
 ```
 
-## 対応 subset
+## Supported subset
 
-| 機能 | 状態 |
+| feature | status |
 |---|---|
 | key/value (`key = value`) | ✓ |
 | section header (`[section]`) | ✓ |
-| dotted section (`[a.b.c]`) | ✓ (key を `a.b.c.k` に flatten) |
-| 整数 (`42` / `-7`) | ✓ |
+| dotted section (`[a.b.c]`) | ✓ (key flattened to `a.b.c.k`) |
+| integer (`42` / `-7`) | ✓ |
 | basic string (`"text"` + escape `\"` `\\` `\n` `\t`) | ✓ |
 | bool (`true` / `false`) | ✓ |
-| array (`[1, 2, 3]`、 primitives + 入れ子 array まで) | ✓ |
-| comment (`# ...` 行末まで、 string 内は除外) | ✓ |
-| empty line / leading whitespace | ✓ (skip) |
+| array (`[1, 2, 3]`, primitives + nested arrays) | ✓ |
+| comment (`# ...` to EOL, ignored inside strings) | ✓ |
+| empty line / leading whitespace | ✓ (skipped) |
 
-## 非対応 (将来 Phase or 別 lib)
+## Unsupported (future Phase or separate lib)
 
 - datetime (RFC 3339: `2026-06-23T19:30:00Z`)
 - multi-line basic string (`"""..."""`)
-- literal string (`'...'` raw、 escape 解釈なし)
-- dotted key (`a.b = 1` を top-level table の sub key として扱う)
+- literal string (`'...'` raw, no escape interpretation)
+- dotted key (`a.b = 1` treated as sub-key of top-level table)
 - inline table (`{ k1 = v1, k2 = v2 }`)
-- table array (`[[name]]` で同名 section の repeat)
+- table array (`[[name]]` repeating same-named section)
 - hex / octal / binary integer (`0xff` / `0o755` / `0b1010`)
 - float (`3.14` / `1e10`)
 - underscore separator (`1_000_000`)
 
-これらが必要な dogfood が出てきたら検討する。
+These will be considered when there's a dogfood that needs them.
 
-## 実行例
+## Run example
 
 ```sh
 dune exec mere -- contrib/toml/toml.mere
@@ -76,16 +76,16 @@ dune exec mere -- contrib/toml/toml.mere
 #   ...
 ```
 
-## backend サポート
+## Backend support
 
-| backend | 状態 |
+| backend | status |
 |---|---|
 | interp | ✓ |
 | C | ✓ |
 | LLVM | ✓ |
 | Wasm | ✓ |
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 [contrib/README.md](../README.md) 参照。
-graduation 先は `mere-toml` (別 repo、 pkg manager 完成後)。
+Stage 2 contrib (incubation). See [contrib/README.md](../README.md).
+Graduation target is `mere-toml` (separate repo, after pkg manager lands).

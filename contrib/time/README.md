@@ -1,59 +1,63 @@
 # contrib/time — time format helpers
 
-経過秒 (float) を人間可読 string に format する小さな helper 群。 `module Time
-{ format_elapsed, to_ms, to_us }` で名前空間化。
+Small helpers that format elapsed seconds (float) into human-readable strings.
+Namespaced as `module Time { format_elapsed, to_ms, to_us }`.
 
-## ファイル
+## Files
 
-| file | export | 行数 |
+| file | export | lines |
 |---|---|---|
-| `time.mere` | `module Time { format_elapsed, to_ms, to_us }` | 約 60 行 |
+| `time.mere` | `module Time { format_elapsed, to_ms, to_us }` | ~60 |
 
-## 使い方
+## Usage
 
 ```mere
 import "contrib/time/time.mere";
 
-// 経過秒を表示
+// Display elapsed seconds
 print (Time.format_elapsed 1.25);   // "1.25s"
 print (Time.format_elapsed 0.005);  // "5ms"
 print (Time.format_elapsed 12.34);  // "12.34s"
 
-// 整数変換
+// Integer conversion
 print (show (Time.to_ms 1.5));        // 1500
 print (show (Time.to_us 0.001234));   // 1234
 
-// 実時間 benchmark (interp only — `time` builtin が C/LLVM/Wasm 未対応)
+// Real-time benchmark (interp only — `time` builtin not yet on C/LLVM/Wasm)
 let t0 = time () in
-... 重い処理 ...
+... heavy work ...
 let dt = f_sub (time ()) t0 in
 print (Time.format_elapsed dt);
 ```
 
 ## API
 
-| fn | signature | 用途 |
+| fn | signature | purpose |
 |---|---|---|
-| `format_elapsed` | `float -> str` | `< 1s` → `"Nms"`、 `>= 1s` → `"N.NNs"` |
-| `to_ms` | `float -> int` | float 秒を ms 単位の int に |
-| `to_us` | `float -> int` | float 秒を us 単位の int に |
+| `format_elapsed` | `float -> str` | `< 1s` → `"Nms"`; `>= 1s` → `"N.NNs"` |
+| `to_ms` | `float -> int` | float seconds → int in ms |
+| `to_us` | `float -> int` | float seconds → int in us |
 
-## backend サポート
+## Backend support
 
-| backend | 状態 |
+| backend | status |
 |---|---|
 | interp | ✓ |
-| C | ✓ (Phase 43.1 で `TyFloat` が `ty_is_concrete` から漏れていた typo を fix) |
-| LLVM | ✓ (同上) |
-| Wasm | ✗ 当面 unsupported (user-defined fn の float parameter が i32 hardcode、 `codegen_wasm.ml:2587`。 Wasm の float fn signature 対応は別 Phase) |
+| C | ✓ (Phase 43.1 fixed a typo where `TyFloat` was missing from `ty_is_concrete`) |
+| LLVM | ✓ (same fix) |
+| Wasm | ✗ unsupported for now (user-defined fn's float parameter is i32-hardcoded at `codegen_wasm.ml:2587`; Wasm float fn signature is a separate Phase) |
 
-## MVP 限定
+## MVP limits
 
-- `now` / `since` / `bench` (実時間計測 helper) は本 lib に含めない — `time` builtin が C/LLVM/Wasm 未実装のため。 interp で benchmark したい場合は user 側で `time ()` を直接呼ぶ
-- date formatting (`YYYY-MM-DD HH:MM:SS` 等) も非対応 — Mere builtin に `strftime` 相当が無い
+- `now` / `since` / `bench` (real-time measurement helpers) are not included
+  in this lib — `time` builtin is not implemented on C/LLVM/Wasm. To benchmark
+  in interp, call `time ()` directly in user code.
+- Date formatting (`YYYY-MM-DD HH:MM:SS` etc.) is also not supported —
+  no `strftime` equivalent among Mere builtins.
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 [contrib/README.md](../README.md) 参照。
-graduation 先は `mere-time` (別 repo、 pkg manager 完成後)。 Wasm float fn 対応 +
-`time` builtin の C/LLVM/Wasm 実装 + date formatting が graduation 前の前提。
+Stage 2 contrib (incubation). See [contrib/README.md](../README.md).
+Graduation target is `mere-time` (separate repo, after pkg manager lands).
+Wasm float fn support + C/LLVM/Wasm implementations of `time` builtin + date
+formatting are pre-graduation prerequisites.

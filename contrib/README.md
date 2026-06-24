@@ -1,28 +1,28 @@
 # contrib/ — incubating libraries
 
-このディレクトリには **`examples/` より一段「lib」 寄り** の Mere コードを置く。
-すなわち、 「単体で挙動を見る demo」 ではなく **「他の Mere program に組み込んで
-使う前提の機能」**。
+This directory holds Mere code that is **one step closer to "library" than
+`examples/`**. That is, **functionality intended to be embedded in other Mere
+programs**, not "demos to observe behavior standalone".
 
-## 位置付け (3 段 lifecycle)
+## Position (3-stage lifecycle)
 
-| stage | 場所 | 性質 |
+| stage | location | nature |
 |---|---|---|
-| 1. example | `examples/foo.mere` | 単体実行で挙動を見る demo |
-| **2. contrib (incubation)** | `contrib/foo/` | **lib 候補。 main repo に同居して core 改修と atomic に refactor 可能** |
-| 3. 別 repo | `github.com/284km/mere-foo` | 独立 version / issues / PRs |
+| 1. example | `examples/foo.mere` | demo to observe behavior via standalone run |
+| **2. contrib (incubation)** | `contrib/foo/` | **library candidate. Lives in main repo so it can be refactored atomically with core changes** |
+| 3. separate repo | `github.com/284km/mere-foo` | independent versioning / issues / PRs |
 
-stage 2 → 3 の graduation 条件:
-- Mere 本体に **pkg manager** が実装され、 `mere fetch` 経由で外部 dep を解決できる
-- API が daily breaking でなくなる (= 1 ヶ月以上 signature 安定)
-- 外部 consumer (Mere 以外で書かれた user code) が 1 つ以上存在する
+Conditions for graduation stage 2 → 3:
+- Mere core ships a **pkg manager** that can resolve external deps via `mere fetch`
+- API has stopped breaking daily (= signature stable for 1+ month)
+- At least one external consumer (Mere user code outside this repo) exists
 
-## 使い方 (pkg manager 完成前)
+## How to use (before pkg manager lands)
 
-Mere は **`module M { ... }` + `import "path";` を実装済**。 Phase 41 で
-qualified pattern match (`match v with | Json.JNull -> ...`) を 4 backend
-codegen で動かせるようになったので、 contrib lib は **module wrap して名前
-空間化** することを推奨する (`contrib/json/json.mere` が見本)。
+Mere already implements **`module M { ... }` + `import "path";`**. Since Phase 41
+made qualified pattern match (`match v with | Json.JNull -> ...`) work across all
+4 backend codegens, the recommended approach is to **module-wrap contrib libs
+to namespace them** (`contrib/json/json.mere` is the reference).
 
 ```mere
 import "contrib/json/json.mere";
@@ -32,44 +32,44 @@ match v with
 | _ -> "other"
 ```
 
-copy-paste でも構わない:
+Copy-paste also works:
 
 ```sh
 cp contrib/json/json.mere my_project/
 ```
 
-旧 `examples/` 由来の top-level lib (現在 `contrib/json/writer.mere` /
-`contrib/markdown/*`) は引き続き使えるが、 名前空間化したい場合は順次
-`module Foo { ... }` 形に書き直していく。
+Top-level libs originating from `examples/` (currently
+`contrib/json/writer.mere` / `contrib/markdown/*`) still work, but to namespace
+them, rewrite into `module Foo { ... }` form incrementally.
 
 ```sh
-# 例: JSON を使いたい
+# Example: using JSON
 cp contrib/json/json.mere my_project/
-# my_project/main.mere の先頭で type json と parse_json が available になる
+# `type json` and `parse_json` become available at the top of my_project/main.mere
 ```
 
-ファイル単位で「先頭に concat する」 と prelude 同様に top-level let / type が
-inject される。 名前衝突を避けるため、 contrib の lib は **prefix 付き命名規約**
-(`json_parse / json_show / md_to_html / md_to_text`) を採用する。
+When concatenated at the head of a file, top-level lets / types are injected
+like a prelude. To avoid name collisions, contrib libs follow a **prefix
+naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 
-## 現在の contrib lib
+## Current contrib libs
 
-| lib | path | 機能 | module 化 |
+| lib | path | function | module-wrapped |
 |---|---|---|---|
-| **json** | `contrib/json/` | JSON parse (`Json.parse_json`) + write (compact / pretty) | parser のみ |
-| **markdown** | `contrib/markdown/` | Markdown 部分集合 → HTML (`MarkdownHtml.render`) / 平文 / TOC | to_html.mere ✓、 to_text / toc は top-level |
-| **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`、 RFC 4180 縮小) + writer (`CsvWriter.render` Person bound) | ✓ both |
-| **argparse** | `contrib/argparse/` | CLI 引数 parser (`Argparse.parse` flag/opt/positional) | ✓ module |
-| **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`、 `. ^ $ * + ?` + concat) | ✓ module |
+| **json** | `contrib/json/` | JSON parse (`Json.parse_json`) + write (compact / pretty) | parser only |
+| **markdown** | `contrib/markdown/` | Markdown subset → HTML (`MarkdownHtml.render`) / plain text / TOC | to_html.mere ✓, to_text / toc are top-level |
+| **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`, reduced RFC 4180) + writer (`CsvWriter.render` Person-bound) | ✓ both |
+| **argparse** | `contrib/argparse/` | CLI argument parser (`Argparse.parse` flag/opt/positional) | ✓ module |
+| **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`, `. ^ $ * + ?` + concat) | ✓ module |
 | **test** | `contrib/test/` | unit test framework (`Test.assert_eq` + `Test.summary` + `Test.exit_status`) | ✓ module |
-| **time** | `contrib/time/` | 経過秒 format helpers (`Time.format_elapsed` 等)。 Wasm 当面 unsupported | ✓ module (3 backend) |
-| **option** | `contrib/option/` | prelude 補完 helpers (`Option.zip` / `filter` / `or_else` / `is_none` / `unwrap_or_fail`) | ✓ module |
-| **path** | `contrib/path/` | POSIX path 操作 (`Path.join` / `basename` / `dirname` / `ext` / `drop_ext` / `has_ext`) | ✓ module |
-| **toml** | `contrib/toml/` | TOML 1.0 縮小 parser (`Toml.parse_toml` int / str / bool / array + nested section、 dotted key へ flatten) | ✓ module |
-| **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index)。 interp + C のみ | CLI script |
+| **time** | `contrib/time/` | elapsed-seconds format helpers (`Time.format_elapsed` etc.). Wasm unsupported for now | ✓ module (3 backends) |
+| **option** | `contrib/option/` | helpers complementing prelude (`Option.zip` / `filter` / `or_else` / `is_none` / `unwrap_or_fail`) | ✓ module |
+| **path** | `contrib/path/` | POSIX path operations (`Path.join` / `basename` / `dirname` / `ext` / `drop_ext` / `has_ext`) | ✓ module |
+| **toml** | `contrib/toml/` | TOML 1.0 reduced parser (`Toml.parse_toml` int / str / bool / array + nested section, flattened to dotted key) | ✓ module |
+| **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index). interp + C only | CLI script |
 
-将来追加候補は `internal design notes` §3 参照。
+Future candidates: see internal design notes §3.
 
-## 設計判断の根拠
+## Design rationale
 
-なぜ `examples/` から分けるかの詳細は internal design notes §3 を参照。
+For why this is split from `examples/`, see internal design notes §3.

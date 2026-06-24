@@ -1,26 +1,27 @@
 # contrib/path — POSIX path manipulation helpers
 
-POSIX (`/` separator) の path 操作 helper を `module Path { ... }` で提供。
-Mere 純 (builtin 追加なし、 string ops のみ) で実装。
+Path operation helpers for POSIX (`/` separator) provided in
+`module Path { ... }`. Implemented in pure Mere (no new builtins; string ops
+only).
 
-## ファイル
+## Files
 
-| file | export | 行数 |
+| file | export | lines |
 |---|---|---|
-| `path.mere` | `module Path { join, basename, dirname, ext, drop_ext, has_ext }` | 約 100 行 |
+| `path.mere` | `module Path { join, basename, dirname, ext, drop_ext, has_ext }` | ~100 |
 
 ## API
 
-| fn | signature | 動作 |
+| fn | signature | behavior |
 |---|---|---|
-| `Path.join` | `str -> str -> str` | 2 path を `/` で結合、 重複 `/` 防止、 絶対 path 優先 |
-| `Path.basename` | `str -> str` | 最後の `/` 以降を返す |
-| `Path.dirname` | `str -> str` | 最後の `/` までを返す (separator 無しなら `""`) |
-| `Path.ext` | `str -> str` | basename の最後の `.` 以降 (例 `.md`)。 dot-prefix (`.hidden`) は ext 無し扱い |
-| `Path.drop_ext` | `str -> str` | ext を取り除く |
-| `Path.has_ext` | `str -> str -> bool` | 指定 ext か |
+| `Path.join` | `str -> str -> str` | join 2 paths with `/`, dedupe `/`, absolute path wins |
+| `Path.basename` | `str -> str` | text after the last `/` |
+| `Path.dirname` | `str -> str` | text up to the last `/` (`""` if no separator) |
+| `Path.ext` | `str -> str` | text after the last `.` in basename (e.g. `.md`). Dot-prefixed (`.hidden`) is treated as no ext |
+| `Path.drop_ext` | `str -> str` | remove the ext |
+| `Path.has_ext` | `str -> str -> bool` | whether it has the specified ext |
 
-## 使い方
+## Usage
 
 ```mere
 import "contrib/path/path.mere";
@@ -33,15 +34,16 @@ Path.drop_ext "foo.md"                   // "foo"
 Path.has_ext "foo.md" ".md"              // true
 ```
 
-## 限定事項 (MVP)
+## MVP limits
 
-- POSIX `/` separator only — Windows `\` は非対応
-- normalization (`a/../b` → `b` 等) はサポートせず、 入力をそのまま操作
-- absolute path detection は `/` 始まりで判定
-- `Path.ext "archive.tar.gz"` は `.gz` を返す (`tar.gz` 等の複合 ext は呼出側で処理)
+- POSIX `/` separator only — Windows `\` not supported
+- no normalization (`a/../b` → `b`); operates on input as-is
+- absolute path detection by `/` prefix
+- `Path.ext "archive.tar.gz"` returns `.gz` (compound exts like `tar.gz` are
+  caller's responsibility)
 
-## 位置付け
+## Position
 
-stage 2 contrib (incubation)。 [contrib/README.md](../README.md) 参照。
-graduation 先は `mere-path` (別 repo、 pkg manager 完成後)。 normalization /
-glob 等の機能追加は graduation 前候補。
+Stage 2 contrib (incubation). See [contrib/README.md](../README.md).
+Graduation target is `mere-path` (separate repo, after pkg manager lands).
+Normalization / glob etc. are candidates for pre-graduation additions.
